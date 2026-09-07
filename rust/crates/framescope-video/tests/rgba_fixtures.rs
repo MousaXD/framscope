@@ -17,12 +17,8 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn current_decoded_frame_copies_to_owned_tightly_packed_rgba() {
-    let mut session = Session::open_path(
-        &fixture("h264-cfr.mp4"),
-        None,
-        CancellationToken::new(),
-    )
-    .expect("fixture should open");
+    let mut session = Session::open_path(&fixture("h264-cfr.mp4"), None, CancellationToken::new())
+        .expect("fixture should open");
 
     assert!(session.copy_current_frame_rgba().is_err());
 
@@ -44,17 +40,16 @@ fn current_decoded_frame_copies_to_owned_tightly_packed_rgba() {
         .next_frame()
         .expect("second decode should succeed")
         .expect("fixture should contain another frame");
-    assert_eq!(rgba.pixels, snapshot, "owned pixels changed after decoder advanced");
+    assert_eq!(
+        rgba.pixels, snapshot,
+        "owned pixels changed after decoder advanced"
+    );
 }
 
 #[test]
 fn seek_invalidates_the_previous_native_frame_copy_window() {
-    let mut session = Session::open_path(
-        &fixture("h264-cfr.mp4"),
-        None,
-        CancellationToken::new(),
-    )
-    .expect("fixture should open");
+    let mut session = Session::open_path(&fixture("h264-cfr.mp4"), None, CancellationToken::new())
+        .expect("fixture should open");
 
     session
         .next_frame()
