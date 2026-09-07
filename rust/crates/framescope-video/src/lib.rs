@@ -1,10 +1,18 @@
-//! Bounded video-container inspection.
+//! FrameScope video inspection and decoding.
 //!
-//! Phase 1 implements bounded ISO BMFF metadata inspection. Phase 2 introduces an FFmpeg-backed
-//! Android foundation behind a separate linkage boundary; decoder APIs are implemented separately.
+//! The original bounded ISO BMFF inspector remains available for lightweight Phase 1 metadata
+//! compatibility. Phase 2 adds a streaming FFmpeg-backed decoder whose timing is presentation-
+//! timestamp driven and safe for variable-frame-rate sources.
 
-use framescope_core::{FrameScopeError, VideoMetadata};
 use std::io::{Read, Seek, SeekFrom};
+
+pub use engine::{
+    CancellationToken, ObservedFrameRateMode, OpenOptions, VideoDecoder, VideoStreamSelection,
+};
+pub use framescope_core::{
+    CodecInfo, ContainerInfo, DecodedFrame, FrameScopeError, MediaDuration, MediaKind,
+    MediaTimestamp, Rational, StreamInfo, TimeBase, VideoInfo, VideoMetadata,
+};
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;
 
@@ -31,7 +39,10 @@ struct TrackFacts {
     sample_count: Option<u64>,
 }
 
-/// Inspect a seekable source without reading the entire video into RAM.
+/// Inspect a seekable ISO BMFF source without reading the entire video into RAM.
+///
+/// This compatibility API parses container metadata only. Use [`VideoDecoder`] for real stream
+/// discovery and frame decoding across the Phase 2 FFmpeg-supported containers/codecs.
 pub fn inspect_video<R: Read + Seek>(reader: &mut R) -> Result<VideoMetadata, FrameScopeError> {
     let file_len = reader.seek(SeekFrom::End(0))?;
     if file_len < 8 {
@@ -185,6 +196,7 @@ fn parse_mdia<R: Read + Seek>(
     Ok(())
 }
 
+mod engine;
 pub mod ffmpeg;
 mod iso;
 

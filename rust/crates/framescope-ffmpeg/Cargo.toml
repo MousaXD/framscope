@@ -6,3 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 links = "framescope_ffmpeg"
 build = "build.rs"
+
+[features]
+default = []
+# Host-only development/CI feature. Android always uses the pinned Agent 1 prefix.
+system-ffmpeg = []
+
+[build-dependencies]
+cc = "=1.2.37"

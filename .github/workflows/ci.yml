@@ -201,16 +201,26 @@ jobs:
   video-fixtures:
     name: video-fixtures
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install FFmpeg fixture tools
+      - name: Install FFmpeg fixture and development tools
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ffmpeg
+          sudo apt-get install --yes --no-install-recommends \
+            ffmpeg \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswscale-dev
           ffmpeg -version | head -n 1
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_HOST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_HOST_TOOLCHAIN"
 
       - name: Generate deterministic video fixtures
         run: bash ./scripts/generate-video-fixtures.sh
@@ -223,3 +233,11 @@ jobs:
           bytes="$(du -sb build/video-fixtures | cut -f1)"
           echo "fixture bytes: $bytes"
           test "$bytes" -le 1048576
+
+      - name: Clippy real video engine integration
+        working-directory: rust
+        run: cargo clippy -p framescope-video --features system-ffmpeg --all-targets -- -D warnings
+
+      - name: Test real video engine integration
+        working-directory: rust
+        run: cargo test -p framescope-video --features system-ffmpeg
