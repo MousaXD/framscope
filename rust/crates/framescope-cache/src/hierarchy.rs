@@ -29,10 +29,6 @@ pub struct CacheHierarchyStats {
 /// Lookup order is always RAM first, then compressed disk proxy storage. The hierarchy never
 /// promotes a proxy into `CachedFrame`; decoding proxy bytes back into RGBA is a rendering concern
 /// and cannot silently satisfy an original-quality request.
-///
-/// The disk tier is disposable. If it cannot be opened, the hierarchy keeps the RAM tier usable and
-/// records the disk failure. Preview navigation can then treat disk access as a recoverable miss and
-/// fall back to the authoritative source decoder.
 #[derive(Debug)]
 pub struct FrameCacheHierarchy {
     ram: RamFrameCache,
@@ -42,22 +38,45 @@ pub struct FrameCacheHierarchy {
 }
 
 impl FrameCacheHierarchy {
+    /// Open both cache tiers strictly.
+    ///
+    /// This constructor preserves the original fail-fast contract for callers that need disk-cache
+    /// initialization errors to be fatal or explicitly handled by the caller.
     pub fn open(
         disk_root: impl AsRef<Path>,
         ram_budget_bytes: usize,
         disk_budget_bytes: u64,
     ) -> Result<Self, DiskCacheError> {
+        let disk = DiskProxyCache::open(disk_root, disk_budget_bytes)?;
+        Ok(Self {
+            ram: RamFrameCache::new(ram_budget_bytes),
+            disk: Some(disk),
+            disk_budget_bytes,
+            disk_unavailable_reason: None,
+        })
+    }
+
+    /// Open the hierarchy while treating the disk proxy tier as disposable.
+    ///
+    /// If disk initialization fails, the RAM tier remains fully usable and the failure is retained
+    /// as a diagnostic. Preview navigation can then degrade disk access to authoritative source
+    /// decode instead of making the media request fail.
+    pub fn open_resilient(
+        disk_root: impl AsRef<Path>,
+        ram_budget_bytes: usize,
+        disk_budget_bytes: u64,
+    ) -> Self {
         let (disk, disk_unavailable_reason) = match DiskProxyCache::open(disk_root, disk_budget_bytes)
         {
             Ok(disk) => (Some(disk), None),
             Err(error) => (None, Some(error.to_string())),
         };
-        Ok(Self {
+        Self {
             ram: RamFrameCache::new(ram_budget_bytes),
             disk,
             disk_budget_bytes,
             disk_unavailable_reason,
-        })
+        }
     }
 
     pub fn lookup(&mut self, key: &FrameCacheKey) -> Result<CacheLookup, DiskCacheError> {
@@ -277,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_disk_tier_does_not_disable_ram_cache() {
+    fn resilient_open_keeps_ram_usable_when_disk_tier_is_unavailable() {
         let root = temp_root("disk-unavailable");
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_file(&root);
@@ -286,7 +305,7 @@ mod tests {
         let source = strong_source("source-d");
         let key = FrameCacheKey::new(&source, 0, FrameId(1)).unwrap();
         let missing = FrameCacheKey::new(&source, 0, FrameId(2)).unwrap();
-        let mut cache = FrameCacheHierarchy::open(&root, 1024, 1024).unwrap();
+        let mut cache = FrameCacheHierarchy::open_resilient(&root, 1024, 1024);
 
         assert!(!cache.disk_available());
         assert!(cache.disk_unavailable_reason().is_some());
