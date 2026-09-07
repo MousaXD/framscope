@@ -77,9 +77,40 @@ impl MicroscopeFailure {
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
+struct EphemeralIndexCleanup {
+    database_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl EphemeralIndexCleanup {
+    fn new(database_path: PathBuf) -> Self {
+        Self { database_path }
+    }
+
+    fn cleanup(&self) {
+        remove_if_present(&self.database_path);
+        remove_if_present(&sqlite_sidecar_path(&self.database_path, "-wal"));
+        remove_if_present(&sqlite_sidecar_path(&self.database_path, "-shm"));
+        if let Some(namespace) = self.database_path.parent() {
+            let _ = std::fs::remove_dir(namespace);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EphemeralIndexCleanup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+#[cfg(unix)]
 struct NavigationSession {
     _source_fd: OwnedFd,
     index: FrameIndex,
+    // Declared after `index` so the SQLite connection is dropped before cleanup removes the files.
+    _ephemeral_index_cleanup: Option<EphemeralIndexCleanup>,
     frame_count: u64,
     current: Option<FrameId>,
 }
@@ -172,6 +203,7 @@ fn open_session(
     let (cancellation, _operation) = operation_token(operation_id).map_err(from_frame_scope)?;
     let source_fd = duplicate_fd(fd).map_err(from_io)?;
     let source_identity = source_identity(source_fd.as_raw_fd());
+    let reusable_index = source_identity.is_reuse_safe();
 
     let probe = open_decoder(source_fd.as_fd(), cancellation.clone()).map_err(from_frame_scope)?;
     let stream_identity =
@@ -184,6 +216,11 @@ fn open_session(
         &stream_identity,
         operation_id,
     );
+    // Local variables drop in reverse declaration order. Declaring the cleanup guard before the
+    // SQLite index ensures any error after opening the index first closes the connection, then
+    // removes the operation-scoped database and sidecars.
+    let ephemeral_index_cleanup =
+        (!reusable_index).then(|| EphemeralIndexCleanup::new(index_path.clone()));
     let (mut index, _) = FrameIndex::open_or_create(index_path, source_identity, stream_identity)
         .map_err(from_index)?;
 
@@ -200,6 +237,7 @@ fn open_session(
     let session = NavigationSession {
         _source_fd: source_fd,
         index,
+        _ephemeral_index_cleanup: ephemeral_index_cleanup,
         frame_count,
         current,
     };
@@ -428,6 +466,22 @@ fn frame_index_path(
         .join(format!("stream-{}.sqlite3", stream.stream_index))
 }
 
+#[cfg(unix)]
+fn sqlite_sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
+
+#[cfg(unix)]
+fn remove_if_present(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
+}
+
 fn from_frame_scope(error: FrameScopeError) -> MicroscopeFailure {
     MicroscopeFailure::new(error.code(), error.to_string())
 }
@@ -606,6 +660,33 @@ mod tests {
             frame_index_path(root, &source, &stream, 11),
             frame_index_path(root, &source, &stream, 12)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ephemeral_cleanup_removes_database_sidecars_and_namespace() {
+        let root = std::env::temp_dir().join(format!(
+            "framescope-ephemeral-index-cleanup-{}",
+            std::process::id()
+        ));
+        let namespace = root.join("unverifiable-op-1");
+        std::fs::create_dir_all(&namespace).unwrap();
+        let database = namespace.join("stream-0.sqlite3");
+        let wal = sqlite_sidecar_path(&database, "-wal");
+        let shm = sqlite_sidecar_path(&database, "-shm");
+        std::fs::write(&database, b"db").unwrap();
+        std::fs::write(&wal, b"wal").unwrap();
+        std::fs::write(&shm, b"shm").unwrap();
+
+        {
+            let _cleanup = EphemeralIndexCleanup::new(database.clone());
+        }
+
+        assert!(!database.exists());
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        assert!(!namespace.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
