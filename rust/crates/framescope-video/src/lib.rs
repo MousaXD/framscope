@@ -17,6 +17,10 @@ pub use framescope_core::{
 pub use indexing::{
     FrameIndexDecoder, IndexingError, IndexingOptions, IndexingReport, build_or_resume_frame_index,
 };
+pub use navigation::{
+    NavigationDecoder, NavigationError, NavigationResult, TimestampSelection, navigate_to_frame,
+    navigate_to_timestamp, resolve_timestamp,
+};
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;
 
@@ -204,6 +208,7 @@ mod engine;
 pub mod ffmpeg;
 mod indexing;
 mod iso;
+mod navigation;
 
 use iso::{
     parse_hdlr_is_video, parse_mdhd, parse_minf_sample_count, parse_mvhd, parse_tkhd,
