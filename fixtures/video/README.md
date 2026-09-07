@@ -20,15 +20,15 @@ These fixtures prove only that CI can generate known media for tests. Their pres
 ## Local use
 
 ```bash
-./scripts/generate-video-fixtures.sh
-./scripts/verify-video-fixtures.py
+bash ./scripts/generate-video-fixtures.sh
+python3 ./scripts/verify-video-fixtures.py
 ```
 
 To generate into another directory:
 
 ```bash
-./scripts/generate-video-fixtures.sh /tmp/framescope-fixtures
-./scripts/verify-video-fixtures.py /tmp/framescope-fixtures
+bash ./scripts/generate-video-fixtures.sh /tmp/framescope-fixtures
+python3 ./scripts/verify-video-fixtures.py /tmp/framescope-fixtures
 ```
 
 The generator intentionally fails if its FFmpeg binary lacks one of the encoders needed to create the complete Phase 2 fixture set. That is a fixture-generation prerequisite, not an application codec-support check.
