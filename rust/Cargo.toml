@@ -9,6 +9,7 @@ members = [
     "crates/framescope-grouping",
     "crates/framescope-grouping-session",
     "crates/framescope-group-navigation",
+    "crates/framescope-group-navigation-video",
     "crates/framescope-ffi",
     "crates/framescope-ffmpeg",
     "crates/framescope-test-support",
