@@ -26,8 +26,11 @@ internal object MicroscopeTransformMath {
         val safeZoomChange = zoomChange.takeIf { it.isFinite() && it > 0f } ?: 1f
         val nextScale = (safeCurrentScale * safeZoomChange)
             .coerceIn(MIN_SCALE, MAX_SCALE)
+        val viewportIsUsable =
+            viewportWidth.isFinite() && viewportHeight.isFinite() &&
+                viewportWidth > 0f && viewportHeight > 0f
 
-        if (nextScale <= MIN_SCALE || viewportWidth <= 0f || viewportHeight <= 0f) {
+        if (nextScale <= MIN_SCALE || !viewportIsUsable) {
             return MicroscopeViewportTransform(scale = nextScale)
         }
 
