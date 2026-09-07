@@ -16,6 +16,11 @@ class VideoMetadataFormatterTest {
     }
 
     @Test
+    fun unavailableDurationStaysUnknown() {
+        assertEquals("Unknown", VideoMetadataFormatter.duration(null))
+    }
+
+    @Test
     fun formatsEstimatedFpsWithoutFakePrecision() {
         assertEquals("29.97", VideoMetadataFormatter.fps(29.97))
         assertEquals("30", VideoMetadataFormatter.fps(30.0))
