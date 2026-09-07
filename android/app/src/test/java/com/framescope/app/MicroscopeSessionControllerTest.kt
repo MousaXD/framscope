@@ -55,6 +55,80 @@ class MicroscopeSessionControllerTest {
     }
 
     @Test
+    fun supersededOpenFailureIsReportedAsStale() {
+        val firstEntered = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val native = FakeNativeBridge(
+            firstOpenEntered = firstEntered,
+            releaseFirstOpen = releaseFirst,
+            firstOpenFails = true,
+        )
+        val controller = MicroscopeSessionController(native, FakeFrameBridge())
+        val firstResult = AtomicReference<NativeMicroscope>()
+
+        val firstThread = Thread {
+            firstResult.set(controller.open(fd = 11, operationId = 1, cacheRoot = "cache"))
+        }
+        firstThread.start()
+        assertTrue(firstEntered.await(2, TimeUnit.SECONDS))
+
+        assertTrue(controller.open(fd = 12, operationId = 2, cacheRoot = "cache") is NativeMicroscope.Success)
+        releaseFirst.countDown()
+        firstThread.join(2_000)
+
+        val late = firstResult.get()
+        assertTrue(late is NativeMicroscope.Failure)
+        late as NativeMicroscope.Failure
+        assertEquals("stale_result", late.code)
+        assertEquals(2L, controller.currentSnapshot()?.sessionId)
+    }
+
+    @Test
+    fun supersededNavigationFailureIsReportedAsStale() {
+        val jumpEntered = CountDownLatch(1)
+        val releaseJump = CountDownLatch(1)
+        val native = FakeNativeBridge(
+            jumpEntered = jumpEntered,
+            releaseJump = releaseJump,
+            blockedJumpFails = true,
+        )
+        val controller = MicroscopeSessionController(native, FakeFrameBridge())
+        assertTrue(controller.open(11, 7, "cache") is NativeMicroscope.Success)
+        val firstResult = AtomicReference<NativeMicroscope>()
+
+        val firstThread = Thread {
+            firstResult.set(controller.jumpToFrame(1))
+        }
+        firstThread.start()
+        assertTrue(jumpEntered.await(2, TimeUnit.SECONDS))
+
+        val newer = controller.step(1)
+        assertTrue(newer is NativeMicroscope.Success)
+        releaseJump.countDown()
+        firstThread.join(2_000)
+
+        val late = firstResult.get()
+        assertTrue(late is NativeMicroscope.Failure)
+        late as NativeMicroscope.Failure
+        assertEquals("stale_result", late.code)
+    }
+
+    @Test
+    fun navigationSessionIdentityMismatchIsNotDisguisedAsStale() {
+        val native = FakeNativeBridge(navigationSessionOffset = 1)
+        val controller = MicroscopeSessionController(native, FakeFrameBridge())
+        assertTrue(controller.open(11, 7, "cache") is NativeMicroscope.Success)
+
+        val result = controller.jumpToFrame(1)
+
+        assertTrue(result is NativeMicroscope.Failure)
+        result as NativeMicroscope.Failure
+        assertEquals("session_identity_mismatch", result.code)
+        assertEquals(7L, controller.currentSnapshot()?.sessionId)
+        assertEquals(0L, controller.currentSnapshot()?.currentFrame?.frameId)
+    }
+
+    @Test
     fun navigationMakesInFlightFrameResultStaleBeforeCopy() {
         val prepareEntered = CountDownLatch(1)
         val releasePrepare = CountDownLatch(1)
@@ -88,6 +162,48 @@ class MicroscopeSessionControllerTest {
     }
 
     @Test
+    fun supersededFramePreparationFailureIsReportedAsStale() {
+        val prepareEntered = CountDownLatch(1)
+        val releasePrepare = CountDownLatch(1)
+        val frameBridge = FakeFrameBridge(
+            prepareEntered = prepareEntered,
+            releasePrepare = releasePrepare,
+            prepareFails = true,
+        )
+        val controller = MicroscopeSessionController(FakeNativeBridge(), frameBridge)
+        assertTrue(controller.open(11, 1, "cache") is NativeMicroscope.Success)
+        val frameResult = AtomicReference<NativeFrameCopy>()
+
+        val frameThread = Thread {
+            frameResult.set(controller.loadCurrentFrame())
+        }
+        frameThread.start()
+        assertTrue(prepareEntered.await(2, TimeUnit.SECONDS))
+        assertTrue(controller.jumpToFrame(1) is NativeMicroscope.Success)
+        releasePrepare.countDown()
+        frameThread.join(2_000)
+
+        val stale = frameResult.get()
+        assertTrue(stale is NativeFrameCopy.Failure)
+        stale as NativeFrameCopy.Failure
+        assertEquals("stale_result", stale.code)
+        assertEquals(0, frameBridge.copyCalls)
+    }
+
+    @Test
+    fun copiedDescriptorMismatchIsTypedIdentityFailure() {
+        val frameBridge = FakeFrameBridge(copyFrameIdOffset = 1)
+        val controller = MicroscopeSessionController(FakeNativeBridge(), frameBridge)
+        assertTrue(controller.open(11, 1, "cache") is NativeMicroscope.Success)
+
+        val result = controller.loadCurrentFrame()
+
+        assertTrue(result is NativeFrameCopy.Failure)
+        result as NativeFrameCopy.Failure
+        assertEquals("presentation_identity_mismatch", result.code)
+    }
+
+    @Test
     fun closeInvalidatesSessionAndClosesNativeHandleOnce() {
         val native = FakeNativeBridge()
         val controller = MicroscopeSessionController(native, FakeFrameBridge())
@@ -109,6 +225,11 @@ class MicroscopeSessionControllerTest {
     private class FakeNativeBridge(
         private val firstOpenEntered: CountDownLatch? = null,
         private val releaseFirstOpen: CountDownLatch? = null,
+        private val firstOpenFails: Boolean = false,
+        private val jumpEntered: CountDownLatch? = null,
+        private val releaseJump: CountDownLatch? = null,
+        private val blockedJumpFails: Boolean = false,
+        private val navigationSessionOffset: Long = 0,
     ) : NativeBridge {
         val closedSessionIds: MutableList<Long> = Collections.synchronizedList(mutableListOf())
 
@@ -125,6 +246,9 @@ class MicroscopeSessionControllerTest {
             if (operationId == 1L && firstOpenEntered != null && releaseFirstOpen != null) {
                 firstOpenEntered.countDown()
                 check(releaseFirstOpen.await(2, TimeUnit.SECONDS))
+                if (firstOpenFails) {
+                    return NativeMicroscope.Failure("decoder_error", "delayed failure", "test-engine")
+                }
             }
             return NativeMicroscope.Success(
                 session = snapshot(sessionId = operationId, frameId = 0),
@@ -132,19 +256,36 @@ class MicroscopeSessionControllerTest {
             )
         }
 
-        override fun jumpMicroscopeFrame(sessionId: Long, frameId: Long): NativeMicroscope =
-            NativeMicroscope.Success(snapshot(sessionId, frameId), "test-engine")
+        override fun jumpMicroscopeFrame(sessionId: Long, frameId: Long): NativeMicroscope {
+            if (jumpEntered != null && releaseJump != null) {
+                jumpEntered.countDown()
+                check(releaseJump.await(2, TimeUnit.SECONDS))
+                if (blockedJumpFails) {
+                    return NativeMicroscope.Failure("decoder_error", "delayed navigation failure", "test-engine")
+                }
+            }
+            return NativeMicroscope.Success(
+                snapshot(sessionId + navigationSessionOffset, frameId),
+                "test-engine",
+            )
+        }
 
         override fun stepMicroscope(sessionId: Long, delta: Int): NativeMicroscope {
             val current = if (delta > 0) 1L else 0L
-            return NativeMicroscope.Success(snapshot(sessionId, current), "test-engine")
+            return NativeMicroscope.Success(
+                snapshot(sessionId + navigationSessionOffset, current),
+                "test-engine",
+            )
         }
 
         override fun jumpMicroscopeTimestampUs(
             sessionId: Long,
             timestampUs: Long,
             selection: TimestampSelectionPolicy,
-        ): NativeMicroscope = NativeMicroscope.Success(snapshot(sessionId, 0), "test-engine")
+        ): NativeMicroscope = NativeMicroscope.Success(
+            snapshot(sessionId + navigationSessionOffset, 0),
+            "test-engine",
+        )
 
         override fun closeMicroscopeSession(sessionId: Long): Boolean {
             closedSessionIds.add(sessionId)
@@ -155,6 +296,8 @@ class MicroscopeSessionControllerTest {
     private class FakeFrameBridge(
         private val prepareEntered: CountDownLatch? = null,
         private val releasePrepare: CountDownLatch? = null,
+        private val prepareFails: Boolean = false,
+        private val copyFrameIdOffset: Long = 0,
     ) : NativeMicroscopeFrameBridge {
         var copyCalls: Int = 0
 
@@ -162,6 +305,13 @@ class MicroscopeSessionControllerTest {
             if (prepareEntered != null && releasePrepare != null) {
                 prepareEntered.countDown()
                 check(releasePrepare.await(2, TimeUnit.SECONDS))
+            }
+            if (prepareFails) {
+                return NativeFramePreparation.Failure(
+                    code = "decoder_error",
+                    message = "delayed preparation failure",
+                    engine = "test-engine",
+                )
             }
             return NativeFramePreparation.Success(
                 frame = PreparedMicroscopeFrame(
@@ -179,7 +329,11 @@ class MicroscopeSessionControllerTest {
 
         override fun copy(frame: PreparedMicroscopeFrame): NativeFrameCopy {
             copyCalls += 1
-            return NativeFrameCopy.Success(frame, ByteBuffer.allocateDirect(frame.byteLen).asReadOnlyBuffer())
+            val copiedFrame = frame.copy(frameId = frame.frameId + copyFrameIdOffset)
+            return NativeFrameCopy.Success(
+                copiedFrame,
+                ByteBuffer.allocateDirect(frame.byteLen).asReadOnlyBuffer(),
+            )
         }
     }
 
