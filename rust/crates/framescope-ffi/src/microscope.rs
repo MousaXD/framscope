@@ -285,12 +285,7 @@ fn open_session(
     drop(probe);
 
     let cache_root = Path::new(cache_root);
-    let index_path = frame_index_path(
-        cache_root,
-        &source_identity,
-        &stream_identity,
-        operation_id,
-    );
+    let index_path = frame_index_path(cache_root, &source_identity, &stream_identity, operation_id);
     // Local variables drop in reverse declaration order. Declaring the cleanup guard before the
     // SQLite index ensures any error after opening the index first closes the connection, then
     // removes the operation-scoped database and sidecars.
