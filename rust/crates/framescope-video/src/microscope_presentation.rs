@@ -120,7 +120,7 @@ mod tests {
 
         assert_eq!(presentation.frame_id(), FrameId(4));
         assert_eq!(presentation.target.entry, entry(4));
-        assert_eq!(presentation.pixels.bytes(), &[7; 16]);
+        assert_eq!(presentation.pixels.pixels(), &[7; 16]);
         assert_eq!(presentation.source, CachedFrameSource::Ram);
         assert_eq!(presentation.decoded_frames, 0);
     }
