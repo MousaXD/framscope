@@ -4,7 +4,7 @@
 //! stays acyclic. Groups remain a derived view over authoritative Phase 3 frame identities and
 //! timestamps; no frame is deleted or renumbered.
 
-use framescope_cache::{FrameId, FrameIndexEntry, OwnedRgbaFrame};
+use framescope_cache::{FrameIndexEntry, OwnedRgbaFrame};
 use framescope_core::MediaTimestamp;
 use framescope_perceptual::{
     HybridDecision, HybridSimilarityEngine, HybridSimilarityError, HybridSimilarityPolicy,
@@ -136,7 +136,7 @@ fn active_group(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framescope_cache::KeyframeAnchor;
+    use framescope_cache::{FrameId, KeyframeAnchor};
     use framescope_core::{MediaDuration, TimeBase};
 
     fn time_base() -> TimeBase {
