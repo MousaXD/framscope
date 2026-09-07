@@ -78,12 +78,18 @@ struct RgbaNavigationResult {
     fell_back_to_stream_start: bool,
 }
 
-/// Navigate to an indexed frame using the full-quality RAM tier as a true hot cache.
+/// Navigate to an indexed frame using the full-quality RAM tier as a true hot cache when the
+/// source has a reuse-safe identity.
 ///
 /// A RAM hit performs no source decode. On a miss, navigation uses the persisted safe earlier
 /// keyframe anchor, decodes forward while reconciling exact presentation metadata, then inserts the
 /// owned RGBA payload into the byte-bounded RAM cache. The disk proxy tier is intentionally not read
 /// here because this API promises source-quality pixels.
+///
+/// Some SAF providers expose readable descriptors without enough stable content-derived evidence to
+/// build a reusable cache key. Those sources remain fully navigable: caching is disabled for that
+/// request and the authoritative source is decoded directly. Weak identity therefore reduces
+/// performance only; it never causes unsafe cache aliasing and never makes readable media unviewable.
 pub fn navigate_to_frame_cached<D, F>(
     index: &FrameIndex,
     cache: &mut FrameCacheHierarchy,
@@ -98,23 +104,29 @@ where
     let index_entry = index
         .entry(frame_id)?
         .ok_or(CachedNavigationError::FrameNotIndexed)?;
-    let key = FrameCacheKey::new(
+    let key = match FrameCacheKey::new(
         index.source_identity(),
         index.stream_identity().stream_index,
         frame_id,
-    )?;
+    ) {
+        Ok(key) => Some(key),
+        Err(FrameCacheError::UnsafeSourceIdentity) => None,
+        Err(error) => return Err(error.into()),
+    };
 
-    if let Some(cached) = cache.lookup_full(&key) {
-        return Ok(CachedNavigationResult {
-            frame_id,
-            index_entry,
-            pixels: cached.pixels,
-            source: CachedFrameSource::Ram,
-            decoded_frames: 0,
-            used_keyframe_seek: false,
-            fell_back_to_stream_start: false,
-            cache_insert_result: None,
-        });
+    if let Some(key) = key.as_ref() {
+        if let Some(cached) = cache.lookup_full(key) {
+            return Ok(CachedNavigationResult {
+                frame_id,
+                index_entry,
+                pixels: cached.pixels,
+                source: CachedFrameSource::Ram,
+                decoded_frames: 0,
+                used_keyframe_seek: false,
+                fell_back_to_stream_start: false,
+                cache_insert_result: None,
+            });
+        }
     }
 
     let decoded = navigate_rgba_to_frame(index, &mut open_fresh_decoder, frame_id)?;
@@ -124,9 +136,11 @@ where
         decoded.frame.stride_bytes,
         decoded.frame.pixels,
     )?;
-    let insert_result = cache.insert_full(CachedFrame {
-        key,
-        pixels: pixels.clone(),
+    let cache_insert_result = key.map(|key| {
+        cache.insert_full(CachedFrame {
+            key,
+            pixels: pixels.clone(),
+        })
     });
 
     Ok(CachedNavigationResult {
@@ -137,7 +151,7 @@ where
         decoded_frames: decoded.decoded_frames,
         used_keyframe_seek: decoded.used_keyframe_seek,
         fell_back_to_stream_start: decoded.fell_back_to_stream_start,
-        cache_insert_result: Some(insert_result),
+        cache_insert_result,
     })
 }
 
@@ -415,10 +429,9 @@ mod tests {
         ))
     }
 
-    fn complete_index() -> (PathBuf, FrameIndex) {
+    fn complete_index_with_source(source: SourceIdentity) -> (PathBuf, FrameIndex) {
         let path = temp_path("index.sqlite");
         let identity = FrameIndexStreamIdentity::from_stream(&stream()).unwrap();
-        let source = SourceIdentity::new(100, None, Some("cached-navigation".into()));
         let (mut index, disposition) = FrameIndex::open_or_create(&path, source, identity).unwrap();
         assert_eq!(disposition, FrameIndexOpenDisposition::Created);
         index.mark_building().unwrap();
@@ -453,6 +466,14 @@ mod tests {
         index.append_batch(&entries).unwrap();
         index.mark_complete().unwrap();
         (path, index)
+    }
+
+    fn complete_index() -> (PathBuf, FrameIndex) {
+        complete_index_with_source(SourceIdentity::new(
+            100,
+            None,
+            Some("cached-navigation".into()),
+        ))
     }
 
     fn fake_decoder(counter: Arc<SharedAtomicU64>) -> FakeRgbaDecoder {
@@ -499,6 +520,49 @@ mod tests {
         assert_eq!(second.decoded_frames, 0);
         assert_eq!(counter.load(Ordering::Relaxed), decoded_after_first);
         assert_eq!(first.pixels.pixels(), second.pixels.pixels());
+
+        drop(index);
+        let _ = std::fs::remove_file(index_path);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn weak_source_identity_decodes_without_entering_reusable_cache() {
+        let weak = SourceIdentity::metadata_only(Some(100), None, Some("provider-name".into()));
+        let (index_path, index) = complete_index_with_source(weak);
+        let cache_root = temp_path("weak-cache");
+        let mut cache = FrameCacheHierarchy::open(&cache_root, 1024, 1024).unwrap();
+        let counter = Arc::new(SharedAtomicU64::new(0));
+
+        let first = navigate_to_frame_cached(
+            &index,
+            &mut cache,
+            || Ok(fake_decoder(counter.clone())),
+            FrameId(4),
+        )
+        .unwrap();
+        assert_eq!(first.source, CachedFrameSource::Decoded);
+        assert_eq!(first.cache_insert_result, None);
+        assert!(first.decoded_frames > 0);
+        let decoded_after_first = counter.load(Ordering::Relaxed);
+        let stats_after_first = cache.stats();
+        assert_eq!(stats_after_first.ram.resident_frames, 0);
+        assert_eq!(stats_after_first.ram.insertions, 0);
+
+        let second = navigate_to_frame_cached(
+            &index,
+            &mut cache,
+            || Ok(fake_decoder(counter.clone())),
+            FrameId(4),
+        )
+        .unwrap();
+        assert_eq!(second.source, CachedFrameSource::Decoded);
+        assert_eq!(second.cache_insert_result, None);
+        assert!(counter.load(Ordering::Relaxed) > decoded_after_first);
+        let stats_after_second = cache.stats();
+        assert_eq!(stats_after_second.ram.resident_frames, 0);
+        assert_eq!(stats_after_second.ram.insertions, 0);
+        assert_eq!(stats_after_second.disk.hits, 0);
 
         drop(index);
         let _ = std::fs::remove_file(index_path);
