@@ -7,6 +7,7 @@ import com.framescope.app.data.FrameScopeRepository
 import com.framescope.app.data.InspectedVideo
 import com.framescope.app.data.InspectionProgress
 import com.framescope.app.data.VideoOpenException
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,7 +58,7 @@ class MainViewModel(
     val uiState: StateFlow<FrameScopeUiState> = _uiState.asStateFlow()
 
     private var inspectJob: Job? = null
-    private var inspectionGeneration: Long = 0
+    private val inspectionGeneration = AtomicLong(0)
 
     init {
         viewModelScope.launch {
@@ -79,14 +80,13 @@ class MainViewModel(
 
     fun onPickerStarted() {
         cancelRunningInspection()
-        inspectionGeneration += 1
+        inspectionGeneration.incrementAndGet()
         _uiState.update { it.copy(videoState = VideoInspectionState.Picking) }
     }
 
     fun onVideoSelected(uri: String) {
         cancelRunningInspection()
-        inspectionGeneration += 1
-        val generation = inspectionGeneration
+        val generation = inspectionGeneration.incrementAndGet()
 
         inspectJob = viewModelScope.launch {
             publishIfCurrent(generation, VideoInspectionState.Opening)
@@ -98,7 +98,7 @@ class MainViewModel(
                     }
                     publishIfCurrent(generation, nextState)
                 }.onSuccess { video ->
-                    if (generation == inspectionGeneration) {
+                    if (generation == inspectionGeneration.get()) {
                         _uiState.update {
                             it.copy(
                                 engineStatus = EngineStatus.Ready(video.engine),
@@ -107,7 +107,7 @@ class MainViewModel(
                         }
                     }
                 }.onFailure { error ->
-                    if (generation == inspectionGeneration) {
+                    if (generation == inspectionGeneration.get()) {
                         val bridgeError = error as? VideoOpenException
                         _uiState.update {
                             it.copy(
@@ -126,13 +126,13 @@ class MainViewModel(
     }
 
     fun cancelInspection() {
-        inspectionGeneration += 1
+        inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
         _uiState.update { it.copy(videoState = VideoInspectionState.Cancelled) }
     }
 
     fun onPickerCancelled() {
-        inspectionGeneration += 1
+        inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
         _uiState.update { it.copy(videoState = VideoInspectionState.Cancelled) }
     }
@@ -151,7 +151,7 @@ class MainViewModel(
         generation: Long,
         state: VideoInspectionState,
     ) {
-        if (generation == inspectionGeneration) {
+        if (generation == inspectionGeneration.get()) {
             _uiState.update { it.copy(videoState = state) }
         }
     }
