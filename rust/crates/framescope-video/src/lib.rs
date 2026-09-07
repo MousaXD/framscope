@@ -46,7 +46,10 @@ pub fn inspect_video<R: Read + Seek>(reader: &mut R) -> Result<VideoMetadata, Fr
 
     while pos < file_len {
         let header = read_box_header(reader, pos, file_len)?;
-        if matches!(&header.kind, b"ftyp" | b"moov" | b"mdat" | b"free" | b"wide") {
+        if matches!(
+            &header.kind,
+            b"ftyp" | b"moov" | b"mdat" | b"free" | b"wide"
+        ) {
             saw_iso_box = true;
         }
         if &header.kind == b"moov" {
@@ -173,8 +176,7 @@ fn parse_mdia<R: Read + Seek>(
             b"mdhd" => facts.duration = parse_mdhd(reader, header)?,
             b"hdlr" => facts.is_video = parse_hdlr_is_video(reader, header)?,
             b"minf" => {
-                facts.sample_count =
-                    parse_minf_sample_count(reader, header.data_start, header.end)?
+                facts.sample_count = parse_minf_sample_count(reader, header.data_start, header.end)?
             }
             _ => {}
         }
