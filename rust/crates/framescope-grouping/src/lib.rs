@@ -9,7 +9,7 @@ use framescope_core::MediaTimestamp;
 use framescope_perceptual::{
     HybridDecision, HybridSimilarityEngine, HybridSimilarityError, HybridSimilarityPolicy,
 };
-use framescope_similarity::{FrameGroup, SimilarityError, SimilarityScore, SIMILARITY_SCALE};
+use framescope_similarity::{FrameGroup, SIMILARITY_SCALE, SimilarityError, SimilarityScore};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -198,7 +198,12 @@ mod tests {
     fn preserves_vfr_timing_and_authoritative_frame_ids() {
         let mut grouper = HybridFrameGrouper::new(policy()).unwrap();
         assert!(grouper.push(&entry(0, 0, 40), solid(20)).unwrap().is_none());
-        assert!(grouper.push(&entry(1, 40, 85), solid(22)).unwrap().is_none());
+        assert!(
+            grouper
+                .push(&entry(1, 40, 85), solid(22))
+                .unwrap()
+                .is_none()
+        );
         let first = grouper
             .push(&entry(2, 125, 33), solid(120))
             .unwrap()
@@ -223,10 +228,7 @@ mod tests {
         let mut grouper = HybridFrameGrouper::new(policy()).unwrap();
         assert!(grouper.push(&entry(0, 0, 40), solid(0)).unwrap().is_none());
         assert!(grouper.push(&entry(1, 40, 40), solid(5)).unwrap().is_none());
-        let completed = grouper
-            .push(&entry(2, 80, 40), solid(10))
-            .unwrap()
-            .unwrap();
+        let completed = grouper.push(&entry(2, 80, 40), solid(10)).unwrap().unwrap();
 
         assert_eq!(completed.first_frame, FrameId(0));
         assert_eq!(completed.last_frame, FrameId(1));
@@ -241,10 +243,12 @@ mod tests {
             minimum_luma_similarity: 9_000,
         })
         .unwrap();
-        assert!(grouper
-            .push(&entry(0, 0, 40), gradient(false))
-            .unwrap()
-            .is_none());
+        assert!(
+            grouper
+                .push(&entry(0, 0, 40), gradient(false))
+                .unwrap()
+                .is_none()
+        );
         let completed = grouper
             .push(&entry(1, 40, 40), gradient(true))
             .unwrap()
