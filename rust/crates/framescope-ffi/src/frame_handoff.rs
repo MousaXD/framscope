@@ -54,16 +54,31 @@ fn copy_into_direct_buffer(
         Ok(capacity) => capacity,
         Err(_) => return COPY_INVALID_BUFFER,
     };
+    if capacity == 0 {
+        return copy_result(microscope::copy_prepared_frame(
+            session_id,
+            generation,
+            &mut [],
+        ));
+    }
     let address = match env.get_direct_buffer_address(destination) {
         Ok(address) => address,
         Err(_) => return COPY_INVALID_BUFFER,
     };
 
     // SAFETY: JNI guarantees that GetDirectBufferAddress points to `capacity` writable bytes for
-    // this direct ByteBuffer. The local `JByteBuffer` reference remains alive for the entire slice
-    // lifetime, and the slice is never stored or returned beyond this synchronous JNI call.
+    // this non-empty direct ByteBuffer. The local `JByteBuffer` reference remains alive for the
+    // entire slice lifetime, and the slice is never stored or returned beyond this synchronous call.
     let destination = unsafe { std::slice::from_raw_parts_mut(address, capacity) };
-    match microscope::copy_prepared_frame(session_id, generation, destination) {
+    copy_result(microscope::copy_prepared_frame(
+        session_id,
+        generation,
+        destination,
+    ))
+}
+
+fn copy_result(result: Result<usize, microscope::MicroscopeFailure>) -> jlong {
+    match result {
         Ok(copied) => i64::try_from(copied).unwrap_or(COPY_BRIDGE_ERROR),
         Err(error) => copy_error_code(error.code()),
     }
