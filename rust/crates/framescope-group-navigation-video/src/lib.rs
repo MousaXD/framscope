@@ -12,7 +12,9 @@ use framescope_group_navigation::{
     SimilaritySourceError, open_or_build_group_navigation,
 };
 use framescope_perceptual::HybridSimilarityPolicy;
-use framescope_video::{CancellationToken, OpenOptions, VideoDecoder};
+use framescope_video::{
+    CancellationToken, OpenOptions, VideoDecoder, VideoStreamSelection,
+};
 use std::path::Path;
 
 #[cfg(unix)]
@@ -77,7 +79,9 @@ pub fn open_or_build_group_navigation_from_fd(
         || {
             let decoder = VideoDecoder::open_file_descriptor_with_options(
                 fd,
-                OpenOptions::default(),
+                OpenOptions {
+                    stream_selection: VideoStreamSelection::Index(expected_stream.stream_index),
+                },
                 cancellation.clone(),
             )
             .map_err(source_from_frame_scope)?;
