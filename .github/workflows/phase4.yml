@@ -53,4 +53,4 @@ jobs:
       - name: Exercise bounded long-stream grouping contract
         working-directory: rust
         run: |
-          cargo test -p framescope-grouping-session long_stream_is_consumed_incrementally_without_collecting_inputs -- --exact
+          cargo test -p framescope-grouping-session tests::long_stream_is_consumed_incrementally_without_collecting_inputs -- --exact
