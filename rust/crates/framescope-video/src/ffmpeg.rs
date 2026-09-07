@@ -1,26 +1,24 @@
 //! FFmpeg backend availability boundary.
-//!
-//! Agent 1 establishes Android linkage only. Decoder APIs belong to the Phase 2 video-engine
-//! implementation and must remain above this low-level probe.
 
-/// Force a link-time reference to the pinned Android FFmpeg libraries.
+/// Force a link-time reference to the configured FFmpeg libraries.
 pub fn link_probe() -> u32 {
-    #[cfg(target_os = "android")]
-    {
-        framescope_ffmpeg::link_probe()
-    }
+    framescope_ffmpeg::link_probe()
+}
 
-    #[cfg(not(target_os = "android"))]
-    {
-        0
-    }
+/// Whether this build contains the native decoder backend.
+pub const fn backend_available() -> bool {
+    framescope_ffmpeg::backend_available()
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(feature = "system-ffmpeg"))]
     #[test]
-    fn host_probe_is_explicitly_unavailable() {
-        assert_eq!(super::link_probe(), 0);
+    fn default_host_build_is_explicitly_unavailable() {
+        #[cfg(not(target_os = "android"))]
+        {
+            assert_eq!(super::link_probe(), 0);
+            assert!(!super::backend_available());
+        }
     }
 }
