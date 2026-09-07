@@ -6,6 +6,30 @@ interface NativeBridge {
     fun version(): Result<String>
     fun inspectVideoFd(fd: Int, operationId: Long): NativeInspection
     fun cancelInspection(operationId: Long): Boolean = false
+
+    fun openMicroscopeSession(
+        fd: Int,
+        operationId: Long,
+        cacheRoot: String,
+    ): NativeMicroscope = unsupportedMicroscope()
+
+    fun stepMicroscope(sessionId: Long, delta: Int): NativeMicroscope = unsupportedMicroscope()
+
+    fun jumpMicroscopeFrame(sessionId: Long, frameId: Long): NativeMicroscope = unsupportedMicroscope()
+
+    fun jumpMicroscopeTimestampUs(
+        sessionId: Long,
+        timestampUs: Long,
+        selection: TimestampSelectionPolicy,
+    ): NativeMicroscope = unsupportedMicroscope()
+
+    fun closeMicroscopeSession(sessionId: Long): Boolean = false
+
+    private fun unsupportedMicroscope(): NativeMicroscope = NativeMicroscope.Failure(
+        code = "not_supported",
+        message = "Microscope navigation is not supported by this native bridge.",
+        engine = null,
+    )
 }
 
 object RustBridge : NativeBridge {
@@ -18,6 +42,29 @@ object RustBridge : NativeBridge {
 
     @JvmStatic
     private external fun nativeInspectVideoFd(fd: Int, operationId: Long): String?
+
+    @JvmStatic
+    private external fun nativeOpenMicroscopeSession(
+        fd: Int,
+        operationId: Long,
+        cacheRoot: String,
+    ): String?
+
+    @JvmStatic
+    private external fun nativeStepMicroscope(sessionId: Long, delta: Int): String?
+
+    @JvmStatic
+    private external fun nativeJumpMicroscopeFrame(sessionId: Long, frameId: Long): String?
+
+    @JvmStatic
+    private external fun nativeJumpMicroscopeTimestampUs(
+        sessionId: Long,
+        timestampUs: Long,
+        selection: Int,
+    ): String?
+
+    @JvmStatic
+    private external fun nativeCloseMicroscopeSession(sessionId: Long): Boolean
 
     @JvmStatic
     private external fun nativeCancelInspection(operationId: Long): Boolean
@@ -53,6 +100,58 @@ object RustBridge : NativeBridge {
         return parseResponse(raw)
     }
 
+    override fun openMicroscopeSession(
+        fd: Int,
+        operationId: Long,
+        cacheRoot: String,
+    ): NativeMicroscope = microscopeCall {
+        nativeOpenMicroscopeSession(fd, operationId, cacheRoot)
+    }
+
+    override fun stepMicroscope(sessionId: Long, delta: Int): NativeMicroscope {
+        if (sessionId <= 0L || delta !in setOf(-1, 1)) {
+            return NativeMicroscope.Failure(
+                code = "invalid_request",
+                message = "Microscope step requires a positive session id and delta -1 or +1.",
+                engine = null,
+            )
+        }
+        return microscopeCall { nativeStepMicroscope(sessionId, delta) }
+    }
+
+    override fun jumpMicroscopeFrame(sessionId: Long, frameId: Long): NativeMicroscope {
+        if (sessionId <= 0L || frameId < 0L) {
+            return NativeMicroscope.Failure(
+                code = "invalid_request",
+                message = "Microscope frame jump requires a positive session id and non-negative frame id.",
+                engine = null,
+            )
+        }
+        return microscopeCall { nativeJumpMicroscopeFrame(sessionId, frameId) }
+    }
+
+    override fun jumpMicroscopeTimestampUs(
+        sessionId: Long,
+        timestampUs: Long,
+        selection: TimestampSelectionPolicy,
+    ): NativeMicroscope {
+        if (sessionId <= 0L) {
+            return NativeMicroscope.Failure(
+                code = "invalid_request",
+                message = "Microscope timestamp jump requires a positive session id.",
+                engine = null,
+            )
+        }
+        return microscopeCall {
+            nativeJumpMicroscopeTimestampUs(sessionId, timestampUs, selection.nativeValue)
+        }
+    }
+
+    override fun closeMicroscopeSession(sessionId: Long): Boolean {
+        if (sessionId <= 0L || loadFailure != null) return false
+        return runCatching { nativeCloseMicroscopeSession(sessionId) }.getOrDefault(false)
+    }
+
     override fun cancelInspection(operationId: Long): Boolean {
         if (operationId <= 0L || loadFailure != null) return false
         return runCatching { nativeCancelInspection(operationId) }.getOrDefault(false)
@@ -81,6 +180,53 @@ object RustBridge : NativeBridge {
             message = "Could not decode Rust response: ${error.message ?: error::class.java.simpleName}",
             engine = null,
         )
+    }
+
+    internal fun parseMicroscopeResponse(raw: String): NativeMicroscope = try {
+        val json = JSONObject(raw)
+        val engine = json.optionalString("engine")
+        when (json.optString("status")) {
+            "ok" -> parseMicroscopeSuccess(json, engine)
+            "error" -> NativeMicroscope.Failure(
+                code = json.optString("code", "rust_error"),
+                message = json.optString("message", "Rust microscope operation failed."),
+                engine = engine,
+            )
+
+            else -> NativeMicroscope.Failure(
+                code = "malformed_response",
+                message = "Rust returned an unrecognized microscope response.",
+                engine = engine,
+            )
+        }
+    } catch (error: Exception) {
+        NativeMicroscope.Failure(
+            code = "malformed_response",
+            message = "Could not decode Rust microscope response: ${error.message ?: error::class.java.simpleName}",
+            engine = null,
+        )
+    }
+
+    private fun microscopeCall(call: () -> String?): NativeMicroscope {
+        loadFailure?.let {
+            return NativeMicroscope.Failure(
+                code = "native_library_unavailable",
+                message = "Rust engine could not be loaded: ${it.message ?: it::class.java.simpleName}",
+                engine = null,
+            )
+        }
+        val raw = runCatching(call).getOrElse {
+            return NativeMicroscope.Failure(
+                code = "jni_error",
+                message = "Rust microscope call failed: ${it.message ?: it::class.java.simpleName}",
+                engine = null,
+            )
+        } ?: return NativeMicroscope.Failure(
+            code = "jni_error",
+            message = "Rust engine returned a null microscope response.",
+            engine = null,
+        )
+        return parseMicroscopeResponse(raw)
     }
 
     private fun parseSuccess(json: JSONObject, engine: String?): NativeInspection {
@@ -115,6 +261,46 @@ object RustBridge : NativeBridge {
 
             else -> NativeInspection.Success(
                 metadata = metadata,
+                engine = engine,
+            )
+        }
+    }
+
+    private fun parseMicroscopeSuccess(json: JSONObject, engine: String?): NativeMicroscope {
+        if (engine == null) {
+            return NativeMicroscope.Failure(
+                code = "malformed_response",
+                message = "Rust microscope success response did not identify the engine.",
+                engine = null,
+            )
+        }
+        val sessionJson = json.getJSONObject("session")
+        val frameJson = sessionJson.optJSONObject("current_frame")
+        val frame = frameJson?.let {
+            FrameDetails(
+                frameId = it.getLong("frame_id"),
+                timestampTicks = it.optionalLong("timestamp_ticks"),
+                timestampUs = it.optionalLong("timestamp_us"),
+                timeBaseNumerator = it.getInt("time_base_numerator"),
+                timeBaseDenominator = it.getInt("time_base_denominator"),
+                durationTicks = it.optionalLong("duration_ticks"),
+                keyframe = it.getBoolean("keyframe"),
+                corrupt = it.getBoolean("corrupt"),
+            )
+        }
+        val session = MicroscopeSessionSnapshot(
+            sessionId = sessionJson.getLong("session_id"),
+            frameCount = sessionJson.getLong("frame_count"),
+            currentFrame = frame,
+            canStepPrevious = sessionJson.getBoolean("can_step_previous"),
+            canStepNext = sessionJson.getBoolean("can_step_next"),
+        )
+        return if (session.isSane()) {
+            NativeMicroscope.Success(session = session, engine = engine)
+        } else {
+            NativeMicroscope.Failure(
+                code = "malformed_microscope_state",
+                message = "Rust returned microscope state outside expected safety bounds.",
                 engine = engine,
             )
         }
