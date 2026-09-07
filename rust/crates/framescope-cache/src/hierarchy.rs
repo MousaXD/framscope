@@ -150,7 +150,10 @@ mod tests {
         assert_eq!(after_proxy.ram.misses, 2);
         assert_eq!(after_proxy.disk.hits, 1);
 
-        assert_eq!(cache.insert_full(rgba_frame(key.clone())), RamInsertResult::Inserted);
+        assert_eq!(
+            cache.insert_full(rgba_frame(key.clone())),
+            RamInsertResult::Inserted
+        );
         let disk_hits_before = cache.stats().disk.hits;
         let full = cache.lookup(&key).unwrap();
         assert!(matches!(full, CacheLookup::Full(_)));
