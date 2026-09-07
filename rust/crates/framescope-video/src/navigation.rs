@@ -115,7 +115,10 @@ where
         presentation_timestamp: Some(anchor_timestamp),
     } = target.anchor
     {
-        if let Some(timestamp_us) = anchor_timestamp.to_microseconds().filter(|value| *value >= 0) {
+        if let Some(timestamp_us) = anchor_timestamp
+            .to_microseconds()
+            .filter(|value| *value >= 0)
+        {
             decoder.seek_for_navigation(timestamp_us)?;
             match decode_from_seek(index, &mut decoder, anchor_id, frame_id) {
                 Ok((frame, decoded_frames)) => {
