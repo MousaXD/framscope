@@ -42,6 +42,18 @@ fn build_android() {
     require(&root, "lib/libavformat.a");
     require(&root, "lib/libavutil.a");
     require(&root, "lib/libswscale.a");
+    require(&root, "share/framescope/build-info.env");
+    require(&root, "share/framescope/config_components.h");
+
+    // These files live outside the Cargo package and can be rebuilt at the same stable prefix.
+    // Explicitly track them so a restored Cargo target cache cannot silently retain an older
+    // statically linked FFmpeg build after the verified prefix changes.
+    track(&root, "lib/libavcodec.a");
+    track(&root, "lib/libavformat.a");
+    track(&root, "lib/libavutil.a");
+    track(&root, "lib/libswscale.a");
+    track(&root, "share/framescope/build-info.env");
+    track(&root, "share/framescope/config_components.h");
 
     compile_shim(Some(&root.join("include")));
 
@@ -91,4 +103,8 @@ fn require(root: &Path, relative: &str) {
             path.display()
         );
     }
+}
+
+fn track(root: &Path, relative: &str) {
+    println!("cargo:rerun-if-changed={}", root.join(relative).display());
 }
