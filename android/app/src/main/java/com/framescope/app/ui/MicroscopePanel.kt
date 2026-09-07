@@ -304,9 +304,6 @@ private suspend fun MicroscopeFrame.toArgbBitmapOrNull(): Bitmap? {
     } catch (_: RuntimeException) {
         bitmap?.recycle()
         return null
-    } catch (_: ArithmeticException) {
-        bitmap?.recycle()
-        return null
     } catch (_: OutOfMemoryError) {
         bitmap?.recycle()
         return null
