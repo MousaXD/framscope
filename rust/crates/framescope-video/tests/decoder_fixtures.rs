@@ -1,8 +1,8 @@
 #![cfg(feature = "system-ffmpeg")]
 
 use framescope_video::{
-    CancellationToken, DecodedFrame, FrameScopeError, MediaKind, ObservedFrameRateMode, OpenOptions,
-    VideoDecoder, VideoStreamSelection,
+    CancellationToken, DecodedFrame, FrameScopeError, MediaKind, ObservedFrameRateMode,
+    OpenOptions, VideoDecoder, VideoStreamSelection,
 };
 use std::fs::File;
 use std::path::PathBuf;
@@ -31,8 +31,16 @@ fn assert_codec_decodes(file: &str, codec: &str, expected_frames: usize) {
     let mut decoder = VideoDecoder::open_path(fixture(file)).expect("fixture should open");
     assert_eq!(decoder.selected_stream().codec.name, codec);
     let frames = decode_all(&mut decoder);
-    assert_eq!(frames.len(), expected_frames, "unexpected frame count for {file}");
-    assert!(frames.iter().all(|frame| frame.presentation_timestamp.is_some()));
+    assert_eq!(
+        frames.len(),
+        expected_frames,
+        "unexpected frame count for {file}"
+    );
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.presentation_timestamp.is_some())
+    );
     assert!(frames.iter().all(|frame| !frame.corrupt));
 }
 
@@ -44,8 +52,14 @@ fn h264_cfr_uses_real_presentation_timestamps_and_stable_eof() {
     assert_eq!(decoder.selected_stream().codec.name, "h264");
     assert_eq!(decoder.selected_stream().width, Some(64));
     assert_eq!(decoder.selected_stream().height, Some(48));
-    assert_eq!(decoder.selected_stream().pixel_format.as_deref(), Some("yuv420p"));
-    let duration = info.container.duration_us.expect("MP4 duration should be known");
+    assert_eq!(
+        decoder.selected_stream().pixel_format.as_deref(),
+        Some("yuv420p")
+    );
+    let duration = info
+        .container
+        .duration_us
+        .expect("MP4 duration should be known");
     assert!(duration.abs_diff(1_000_000) <= 80_000);
 
     let frames = decode_all(&mut decoder);
@@ -87,7 +101,11 @@ fn h264_vfr_preserves_non_uniform_timestamp_deltas() {
         .iter()
         .map(|frame| frame.presentation_timestamp.unwrap())
         .collect::<Vec<_>>();
-    assert!(timestamps.windows(2).all(|window| window[0].ticks < window[1].ticks));
+    assert!(
+        timestamps
+            .windows(2)
+            .all(|window| window[0].ticks < window[1].ticks)
+    );
     let deltas = timestamps
         .windows(2)
         .map(|window| window[1].ticks - window[0].ticks)
@@ -142,12 +160,8 @@ fn multiple_video_stream_selection_is_predictable_and_explicitly_overridable() {
     let options = OpenOptions {
         stream_selection: VideoStreamSelection::Index(1),
     };
-    let mut second_decoder = VideoDecoder::open_path_with_options(
-        &path,
-        options,
-        CancellationToken::new(),
-    )
-    .unwrap();
+    let mut second_decoder =
+        VideoDecoder::open_path_with_options(&path, options, CancellationToken::new()).unwrap();
     assert_eq!(second_decoder.info().selected_video_stream, 1);
     let first = second_decoder.next_frame().unwrap().unwrap();
     assert_eq!((first.width, first.height), (32, 24));
@@ -197,21 +211,24 @@ fn cancellation_works_before_open_and_during_decode() {
 
     let mut decoder = VideoDecoder::open_path(fixture("h264-cfr.mp4")).unwrap();
     decoder.cancel();
-    assert!(matches!(decoder.next_frame(), Err(FrameScopeError::Cancelled)));
+    assert!(matches!(
+        decoder.next_frame(),
+        Err(FrameScopeError::Cancelled)
+    ));
 }
 
 #[cfg(unix)]
 #[test]
 fn fd_open_duplicates_without_moving_the_callers_file_offset() {
-    use std::io::{Seek, SeekFrom};
+    use std::io::Seek;
     use std::os::fd::AsFd;
 
     let mut file = File::open(fixture("h264-cfr.mp4")).unwrap();
-    assert_eq!(file.seek(SeekFrom::Current(0)).unwrap(), 0);
+    assert_eq!(file.stream_position().unwrap(), 0);
     let mut decoder = VideoDecoder::open_file_descriptor(file.as_fd()).unwrap();
-    assert_eq!(file.seek(SeekFrom::Current(0)).unwrap(), 0);
+    assert_eq!(file.stream_position().unwrap(), 0);
     assert!(decoder.next_frame().unwrap().is_some());
-    assert_eq!(file.seek(SeekFrom::Current(0)).unwrap(), 0);
+    assert_eq!(file.stream_position().unwrap(), 0);
 }
 
 #[test]
