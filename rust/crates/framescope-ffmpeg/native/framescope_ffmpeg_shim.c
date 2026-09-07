@@ -124,6 +124,7 @@ struct FsSession {
     FsFdInput *fd_input;
     int32_t selected_stream_index;
     int demux_eof;
+    int packet_pending;
     int flush_sent;
     uint64_t epoch;
     uint64_t frame_index;
@@ -673,7 +674,7 @@ static int32_t fs_stream_rotation(const AVStream *stream, int32_t *rotation) {
     if (isnan(angle)) {
         return 0;
     }
-    rounded = lround(-angle);
+    rounded = lround(angle);
     normalized = (int32_t)(rounded % 360L);
     if (normalized < 0) {
         normalized += 360;
@@ -769,6 +770,28 @@ static void fs_fill_frame_info(FsSession *session, AVStream *stream, FsFrameInfo
     fs_copy_text(out->pixel_format_name, sizeof(out->pixel_format_name), pixel_name);
 }
 
+static int fs_submit_current_packet(FsSession *session, FsError *error) {
+    int result = avcodec_send_packet(session->codec, session->packet);
+    if (result == 0) {
+        av_packet_unref(session->packet);
+        session->packet_pending = 0;
+        return 1;
+    }
+    if (result == AVERROR(EAGAIN)) {
+        session->packet_pending = 1;
+        return 0;
+    }
+
+    av_packet_unref(session->packet);
+    session->packet_pending = 0;
+    if (result == AVERROR_INVALIDDATA) {
+        fs_set_av_error(error, FS_ERR_MALFORMED, result, "decoder rejected malformed packet data");
+    } else {
+        fs_set_av_error(error, FS_ERR_DECODER, result, "failed to submit packet to video decoder");
+    }
+    return -1;
+}
+
 int32_t framescope_ffmpeg_next_frame(void *opaque, FsFrameInfo *out, FsError *error) {
     FsSession *session = (FsSession *)opaque;
     AVStream *stream;
@@ -812,13 +835,21 @@ int32_t framescope_ffmpeg_next_frame(void *opaque, FsFrameInfo *out, FsError *er
         }
 
         for (;;) {
-            av_packet_unref(session->packet);
-            result = av_read_frame(session->format, session->packet);
-            if (result == AVERROR_EOF) {
-                session->demux_eof = 1;
+            if (session->packet_pending) {
+                result = fs_submit_current_packet(session, error);
+                if (result < 0) {
+                    return -1;
+                }
+                break;
+            }
+
+            if (session->demux_eof) {
                 result = avcodec_send_packet(session->codec, NULL);
-                if (result == 0 || result == AVERROR(EAGAIN)) {
+                if (result == 0) {
                     session->flush_sent = 1;
+                    break;
+                }
+                if (result == AVERROR(EAGAIN)) {
                     break;
                 }
                 if (result == AVERROR_EOF) {
@@ -827,6 +858,13 @@ int32_t framescope_ffmpeg_next_frame(void *opaque, FsFrameInfo *out, FsError *er
                 }
                 fs_set_av_error(error, FS_ERR_DECODER, result, "failed to flush video decoder at end of stream");
                 return -1;
+            }
+
+            av_packet_unref(session->packet);
+            result = av_read_frame(session->format, session->packet);
+            if (result == AVERROR_EOF) {
+                session->demux_eof = 1;
+                continue;
             }
             if (result < 0) {
                 if (fs_is_cancelled(session) || result == AVERROR_EXIT) {
@@ -842,17 +880,11 @@ int32_t framescope_ffmpeg_next_frame(void *opaque, FsFrameInfo *out, FsError *er
                 continue;
             }
 
-            result = avcodec_send_packet(session->codec, session->packet);
-            av_packet_unref(session->packet);
-            if (result == 0 || result == AVERROR(EAGAIN)) {
-                break;
+            result = fs_submit_current_packet(session, error);
+            if (result < 0) {
+                return -1;
             }
-            if (result == AVERROR_INVALIDDATA) {
-                fs_set_av_error(error, FS_ERR_MALFORMED, result, "decoder rejected malformed packet data");
-            } else {
-                fs_set_av_error(error, FS_ERR_DECODER, result, "failed to submit packet to video decoder");
-            }
-            return -1;
+            break;
         }
     }
 }
@@ -908,6 +940,7 @@ int32_t framescope_ffmpeg_seek_us(void *opaque, int64_t timestamp_us, FsError *e
         av_frame_unref(session->frame);
     }
     session->demux_eof = 0;
+    session->packet_pending = 0;
     session->flush_sent = 0;
     session->epoch += 1;
     session->frame_index = 0;
