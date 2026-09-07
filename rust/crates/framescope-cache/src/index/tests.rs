@@ -3,7 +3,7 @@ use crate::SourceIdentity;
 use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
 use rusqlite::Connection;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -52,7 +52,7 @@ fn entry(frame: u64, ticks: i64, keyframe: bool, anchor: u64) -> FrameIndexEntry
     }
 }
 
-fn cleanup(path: &PathBuf) {
+fn cleanup(path: &Path) {
     let _ = super::store::purge_database_files(path);
 }
 
