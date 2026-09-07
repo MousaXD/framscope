@@ -1,6 +1,6 @@
 # FrameScope Architecture
 
-## Phase 3 shape
+## Current architecture through Phase 3
 
 ```text
 Android Compose UI
@@ -9,270 +9,200 @@ MainViewModel
         ↓
 FrameScopeRepository
         ↓
-NativeBridge
-        ↓ JNI
+NativeBridge / JNI
+        ↓
 framescope-ffi
         ↓
-framescope-video ─── framescope-core
-        ↓                  ↑
-framescope-ffmpeg          │
-        ↓                  │
-FFmpeg              framescope-cache
-                    persistent metadata index
-                    + source identity
+framescope-video ─────────────── framescope-cache
+        ↓                               ↑
+framescope-ffmpeg                       │
+        ↓                               │
+FFmpeg                          frame index + caches
 ```
 
-Dependencies are directional. Android owns platform/lifecycle concerns; Rust owns media semantics;
-FFmpeg is contained behind the native/video-engine boundary. Compose does not call JNI directly,
-Kotlin does not parse video timing independently, and the platform-neutral engine/index layers do not
-depend on Android APIs.
+Dependencies remain directional. Android owns platform UI, lifecycle, Storage Access Framework access, cache-directory selection, and the original file descriptor. Rust owns media timing, stream selection, persistent frame identity, indexing, navigation semantics, cache policy, and FFmpeg resource ownership. Core Rust crates do not depend on Android APIs.
 
-Phase 3 extends the accepted Phase 2 decoder with a persistent, metadata-only frame index. It does not
-add a pixel cache. `framescope-video` streams decoded metadata into `framescope-cache`; future seek and
-cache layers consume that index without replacing Phase 2's timestamp model.
+FrameScope is local-first. Normal application behavior requires no backend and the Android manifest has no broad storage or network permission.
 
-## Android application boundary
+## Source and descriptor ownership
 
-`MainActivity` is the composition root. It launches `LocalVideoOpenDocument`, an
-`ActivityResultContracts.OpenDocument` contract restricted to local `video/*` content, and forwards
-the returned URI string to `MainViewModel`. The manifest requests neither broad storage access nor
-`INTERNET`.
+The Android source path is:
 
-`MainViewModel` owns observable state, monotonically increasing inspection generations,
-cancellation, and stale-result suppression. It depends only on `FrameScopeRepository`.
+```text
+content:// URI
+    ↓
+ContentResolver
+    ↓
+ParcelFileDescriptor owned by Android
+    ↓ borrowed integer fd through JNI
+Rust / framescope-ffi
+    ↓ immediate dup(fd)
+framescope-ffmpeg / FFmpeg owns duplicate only
+```
 
-`AndroidFrameScopeRepository` accepts only `content://` sources, queries the display name, opens a
-read-only `ParcelFileDescriptor`, and calls the native bridge on `Dispatchers.IO`. It stores an
-application `ContentResolver`, not an `Activity` context.
+The URI is never converted into a pretend filesystem path and the whole video is never copied into a `ByteArray` or application-private source file. Android closes its original descriptor after the synchronous native ownership handoff/call boundary. Native code closes only the duplicate it owns.
 
-Descriptor ownership is explicit:
+Seekable descriptor reads use a private logical offset so normal decoder work does not mutate the caller's shared file position.
 
-1. Kotlin owns the original `ParcelFileDescriptor` and keeps it open for the synchronous JNI call.
-2. `framescope-ffi` creates only a temporary borrowed Rust view of that integer descriptor.
-3. the FFmpeg backend immediately duplicates the descriptor;
-4. FFmpeg owns/closes only that duplicate;
-5. Kotlin's `use` block closes the original after JNI returns.
+## Timestamp and frame identity model
 
-No URI-to-filesystem-path conversion or whole-file `ByteArray` copy exists in the application path.
-Phase 3's persistent index remains platform-neutral. Android integration may provide source metadata
-or a separately owned seekable descriptor for bounded fingerprinting later; URI strings and display
-names are never treated as source identity. If sufficiently strong identity evidence is unavailable,
-the Rust index layer chooses rebuild over stale reuse.
+Presentation timestamps are authoritative. The decoder uses FFmpeg `best_effort_timestamp`, with frame PTS fallback, interpreted in the selected stream's exact rational time base.
+
+FrameScope deliberately has two different identities:
+
+- the Phase 2 decoder-local sequential index, scoped to a decode epoch;
+- Phase 3 persistent `FrameId`, the zero-based presentation-order identity stored in the frame index.
+
+Neither is a clock. FrameScope never computes `timestamp = frame_index / fps`. Average and nominal FPS are informational metadata only, so CFR and VFR media share the same timing model.
+
+The persistent `FrameIndexEntry` stores the exact optional presentation timestamp, optional duration, keyframe/corrupt state, and nearest safe earlier keyframe anchor.
+
+## Persistent frame index
+
+`framescope-cache` owns the Android-independent SQLite frame index.
+
+The database contains:
+
+- versioned schema state via `PRAGMA user_version`;
+- `index_meta`, binding source identity, selected stream identity, lifecycle, committed row count, optional completed frame count, and recoverable error information;
+- `frame_index`, storing compact per-frame timing/keyframe metadata;
+- indexes for exact timestamp/timestamp-microsecond lookup.
+
+Index lifecycle is explicit: building, incomplete, complete, or failed-recoverable. A partial database can never masquerade as complete.
+
+Writes use bounded `IMMEDIATE` transactions. The indexer retains only a bounded metadata batch, 256 entries by default, and never stores decoded pixel planes in SQLite.
+
+Persistent-state validation rejects inconsistent row counts, non-contiguous frame IDs, invalid time bases/durations, malformed booleans, impossible anchors, or anchors that do not refer to clean persisted keyframes. Because the index is derived data, supported corruption/schema failures trigger safe recreation rather than a media-triggered panic.
+
+## Source identity and invalidation
+
+A persistent index or cache entry is never keyed only by filename, display name, filesystem path, or URI text.
+
+`SourceIdentity` may include size, modification metadata, provider/document identity, and content-derived evidence. Reusable persistent state requires content-derived evidence plus source size.
+
+For seekable sources, the built-in identity sampler reads at most three 64 KiB windows from the beginning, middle, and end, hashes them with BLAKE3, and restores the caller's seek position. This avoids hashing a multi-gigabyte source in full before work can begin.
+
+The sampled fingerprint is deliberately documented as bounded evidence rather than mathematical proof that every unsampled byte is unchanged. Callers may provide a stronger content-derived tag. When reusable identity cannot be established, FrameScope rebuilds derived state instead of risking stale reuse.
+
+## Index build and recovery
+
+`framescope-video::build_or_resume_frame_index` streams Phase 2 decoded metadata into the persistent index.
+
+For a partial index, recovery is correctness-first: a fresh decoder replays from stream start and reconciles already committed entries before appending new rows. If the persistent prefix no longer matches, FrameScope discards it and performs one clean rebuild. It does not pretend that `last_frame + 1` reconstructs codec state.
+
+Cancellation may commit only already validated batches, then leaves the lifecycle incomplete. Decode/storage failures never set the complete marker.
+
+## Indexed navigation
+
+Random frame access uses the persistent index instead of an FPS estimate:
+
+```text
+target FrameId
+    ↓
+FrameIndex lookup
+    ↓
+nearest safe earlier keyframe anchor
+    ↓
+FFmpeg timestamp seek
+    ↓
+decoder flush/reset
+    ↓
+reconcile actual decoded presentation metadata with anchor
+    ↓
+decode forward
+    ↓
+requested persistent FrameId
+```
+
+The first decoded frame after a seek is never assumed to be the target. If a demuxer seek cannot be reconciled precisely, the navigation path reopens a fresh decoder and verifies from stream start rather than returning a potentially wrong frame.
+
+Timestamp navigation exposes explicit at-or-before, at-or-after, and nearest policies. VFR timing remains PTS-driven.
+
+## Owned pixel boundary
+
+The reusable FFmpeg `AVFrame` never escapes the native decoder session.
+
+After a successful decode, `framescope-ffmpeg` can copy the current frame into a caller-owned RGBA buffer through libswscale. The native boundary validates dimensions, stride arithmetic, output capacity, source frame validity, and complete conversion. The local swscale context is freed before return.
+
+Rust exposes the result as owned RGBA bytes. Subsequent decoder advancement or seeking cannot invalidate an already returned Rust-owned frame.
+
+The metadata-only decode API remains available so indexing does not pay full-resolution RGBA conversion/allocation cost.
+
+## Cache hierarchy
+
+Phase 3 adds two bounded pixel tiers:
+
+```text
+source-quality request:
+RAM full-resolution RGBA
+        ↓ miss
+authoritative indexed source decode
+
+preview request:
+RAM full-resolution RGBA
+        ↓ miss
+compressed disk proxy
+        ↓ miss/error
+authoritative indexed source decode
+```
+
+### RAM hot cache
+
+The RAM tier stores `OwnedRgbaFrame` payloads keyed by strong source identity, selected stream, and persistent `FrameId`.
+
+It is bounded by actual resident bytes, not frame count. A 4K frame therefore consumes more budget than a small frame. Entries own their memory through reference-counted byte storage, so cache hits do not duplicate the full pixel buffer.
+
+Eviction is recency-based and source invalidation removes only matching entries.
+
+### Disk proxy cache
+
+The disk tier stores compressed JPEG/WebP navigation proxies in a versioned source/stream/frame namespace. Proxy payloads are typed separately from source-quality RGBA so extraction or other original-quality paths cannot accidentally consume a lossy preview.
+
+Writes use a temporary file in the destination directory, flush it, and rename it into place. Cache scans ignore symlinks and temporary files. Corrupt/oversized entries are rejected and removed. A global byte budget drives eviction.
+
+Disk proxy storage is disposable. Read/write failure must not make the source frame unavailable. Preview navigation degrades to authoritative indexed decode and can return a non-fatal cache diagnostic instead of failing the media request.
 
 ## Cancellation and lifecycle
 
-Every native inspection has an operation ID. The ViewModel asks the repository to cancel the active
-native operation before cancelling the coroutine job. Rust maps operation IDs to cloneable
-`CancellationToken`s; FFmpeg's interrupt callback and the decoder loop observe the same atomic
-cancellation state.
+Operation-scoped cancellation propagates from ViewModel/repository through JNI to a Rust `CancellationToken`, FFmpeg interrupt callback, and decoder loop. Stale Android operation generations cannot publish results over newer operations.
 
-Generation checks prevent progress or results from an older operation from replacing newer UI state.
-`onCleared()` performs the same native-first cancellation sequence.
+Phase 3 index/navigation work reuses the same cancellation/error model. Native handles remain RAII-owned and seek resets packet/frame/flush/EOF state.
 
-Phase 3 indexing uses the same decoder cancellation signal. A cancelled build may commit only already
-validated metadata batches, then remains explicitly `incomplete`; it can never set the complete
-marker.
+## FFmpeg ownership
 
-## JNI boundary
+The C shim owns a format context, codec context, reusable packet, reusable frame, optional custom AVIO state, and duplicated source descriptor. A deterministic destroy path releases them.
 
-Direct JNI is isolated in `framescope-ffi`. The Android-facing Phase 2 surface remains intentionally
-narrow: engine version, inspect a selected video file descriptor plus operation ID, and cancel an
-operation ID. The Phase 3 frame index does not add Android types or UI/JNI surface as part of Agent 1's
-ownership.
+The packet/decode loop retains a compressed packet when `avcodec_send_packet` returns `EAGAIN`, drains decoder output, flushes at demux EOF, drains delayed frames, and reaches stable EOF. Seeking flushes decoder buffers and clears pending packet/frame/EOF state.
 
-The JNI entry point catches Rust panics before they can unwind across JNI and serializes stable
-success/error envelopes. Kotlin validates bounds on the Rust response and presents it. It does not
-derive timestamps, stream selection, codec/container facts, or rotation from a separate Android media
-parser.
-
-## Rust crates
-
-### `framescope-core`
-
-Platform-neutral media-domain types and stable errors: exact rational/time-base types, signed
-presentation timestamps and durations, stream/container metadata, decoded-frame metadata, and stable
-error categories. Timestamp-to-microsecond conversion uses checked integer arithmetic rather than
-floating-point FPS math.
-
-### `framescope-video`
-
-`VideoDecoder` owns deterministic video-stream selection, stream discovery, sequential frame decoding,
-exact FFmpeg PTS + stream-time-base semantics, decode epochs, foundational timestamp seeking,
-cancellation, and typed errors. It never preloads or predecodes the whole source.
-
-Phase 3 adds `build_or_resume_frame_index` above this decoder. It assigns persistent `FrameId`s in
-display order, records exact decoded metadata, and writes bounded batches into `framescope-cache`.
-Partial resume reopens a fresh decoder and reconciles the committed prefix before appending; it never
-assumes decoder epoch-local index alone restores codec state.
-
-Default stream selection prefers a supported default video stream, then the lowest supported video
-stream index. `VideoStreamSelection::Index` provides explicit override. The legacy bounded ISO-BMFF
-inspector remains available as Phase 1 compatibility code.
-
-See [`video-engine.md`](video-engine.md) and [`frame-index.md`](frame-index.md).
-
-### `framescope-ffmpeg`
-
-The narrow native ownership/build boundary around FFmpeg. The C shim owns one `AVFormatContext`, one
-`AVCodecContext`, one reusable `AVPacket`, one reusable `AVFrame`, optional custom `AVIOContext`
-state, and the duplicated descriptor. One destroy path releases them on normal drop and errors.
-
-The packet/decode loop retains packets across `EAGAIN`, drains frames before submitting more packets,
-flushes at demux EOF, handles delayed frames/stable decoder EOF, and clears packet/frame/flush state
-after seeking. The Rust wrapper is `Send` but not `Sync`; mutable operations require `&mut self`.
-
-Android uses FFmpeg 9.0.1 pinned by SHA-256 and cross-compiled with NDK r27d for API 26 /
-`arm64-v8a`. See [`ffmpeg-android.md`](ffmpeg-android.md).
-
-### `framescope-ffi`
-
-The only Rust crate allowed to depend on JNI. It borrows the Android descriptor long enough for the
-video engine to duplicate it, opens `VideoDecoder`, projects Rust metadata into Android responses,
-samples a bounded decoded prefix for early VFR evidence, and maps operation cancellation into the
-video engine.
-
-A bounded prefix can prove VFR when differing decoded PTS intervals are observed, but it cannot prove
-whole-source CFR.
-
-### `framescope-cache`
-
-Phase 3 owns persistent source/index metadata here. The crate remains Android-independent and contains:
-
-- layered, path-independent `SourceIdentity` plus bounded sampled fingerprinting;
-- deterministic/versioned cache namespace derivation;
-- `FrameId`, `FrameIndexEntry`, `FrameIndexStatus`, and `KeyframeAnchor` contracts;
-- a versioned SQLite metadata index with migration/recreation policy;
-- exact frame/timestamp/keyframe lookups and bounded range iteration;
-- explicit building/incomplete/complete/failed-recoverable lifecycle state;
-- source and selected-stream binding validation;
-- corruption/stale-source recovery.
-
-There is still no decoded-frame RAM cache, eviction policy, thumbnail/proxy cache, or disk pixel
-format. The persistent index stores metadata rows only.
-
-## Persistent frame-index model
-
-Frame identity and time are separate concepts. `FrameId` is the zero-based persistent display-order
-identity assigned by the indexer. `FrameIndexEntry` separately preserves the decoder's optional signed
-presentation timestamp and exact stream time base, optional duration, keyframe/corrupt flags, and
-nearest safe earlier anchor.
-
-`FrameIndexStreamIdentity` binds the database to the selected stream using stream index, codec ID/name,
-exact time base, and coded dimensions. Rotation is intentionally not an identity component because
-display rotation does not alter the presentation timeline.
-
-The SQLite schema is versioned with `PRAGMA user_version`. `index_meta` stores source/stream binding,
-lifecycle, committed row count, optional complete count, and last recoverable error. `frame_index`
-stores compact per-frame metadata. WAL journaling plus bounded `IMMEDIATE` transactions keeps each
-persisted batch atomic; an explicit complete marker distinguishes a finished timeline from surviving
-partial rows after process death.
-
-Source mismatch, weak/unverifiable identity, invalid serialized state, impossible rows, SQLite
-corruption/not-a-database errors, or unsupported schema versions cause safe recreation because this
-database is derived state. See [`frame-index.md`](frame-index.md).
-
-## Source identity
-
-A video is never identified by filename, URI string, or display name. `SourceIdentity` layers source
-size, modification metadata, provider/document ID, and content-derived evidence.
-
-For seekable sources the built-in sampler hashes at most three 64 KiB windows at the beginning,
-middle, and end with BLAKE3 and restores the caller's position. Metadata/provider identity without a
-content-derived tag is deliberately not persisted for reuse; the index is rebuilt instead.
-
-The sampled fingerprint is bounded and practical for multi-gigabyte files but is not proof that
-unsampled bytes are unchanged. A caller with stronger content-derived evidence may supply it. When
-identity cannot be established to the caller's required confidence, rebuilding is the safe fallback.
-
-## Timestamp model
-
-The media clock is FFmpeg presentation time, not FPS. For each decoded frame the native layer uses
-`AVFrame.best_effort_timestamp`, falling back to `AVFrame.pts`, interpreted with the selected
-`AVStream.time_base`. Rust preserves the original ticks/time base and offers checked integer
-microsecond conversion.
-
-Phase 3 persists those exact tick/time-base values. It never computes `timestamp = frame / fps`.
-Average/nominal frame-rate values are informational only. VFR sources remain correct because frame
-identity and presentation time are independent.
-
-## Seeking and keyframe anchors
-
-`seek_to_timestamp_us` remains a foundation, not an exact arbitrary-frame promise. A successful seek
-rescales the timestamp, performs an FFmpeg seek, flushes decoder buffers, clears EOF state, increments
-the decode epoch, and resets the epoch-local frame index.
-
-For each persistent frame, Phase 3 stores the nearest earlier clean decoded keyframe as a
-`KeyframeAnchor`, preferring exact timestamp information. Before any usable keyframe, the anchor is
-`StreamStart`. Container packet byte offsets are deliberately not persisted because their semantics
-are not reliably portable across custom AVIO/demuxers/media layouts.
-
-Agent 2 can use the anchor as a safe earlier decode-start hint, then decode forward to the target
-`FrameId`.
-
-## Interruption and resume
-
-Indexing can stop on cancellation, process death, storage failure, or decode failure without claiming
-completion. Already committed transactional batches remain valid; lifecycle communicates whether the
-whole timeline is complete.
-
-Resume is correctness-first. The current implementation starts a fresh decoder from stream start,
-replays the committed prefix, and compares every reconstructed entry with persistent state. Only after
-that prefix matches are new rows appended. A mismatch or premature EOF discards the partial timeline
-and performs one clean rebuild. This repeats some decoding but does not fake decoder state restoration
-from `last_frame + 1`.
-
-A future optimization may seek to an earlier persisted keyframe checkpoint, provided it keeps the same
-reconciliation guarantee.
+The Rust session is `Send` under its explicit unique-ownership contract and is not `Sync`.
 
 ## Large-video invariant
 
-FrameScope must remain safe for multi-gigabyte sources:
+FrameScope must remain suitable for multi-gigabyte videos:
 
-1. never read an entire source video into RAM;
-2. never predecode an entire video into raw frame files for navigation;
-3. inspect/decode/index incrementally from the source descriptor;
-4. persist frame-index metadata in bounded transactions;
-5. keep future frame payloads behind bounded caches;
-6. prefer SAF file descriptors over copied temporary source files.
+1. never read the complete video into RAM;
+2. never retain all decoded full-resolution frames;
+3. index metadata incrementally in bounded batches;
+4. bound RAM cache by bytes;
+5. bound disk proxy cache by bytes;
+6. seek from persisted keyframe anchors for random access;
+7. keep the original source authoritative and all caches disposable.
 
-The Phase 2 decoder uses reusable packet/frame storage. The Phase 3 indexer retains only a bounded
-metadata batch (256 entries by default) and never stores decoded pixel planes.
+CI uses deterministic generated stress fixtures and structural counters rather than committing giant media or relying on flaky absolute hosted-runner RSS thresholds.
 
-## Android/NDK baseline
+## Android / native baseline
 
-- `minSdk 26`
-- `compileSdk 36`
-- `targetSdk 36`
-- `arm64-v8a` current ABI
-- NDK r27d (`27.3.13750724`)
-- Gradle 8.13 / Android Gradle Plugin 8.13.2
-- Kotlin 2.4.10
-- Jetpack Compose BOM 2026.06.00
+- minSdk 26
+- compileSdk / targetSdk 36
+- current ABI: `arm64-v8a`
+- NDK `27.3.13750724`
 - Java 17 bytecode
+- Android Rust toolchain 1.86.0
+- host Rust MSRV 1.85
+- FFmpeg 9.0.1, source-built from a pinned official archive
 
-Adding another Android ABI requires a matching Rust target and verified FFmpeg prefix, not
-media-engine architecture changes.
+## Phase boundaries
 
-## CI trust boundary
+Phase 3 provides truthful indexed navigation and bounded caching. It deliberately does not implement visual-similarity grouping, the frame-microscope Compose UI, extraction/export, hardware MediaCodec acceleration, or public release automation.
 
-GitHub CI verifies host Rust formatting/clippy/tests, deterministic real-media fixtures, real decoder
-integration through `system-ffmpeg`, pinned Android FFmpeg provenance/build, arm64 Rust JNI linking,
-Android unit/lint/APK checks, and Phase 3 frame-index unit/fixture tests including actual VFR PTS
-comparison. Obsolete PR runs are cancelled.
-
-See [`ci.md`](ci.md).
-
-## Deferred to later phases
-
-Phase 3 Agent 1 intentionally does not implement RAM hot-frame caching, compressed disk-frame/proxy
-caching, perceptual hashing/SSIM/duplicate grouping, extraction/export, microscope UI, or Android
-arbitrary-frame viewing. Those layers consume the timestamp-driven decoder and persistent metadata
-index rather than replacing them with FPS-derived timing.
-
-## Security/privacy boundary
-
-Normal app operation has no network dependency and the manifest declares no `INTERNET` permission.
-The selected media and persistent index are treated as untrusted/rebuildable input. The engine bounds
-stream counts/dimensions, validates time bases, uses checked timestamp conversion, maps malformed
-input to typed errors, contains panics at the JNI boundary, and validates persistent index
-schema/source/row/anchor consistency before reuse.
+Those are Phase 4 through Phase 7 work and must consume the authoritative Phase 2/3 timing, identity, navigation, and source-quality boundaries rather than replacing them.
