@@ -4,7 +4,6 @@ import com.framescope.app.ui.MICROSCOPE_PREVIEW_PIXEL_BUDGET
 import com.framescope.app.ui.MicroscopePreviewMath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,7 +11,7 @@ import org.junit.Test
 class MicroscopePreviewMathTest {
     @Test
     fun fourKLandscapeIsBoundedTo1080pEquivalentPixels() {
-        val plan = assertNotNull(MicroscopePreviewMath.plan(3_840, 2_160))
+        val plan = requireNotNull(MicroscopePreviewMath.plan(3_840, 2_160))
 
         assertEquals(1_920, plan.targetWidth)
         assertEquals(1_080, plan.targetHeight)
@@ -22,7 +21,7 @@ class MicroscopePreviewMathTest {
 
     @Test
     fun portraitPreviewPreservesEquivalentPixelBudget() {
-        val plan = assertNotNull(MicroscopePreviewMath.plan(2_160, 3_840))
+        val plan = requireNotNull(MicroscopePreviewMath.plan(2_160, 3_840))
 
         assertEquals(1_080, plan.targetWidth)
         assertEquals(1_920, plan.targetHeight)
@@ -31,7 +30,7 @@ class MicroscopePreviewMathTest {
 
     @Test
     fun smallFrameKeepsSourceDimensions() {
-        val plan = assertNotNull(MicroscopePreviewMath.plan(1_280, 720))
+        val plan = requireNotNull(MicroscopePreviewMath.plan(1_280, 720))
 
         assertEquals(1_280, plan.targetWidth)
         assertEquals(720, plan.targetHeight)
@@ -40,7 +39,7 @@ class MicroscopePreviewMathTest {
 
     @Test
     fun centeredSamplingCoversBothEndsWithoutReadingPastSource() {
-        val plan = assertNotNull(MicroscopePreviewMath.plan(4, 2, maxPixels = 2L))
+        val plan = requireNotNull(MicroscopePreviewMath.plan(4, 2, maxPixels = 2L))
 
         assertEquals(2, plan.targetWidth)
         assertEquals(1, plan.targetHeight)
