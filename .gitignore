@@ -1,0 +1,30 @@
+# Rust
+/rust/target/
+**/*.rs.bk
+
+# Android / Gradle
+/android/.gradle/
+/android/local.properties
+/android/app/build/
+/android/build/
+/android/.idea/
+*.iml
+
+# Signing and secrets
+*.jks
+*.keystore
+*.p12
+*.pem
+.env
+.env.*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Generated package outputs
+/FrameScope-phase1.zip
+
+# Kotlin/Gradle local state
+.kotlin/
