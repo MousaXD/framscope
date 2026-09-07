@@ -2,7 +2,8 @@
 //!
 //! The original bounded ISO BMFF inspector remains available for lightweight Phase 1 metadata
 //! compatibility. Phase 2 adds a streaming FFmpeg-backed decoder whose timing is presentation-
-//! timestamp driven and safe for variable-frame-rate sources.
+//! timestamp driven and safe for variable-frame-rate sources. Phase 3 layers a persistent metadata
+//! index over that decoder without changing the timestamp contract.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -12,6 +13,9 @@ pub use engine::{
 pub use framescope_core::{
     CodecInfo, ContainerInfo, DecodedFrame, FrameScopeError, MediaDuration, MediaKind,
     MediaTimestamp, Rational, StreamInfo, TimeBase, VideoInfo, VideoMetadata,
+};
+pub use indexing::{
+    FrameIndexDecoder, IndexingError, IndexingOptions, IndexingReport, build_or_resume_frame_index,
 };
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;
@@ -198,6 +202,7 @@ fn parse_mdia<R: Read + Seek>(
 
 mod engine;
 pub mod ffmpeg;
+mod indexing;
 mod iso;
 
 use iso::{
