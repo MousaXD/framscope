@@ -63,15 +63,30 @@ kotlin {
 }
 
 val rustJniOutput = layout.buildDirectory.dir("generated/jniLibs")
+val ffmpegRoot = providers.environmentVariable("FRAMESCOPE_FFMPEG_ROOT")
+    .orElse(rootProject.file("../.native/ffmpeg/arm64-v8a").absolutePath)
+
+val prepareFfmpegArm64 by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Prepare the pinned FFmpeg Android arm64-v8a static prefix."
+    workingDir = rootProject.file("..")
+    inputs.file(rootProject.file("../scripts/build-ffmpeg-android.sh"))
+    inputs.file(rootProject.file("../scripts/verify-ffmpeg-android.sh"))
+    environment("FRAMESCOPE_FFMPEG_ROOT", ffmpegRoot.get())
+    commandLine("bash", rootProject.file("../scripts/build-ffmpeg-android.sh").absolutePath)
+}
 
 val buildRustArm64 by tasks.registering(Exec::class) {
     group = "build"
-    description = "Build the Rust JNI library for arm64-v8a with cargo-ndk."
+    description = "Build the FFmpeg-linked Rust JNI library for arm64-v8a with cargo-ndk."
+    dependsOn(prepareFfmpegArm64)
     workingDir = rootProject.file("../rust")
     inputs.file(rootProject.file("../rust/Cargo.toml"))
     inputs.dir(rootProject.file("../rust/crates"))
+    inputs.file(rootProject.file("../scripts/build-rust.sh"))
     outputs.dir(rustJniOutput)
     environment("CARGO_TARGET_DIR", rootProject.file("../rust/target").absolutePath)
+    environment("FRAMESCOPE_FFMPEG_ROOT", ffmpegRoot.get())
     commandLine(
         "cargo",
         "ndk",

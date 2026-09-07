@@ -7,3 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 framescope-core = { path = "../framescope-core" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+framescope-ffmpeg = { path = "../framescope-ffmpeg" }

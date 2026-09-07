@@ -4,6 +4,7 @@ members = [
     "crates/framescope-video",
     "crates/framescope-cache",
     "crates/framescope-ffi",
+    "crates/framescope-ffmpeg",
 ]
 resolver = "2"
 
