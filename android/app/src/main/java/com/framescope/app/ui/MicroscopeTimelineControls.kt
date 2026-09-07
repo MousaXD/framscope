@@ -12,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -33,7 +34,9 @@ internal fun MicroscopeTimelineControls(
             ),
         )
     }
-    var scrubbing by rememberSaveable(session.sessionId) { mutableStateOf(false) }
+    // A drag gesture cannot survive disposal/recreation. Persisting this flag could suppress
+    // authoritative frame synchronization after recreation even though no gesture is active.
+    var scrubbing by remember(session.sessionId) { mutableStateOf(false) }
 
     LaunchedEffect(currentFrame.frameId, session.frameCount, scrubbing) {
         if (!scrubbing) {
