@@ -154,16 +154,17 @@ fn encode_and_store<E: PreviewEncoder>(
     let encoded = encoder
         .encode(pixels)
         .map_err(PreviewNavigationError::Encoding)?;
-    let (proxy_insert_result, cache_warning) = match cache.insert_proxy(key, encoded.format, &encoded.bytes) {
-        Ok(result) => (Some(result), cache_warning),
-        Err(error) => (
-            None,
-            Some(append_cache_warning(
-                cache_warning,
-                format!("disk proxy insert failed; preview remains usable: {error}"),
-            )),
-        ),
-    };
+    let (proxy_insert_result, cache_warning) =
+        match cache.insert_proxy(key, encoded.format, &encoded.bytes) {
+            Ok(result) => (Some(result), cache_warning),
+            Err(error) => (
+                None,
+                Some(append_cache_warning(
+                    cache_warning,
+                    format!("disk proxy insert failed; preview remains usable: {error}"),
+                )),
+            ),
+        };
     Ok(PreviewNavigationResult {
         frame_id,
         format: encoded.format,
