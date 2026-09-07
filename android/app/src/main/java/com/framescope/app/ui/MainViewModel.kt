@@ -161,6 +161,7 @@ class MainViewModel(
     }
 
     private fun cancelRunningInspection() {
+        repository.cancelActiveInspection()
         inspectJob?.cancel()
         inspectJob = null
     }
