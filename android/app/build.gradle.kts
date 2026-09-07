@@ -84,6 +84,8 @@ val buildRustArm64 by tasks.registering(Exec::class) {
     inputs.file(rootProject.file("../rust/Cargo.toml"))
     inputs.dir(rootProject.file("../rust/crates"))
     inputs.file(rootProject.file("../scripts/build-rust.sh"))
+    inputs.file(rootProject.file("../scripts/build-ffmpeg-android.sh"))
+    inputs.file(rootProject.file("../scripts/verify-ffmpeg-android.sh"))
     outputs.dir(rustJniOutput)
     environment("CARGO_TARGET_DIR", rootProject.file("../rust/target").absolutePath)
     environment("FRAMESCOPE_FFMPEG_ROOT", ffmpegRoot.get())

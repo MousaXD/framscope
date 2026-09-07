@@ -47,9 +47,7 @@ pub fn linked_versions() -> Option<LinkedVersions> {
 /// Force the final Android JNI library to retain references to all required FFmpeg libraries.
 pub fn link_probe() -> u32 {
     linked_versions()
-        .map(|versions| {
-            versions.avcodec ^ versions.avformat ^ versions.avutil ^ versions.swscale
-        })
+        .map(|versions| versions.avcodec ^ versions.avformat ^ versions.avutil ^ versions.swscale)
         .unwrap_or(0)
 }
 

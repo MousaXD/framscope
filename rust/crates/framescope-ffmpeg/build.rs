@@ -32,7 +32,10 @@ fn main() {
     require(&root, "lib/libavutil.a");
     require(&root, "lib/libswscale.a");
 
-    println!("cargo:rustc-link-search=native={}", root.join("lib").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        root.join("lib").display()
+    );
     println!("cargo:rustc-link-lib=static=avformat");
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=swscale");
