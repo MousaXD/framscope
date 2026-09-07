@@ -1,0 +1,19 @@
+[package]
+name = "framescope-extraction-groups-video"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+framescope-cache = { path = "../framescope-cache" }
+framescope-extraction = { path = "../framescope-extraction" }
+framescope-extraction-groups = { path = "../framescope-extraction-groups" }
+framescope-extraction-video = { path = "../framescope-extraction-video" }
+framescope-group-navigation = { path = "../framescope-group-navigation" }
+framescope-video = { path = "../framescope-video" }
+thiserror.workspace = true
+
+[dev-dependencies]
+framescope-core = { path = "../framescope-core" }
+framescope-perceptual = { path = "../framescope-perceptual" }
