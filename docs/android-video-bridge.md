@@ -43,7 +43,7 @@ Every inspection is assigned a monotonically increasing generation. Progress/res
 
 Picker cancellation is represented as `Cancelled`, not as an error.
 
-An active native inspection also receives a monotonically increasing operation ID. `AndroidFrameScopeRepository.cancelActiveInspection()` forwards that ID through the existing JNI bridge before cancelling the coroutine job. Rust maps the operation ID to Agent 2's cloneable `CancellationToken`, which is observed by FFmpeg's interrupt callback and by the decoder loop.
+An active native inspection also receives a monotonically increasing operation ID. `AndroidFrameScopeRepository.cancelActiveInspection()` forwards that ID through the existing JNI bridge before cancelling the coroutine job. Rust maps the operation ID to the video engine's cloneable `CancellationToken`, which is observed by FFmpeg's interrupt callback and by the decoder loop.
 
 The token registry also preserves a cancellation that races just ahead of native inspection startup: a pre-cancelled token is reused when that operation enters the JNI call. Completed operations remove their registry entry. The registry is bounded against an accumulation of pre-start cancellation tombstones.
 
@@ -51,7 +51,7 @@ The token registry also preserves a cancellation that races just ahead of native
 
 ## Metadata contract
 
-The JNI inspection path now opens Agent 2's FFmpeg-backed `VideoDecoder`; it no longer uses the Phase 1 ISO-BMFF metadata parser for Android inspection.
+The JNI inspection path opens the FFmpeg-backed `VideoDecoder`; it does not use the Phase 1 ISO-BMFF metadata parser for Android inspection.
 
 The Android bridge receives:
 
@@ -66,13 +66,13 @@ The Android bridge receives:
 - `video_stream_count`
 - `audio_stream_count`
 - `pixel_format` when available
-- `variable_frame_rate` when enough decoded presentation timestamps are observed
+- `variable_frame_rate` when variation is actually observed in decoded presentation timestamps
 
 FPS remains informational only. Frame timing in the Rust engine is driven by presentation timestamps and stream time bases, never by `frame_number / fps`.
 
-The JNI inspection samples only a small bounded number of decoded frames to classify CFR/VFR when possible. It does not retain frame buffers or build a frame cache.
+The JNI inspection samples only a small bounded number of decoded frames. A differing presentation interval is sufficient to report `variable_frame_rate=true`; a constant bounded prefix is not sufficient to prove the entire source is CFR, so the bridge leaves that field unknown instead of reporting `false`. A future full timeline/index pass may establish a whole-source CFR classification without changing the timestamp model.
 
-The Rust response remains the authority. Kotlin does not parse the container or duplicate video metadata extraction.
+The bounded inspection does not retain frame buffers or build a frame cache. The Rust response remains the authority; Kotlin validates and displays the response but does not parse the container or duplicate video metadata extraction.
 
 ## Error mapping
 

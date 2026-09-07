@@ -163,12 +163,18 @@ fn build_inspection_metadata(
         &selected,
         decoded_dimensions,
         decoded_pixel_format.as_deref(),
-        match decoder.observed_frame_rate_mode() {
-            ObservedFrameRateMode::Undetermined => None,
-            ObservedFrameRateMode::Constant => Some(false),
-            ObservedFrameRateMode::Variable => Some(true),
-        },
+        bridge_variable_frame_rate(decoder.observed_frame_rate_mode()),
     )
+}
+
+/// A bounded prefix sample can prove that varying presentation intervals were observed, but it
+/// cannot prove that the remainder of a source is constant-rate. Keep CFR as unknown unless the
+/// complete timeline is inspected by a future indexing layer.
+fn bridge_variable_frame_rate(mode: ObservedFrameRateMode) -> Option<bool> {
+    match mode {
+        ObservedFrameRateMode::Variable => Some(true),
+        ObservedFrameRateMode::Undetermined | ObservedFrameRateMode::Constant => None,
+    }
 }
 
 fn inspection_metadata_from_info(
@@ -349,6 +355,22 @@ mod tests {
     }
 
     #[test]
+    fn bounded_cadence_sample_never_claims_global_cfr() {
+        assert_eq!(
+            bridge_variable_frame_rate(ObservedFrameRateMode::Undetermined),
+            None
+        );
+        assert_eq!(
+            bridge_variable_frame_rate(ObservedFrameRateMode::Constant),
+            None
+        );
+        assert_eq!(
+            bridge_variable_frame_rate(ObservedFrameRateMode::Variable),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn projects_phase_two_engine_metadata_for_android() {
         let time_base = TimeBase::new(1, 1_000).unwrap();
         let selected = StreamInfo {
@@ -405,8 +427,14 @@ mod tests {
             selected_video_stream: 2,
         };
 
-        let metadata =
-            inspection_metadata_from_info(&info, &selected, None, None, Some(false)).unwrap();
+        let metadata = inspection_metadata_from_info(
+            &info,
+            &selected,
+            None,
+            None,
+            bridge_variable_frame_rate(ObservedFrameRateMode::Constant),
+        )
+        .unwrap();
         assert_eq!(metadata.duration_us, Some(2_000_000));
         assert_eq!(metadata.width, 1_920);
         assert_eq!(metadata.height, 1_080);
@@ -415,7 +443,7 @@ mod tests {
         assert_eq!(metadata.video_stream_count, 1);
         assert_eq!(metadata.audio_stream_count, 1);
         assert_eq!(metadata.rotation_degrees, 270);
-        assert_eq!(metadata.variable_frame_rate, Some(false));
+        assert_eq!(metadata.variable_frame_rate, None);
     }
 
     #[cfg(not(target_os = "android"))]

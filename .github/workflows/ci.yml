@@ -101,7 +101,7 @@ jobs:
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
             rust/target
-          key: cargo-android-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-${{ hashFiles('rust/Cargo.toml', 'rust/crates/**/Cargo.toml', 'scripts/build-rust.sh') }}
+          key: cargo-android-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-${{ hashFiles('rust/Cargo.toml', 'rust/crates/**/Cargo.toml', 'rust/crates/framescope-ffmpeg/build.rs', 'rust/crates/framescope-ffmpeg/native/**', 'scripts/build-rust.sh', 'scripts/build-ffmpeg-android.sh', 'scripts/verify-ffmpeg-android.sh') }}
           restore-keys: |
             cargo-android-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-
 
@@ -164,7 +164,7 @@ jobs:
             ~/.cargo/.crates.toml
             ~/.cargo/.crates2.json
             rust/target
-          key: cargo-android-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-${{ hashFiles('rust/Cargo.toml', 'rust/crates/**/Cargo.toml', 'scripts/build-rust.sh') }}
+          key: cargo-android-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-${{ hashFiles('rust/Cargo.toml', 'rust/crates/**/Cargo.toml', 'rust/crates/framescope-ffmpeg/build.rs', 'rust/crates/framescope-ffmpeg/native/**', 'scripts/build-rust.sh', 'scripts/build-ffmpeg-android.sh', 'scripts/verify-ffmpeg-android.sh') }}
           restore-keys: |
             cargo-android-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-
 
