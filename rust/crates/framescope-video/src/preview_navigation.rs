@@ -110,12 +110,7 @@ where
         CacheLookup::Miss => {}
     }
 
-    let decoded = navigate_to_frame_cached(
-        index,
-        cache,
-        &mut open_fresh_decoder,
-        frame_id,
-    )?;
+    let decoded = navigate_to_frame_cached(index, cache, &mut open_fresh_decoder, frame_id)?;
     let source = match decoded.source {
         CachedFrameSource::Ram => PreviewSource::EncodedFromRam,
         CachedFrameSource::Decoded => PreviewSource::EncodedFromDecode,
@@ -167,8 +162,8 @@ mod tests {
     };
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
