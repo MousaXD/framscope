@@ -1,12 +1,12 @@
 use framescope_video::MicroscopeFramePresentation;
-use thiserror::Error;
+use std::fmt;
 
 /// Metadata describing the exact RGBA payload copied into a caller-owned presentation buffer.
 ///
 /// The buffer contains source-quality pixels from `MicroscopeFramePresentation`; compressed preview
 /// proxies cannot reach this boundary because the presentation API structurally excludes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PresentationBufferInfo {
+pub struct PresentationBufferInfo {
     pub frame_id: u64,
     pub width: u32,
     pub height: u32,
@@ -14,11 +14,23 @@ pub(crate) struct PresentationBufferInfo {
     pub byte_len: usize,
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub(crate) enum PresentationBufferError {
-    #[error("presentation buffer capacity {capacity} is smaller than required RGBA payload {required}")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentationBufferError {
     BufferTooSmall { required: usize, capacity: usize },
 }
+
+impl fmt::Display for PresentationBufferError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BufferTooSmall { required, capacity } => write!(
+                formatter,
+                "presentation buffer capacity {capacity} is smaller than required RGBA payload {required}",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PresentationBufferError {}
 
 /// Copy one authoritative full-resolution RGBA frame into caller-owned memory.
 ///
@@ -26,7 +38,7 @@ pub(crate) enum PresentationBufferError {
 /// `ByteBuffer`, Rust can borrow its address only for the JNI call, and this safe core performs the
 /// bounded copy. The destination is checked before any write so an undersized buffer is never left
 /// with a partial frame.
-pub(crate) fn copy_presentation_rgba(
+pub fn copy_presentation_rgba(
     presentation: &MicroscopeFramePresentation,
     destination: &mut [u8],
 ) -> Result<PresentationBufferInfo, PresentationBufferError> {
