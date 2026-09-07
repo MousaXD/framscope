@@ -178,7 +178,12 @@ fn open_session(
         FrameIndexStreamIdentity::from_stream(probe.selected_stream()).map_err(from_index)?;
     drop(probe);
 
-    let index_path = frame_index_path(Path::new(cache_root), &source_identity, &stream_identity);
+    let index_path = frame_index_path(
+        Path::new(cache_root),
+        &source_identity,
+        &stream_identity,
+        operation_id,
+    );
     let (mut index, _) = FrameIndex::open_or_create(index_path, source_identity, stream_identity)
         .map_err(from_index)?;
 
@@ -409,11 +414,17 @@ fn frame_index_path(
     cache_root: &Path,
     source: &SourceIdentity,
     stream: &FrameIndexStreamIdentity,
+    operation_id: OperationId,
 ) -> PathBuf {
+    let source_namespace = if source.is_reuse_safe() {
+        source.stable_key()
+    } else {
+        format!("unverifiable-{}-op-{operation_id}", source.stable_key())
+    };
     cache_root
         .join("frame-index")
         .join(format!("v{FRAME_INDEX_SCHEMA_VERSION}"))
-        .join(source.stable_key())
+        .join(source_namespace)
         .join(format!("stream-{}.sqlite3", stream.stream_index))
 }
 
@@ -562,6 +573,40 @@ impl Seek for FdLogicalReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use framescope_core::TimeBase;
+
+    fn test_stream_identity() -> FrameIndexStreamIdentity {
+        FrameIndexStreamIdentity {
+            stream_index: 0,
+            codec_id: 27,
+            codec_name: "h264".into(),
+            time_base: TimeBase::new(1, 1_000).unwrap(),
+            width: Some(640),
+            height: Some(360),
+        }
+    }
+
+    #[test]
+    fn unverifiable_sources_use_operation_isolated_index_paths() {
+        let source = SourceIdentity::metadata_only(Some(4_096), None, None);
+        let stream = test_stream_identity();
+        let root = Path::new("cache-root");
+        assert_ne!(
+            frame_index_path(root, &source, &stream, 11),
+            frame_index_path(root, &source, &stream, 12)
+        );
+    }
+
+    #[test]
+    fn reusable_sources_keep_stable_index_paths_across_operations() {
+        let source = SourceIdentity::new(4_096, None, Some("strong-content-tag".into()));
+        let stream = test_stream_identity();
+        let root = Path::new("cache-root");
+        assert_eq!(
+            frame_index_path(root, &source, &stream, 11),
+            frame_index_path(root, &source, &stream, 12)
+        );
+    }
 
     #[cfg(unix)]
     #[test]
