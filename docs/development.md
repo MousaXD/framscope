@@ -33,6 +33,32 @@ cargo +1.85.1 test --workspace
 
 The Rust crates must remain Android-independent except `framescope-ffi`.
 
+## Phase 3 frame-index workflow
+
+The persistent metadata index lives in `framescope-cache`; the streaming decoder-to-index pipeline
+lives in `framescope-video`. Run the normal workspace checks plus the real-media fixture tests:
+
+```bash
+bash ./scripts/generate-video-fixtures.sh
+cd rust
+cargo +1.85.1 test -p framescope-cache
+cargo +1.85.1 test -p framescope-video --features system-ffmpeg --test frame_index_fixtures
+```
+
+When changing the schema, source identity, lifecycle, or resume logic, verify at minimum:
+
+- schema creation/reopen and version behavior;
+- stale and unverifiable source recreation;
+- corrupt/not-a-database recovery;
+- interrupted indexing and fresh-decoder reconciliation;
+- exact frame and timestamp lookup;
+- keyframe anchors;
+- VFR PTS persistence against real decoded timestamps;
+- bounded pending batch size.
+
+Do not resume by assuming Phase 2's decoder-epoch-local frame number identifies persistent codec
+state. Reopen a decoder and reconcile existing rows, or rebuild safely. See `docs/frame-index.md`.
+
 ## Native Android library
 
 From the repository root, with Rust 1.86.0 selected for the Android build tooling:
@@ -92,7 +118,7 @@ Do not weaken an assertion, lint rule, parser bound, or error check simply to ma
 - Android `ContentResolver`/`Uri` types do not enter Rust.
 - `framescope-core` stays platform-neutral.
 - `framescope-video` owns media semantics, not UI strings.
-- `framescope-cache` must remain bounded by design when payload caching is introduced.
+- `framescope-cache` owns persistent metadata/source identity and must not become an unbounded pixel store.
 - FFI functions must not allow unwinding across JNI.
 
 ## Adding another ABI later
