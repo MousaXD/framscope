@@ -29,7 +29,11 @@ impl SimilarityStoreKey {
         }
         mode.validate()
             .map_err(|error| SimilarityStoreError::InvalidMode(error.to_string()))?;
-        Ok(Self { source, stream, mode })
+        Ok(Self {
+            source,
+            stream,
+            mode,
+        })
     }
 
     fn file_name(&self) -> String {
@@ -184,7 +188,9 @@ impl SimilarityStore {
             stream: expected.stream.clone(),
             mode: expected.mode.into(),
         };
-        if manifest.schema_version != SIMILARITY_STORE_SCHEMA_VERSION || manifest.key != expected_key {
+        if manifest.schema_version != SIMILARITY_STORE_SCHEMA_VERSION
+            || manifest.key != expected_key
+        {
             remove_if_present(&path)?;
             return Ok(SimilarityStoreLoad::InvalidatedStale);
         }
@@ -282,7 +288,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn root(tag: &str) -> PathBuf {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!("framescope-similarity-store-{tag}-{nonce}"))
     }
 
@@ -294,7 +303,11 @@ mod tests {
         FrameIndexStreamIdentity::from_stream(&StreamInfo {
             index: 2,
             media_kind: MediaKind::Video,
-            codec: CodecInfo { id: 27, name: "h264".into(), decoder_available: true },
+            codec: CodecInfo {
+                id: 27,
+                name: "h264".into(),
+                decoder_available: true,
+            },
             is_default: true,
             time_base: Some(TimeBase::new(1, 1000).unwrap()),
             duration: None,
@@ -305,7 +318,8 @@ mod tests {
             average_frame_rate: None,
             nominal_frame_rate: None,
             rotation_degrees: None,
-        }).unwrap()
+        })
+        .unwrap()
     }
 
     fn group() -> FrameGroup {
@@ -315,10 +329,22 @@ mod tests {
             first_frame: FrameId(10),
             last_frame: FrameId(11),
             frame_count: 2,
-            start_timestamp: MediaTimestamp { ticks: 100, time_base },
-            end_timestamp: MediaTimestamp { ticks: 140, time_base },
-            start_duration: Some(MediaDuration { ticks: 40, time_base }),
-            end_duration: Some(MediaDuration { ticks: 85, time_base }),
+            start_timestamp: MediaTimestamp {
+                ticks: 100,
+                time_base,
+            },
+            end_timestamp: MediaTimestamp {
+                ticks: 140,
+                time_base,
+            },
+            start_duration: Some(MediaDuration {
+                ticks: 40,
+                time_base,
+            }),
+            end_duration: Some(MediaDuration {
+                ticks: 85,
+                time_base,
+            }),
             representative_similarity_floor: 9_800,
         }
     }
@@ -329,7 +355,10 @@ mod tests {
         let store = SimilarityStore::new(&root);
         let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
         store.save(&key, &[group()]).unwrap();
-        assert_eq!(store.load(&key).unwrap(), SimilarityStoreLoad::Reused(vec![group()]));
+        assert_eq!(
+            store.load(&key).unwrap(),
+            SimilarityStoreLoad::Reused(vec![group()])
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -337,7 +366,14 @@ mod tests {
     fn config_changes_namespace() {
         let store = SimilarityStore::new(root("config"));
         let exact = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
-        let luma = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::LumaMeanAbsolute { minimum_similarity: 9_700 }).unwrap();
+        let luma = SimilarityStoreKey::new(
+            source("a"),
+            stream(),
+            SimilarityMode::LumaMeanAbsolute {
+                minimum_similarity: 9_700,
+            },
+        )
+        .unwrap();
         assert_ne!(store.path_for(&exact), store.path_for(&luma));
     }
 
@@ -349,7 +385,10 @@ mod tests {
         let path = store.path_for(&key);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"not-json").unwrap();
-        assert_eq!(store.load(&key).unwrap(), SimilarityStoreLoad::InvalidatedCorrupt);
+        assert_eq!(
+            store.load(&key).unwrap(),
+            SimilarityStoreLoad::InvalidatedCorrupt
+        );
         assert!(!path.exists());
         let _ = fs::remove_dir_all(root);
     }
@@ -366,7 +405,10 @@ mod tests {
         store.save(&kb, &[group()]).unwrap();
         store.invalidate_source(&a).unwrap();
         assert_eq!(store.load(&ka).unwrap(), SimilarityStoreLoad::Missing);
-        assert!(matches!(store.load(&kb).unwrap(), SimilarityStoreLoad::Reused(_)));
+        assert!(matches!(
+            store.load(&kb).unwrap(),
+            SimilarityStoreLoad::Reused(_)
+        ));
         let _ = fs::remove_dir_all(root);
     }
 }
