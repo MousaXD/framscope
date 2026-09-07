@@ -49,10 +49,9 @@ impl IndexedRgbaStream for DecoderIndexedRgbaStream {
             decoded.stride_bytes,
             decoded.pixels,
         )?;
-        self.next_frame_id = self
-            .next_frame_id
-            .checked_add(1)
-            .ok_or_else(|| SimilaritySourceError::new("frame_id_overflow", "sequential frame id space exhausted"))?;
+        self.next_frame_id = self.next_frame_id.checked_add(1).ok_or_else(|| {
+            SimilaritySourceError::new("frame_id_overflow", "sequential frame id space exhausted")
+        })?;
         Ok(Some(frame))
     }
 }
@@ -71,17 +70,11 @@ pub fn open_or_build_group_navigation_from_fd(
     cancellation: CancellationToken,
 ) -> Result<SimilarityGroupAnalysis, GroupNavigationError> {
     let expected_stream = index.stream_identity().clone();
-    open_or_build_group_navigation(
+    let result = open_or_build_group_navigation(
         index,
         store_root,
         policy,
         || {
-            if cancellation.is_cancelled() {
-                return Err(SimilaritySourceError::new(
-                    "cancelled",
-                    "similarity source open was cancelled",
-                ));
-            }
             let decoder = VideoDecoder::open_file_descriptor_with_options(
                 fd,
                 OpenOptions::default(),
@@ -92,7 +85,13 @@ pub fn open_or_build_group_navigation_from_fd(
             Ok(DecoderIndexedRgbaStream::new(decoder))
         },
         || cancellation.is_cancelled(),
-    )
+    );
+    match result {
+        Err(GroupNavigationError::Source(error)) if error.code == "cancelled" => {
+            Err(GroupNavigationError::Cancelled)
+        }
+        other => other,
+    }
 }
 
 fn validate_stream_identity(
@@ -207,5 +206,11 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "invalid_rgba_frame");
+    }
+
+    #[test]
+    fn native_cancellation_error_maps_to_stable_source_code() {
+        let error = source_from_frame_scope(FrameScopeError::Cancelled);
+        assert_eq!(error.code, "cancelled");
     }
 }
