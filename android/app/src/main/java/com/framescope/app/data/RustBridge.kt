@@ -4,7 +4,8 @@ import org.json.JSONObject
 
 interface NativeBridge {
     fun version(): Result<String>
-    fun inspectVideoFd(fd: Int): NativeInspection
+    fun inspectVideoFd(fd: Int, operationId: Long): NativeInspection
+    fun cancelInspection(operationId: Long): Boolean = false
 }
 
 object RustBridge : NativeBridge {
@@ -16,7 +17,10 @@ object RustBridge : NativeBridge {
     private external fun nativeVersion(): String?
 
     @JvmStatic
-    private external fun nativeInspectVideoFd(fd: Int): String?
+    private external fun nativeInspectVideoFd(fd: Int, operationId: Long): String?
+
+    @JvmStatic
+    private external fun nativeCancelInspection(operationId: Long): Boolean
 
     override fun version(): Result<String> {
         loadFailure?.let { return Result.failure(it) }
@@ -25,7 +29,7 @@ object RustBridge : NativeBridge {
         }
     }
 
-    override fun inspectVideoFd(fd: Int): NativeInspection {
+    override fun inspectVideoFd(fd: Int, operationId: Long): NativeInspection {
         loadFailure?.let {
             return NativeInspection.Failure(
                 code = "native_library_unavailable",
@@ -34,7 +38,7 @@ object RustBridge : NativeBridge {
             )
         }
 
-        val raw = runCatching { nativeInspectVideoFd(fd) }.getOrElse {
+        val raw = runCatching { nativeInspectVideoFd(fd, operationId) }.getOrElse {
             return NativeInspection.Failure(
                 code = "jni_error",
                 message = "Rust engine call failed: ${it.message ?: it::class.java.simpleName}",
@@ -47,6 +51,11 @@ object RustBridge : NativeBridge {
         )
 
         return parseResponse(raw)
+    }
+
+    override fun cancelInspection(operationId: Long): Boolean {
+        if (operationId <= 0L || loadFailure != null) return false
+        return runCatching { nativeCancelInspection(operationId) }.getOrDefault(false)
     }
 
     internal fun parseResponse(raw: String): NativeInspection = try {

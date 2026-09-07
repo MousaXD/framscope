@@ -110,8 +110,9 @@ class MainViewModelTest {
     }
 
     @Test
-    fun cancellingLongInspectionCancelsRepositoryAndSuppressesLateState() = runTest(dispatcher) {
+    fun cancellingLongInspectionCancelsNativeAndSuppressesLateState() = runTest(dispatcher) {
         var repositoryWasCancelled = false
+        var nativeCancelWasRequested = false
         val viewModel = MainViewModel(
             FakeRepository(
                 inspectBlock = { _, progress ->
@@ -123,6 +124,7 @@ class MainViewModelTest {
                         repositoryWasCancelled = true
                     }
                 },
+                onCancelActiveInspection = { nativeCancelWasRequested = true },
             ),
         )
 
@@ -134,6 +136,7 @@ class MainViewModelTest {
         viewModel.cancelInspection()
         dispatcher.scheduler.advanceUntilIdle()
 
+        assertTrue(nativeCancelWasRequested)
         assertTrue(repositoryWasCancelled)
         assertEquals(VideoInspectionState.Cancelled, viewModel.uiState.value.videoState)
     }
@@ -163,6 +166,7 @@ class MainViewModelTest {
             (InspectionProgress) -> Unit,
         ) -> Result<InspectedVideo> = { _, _ -> Result.failure(IllegalStateException("unused")) },
         private val engineResult: Result<String> = Result.success("framescope-rust/0.1.0"),
+        private val onCancelActiveInspection: () -> Unit = {},
     ) : FrameScopeRepository {
         override suspend fun engineVersion(): Result<String> = engineResult
 
@@ -170,5 +174,9 @@ class MainViewModelTest {
             uri: String,
             onProgress: (InspectionProgress) -> Unit,
         ): Result<InspectedVideo> = inspectBlock(uri, onProgress)
+
+        override fun cancelActiveInspection() {
+            onCancelActiveInspection()
+        }
     }
 }

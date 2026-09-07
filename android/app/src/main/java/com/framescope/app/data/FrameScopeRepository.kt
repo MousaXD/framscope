@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +20,8 @@ interface FrameScopeRepository {
         uri: String,
         onProgress: (InspectionProgress) -> Unit = {},
     ): Result<InspectedVideo>
+
+    fun cancelActiveInspection() {}
 }
 
 class AndroidFrameScopeRepository(
@@ -26,6 +29,8 @@ class AndroidFrameScopeRepository(
     private val nativeBridge: NativeBridge = RustBridge,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : FrameScopeRepository {
+    private val nextOperationId = AtomicLong(1L)
+    private val activeNativeOperationId = AtomicLong(NO_OPERATION)
 
     override suspend fun engineVersion(): Result<String> = withContext(ioDispatcher) {
         nativeBridge.version()
@@ -65,7 +70,14 @@ class AndroidFrameScopeRepository(
                     currentCoroutineContext().ensureActive()
                     onProgress(InspectionProgress.Inspecting)
 
-                    val nativeResult = nativeBridge.inspectVideoFd(pfd.fd)
+                    val operationId = nextOperationId.getAndIncrement()
+                    activeNativeOperationId.set(operationId)
+                    val nativeResult = try {
+                        currentCoroutineContext().ensureActive()
+                        nativeBridge.inspectVideoFd(pfd.fd, operationId)
+                    } finally {
+                        activeNativeOperationId.compareAndSet(operationId, NO_OPERATION)
+                    }
                     currentCoroutineContext().ensureActive()
 
                     when (nativeResult) {
@@ -108,6 +120,13 @@ class AndroidFrameScopeRepository(
         )
     }
 
+    override fun cancelActiveInspection() {
+        val operationId = activeNativeOperationId.get()
+        if (operationId != NO_OPERATION) {
+            nativeBridge.cancelInspection(operationId)
+        }
+    }
+
     private fun queryDisplayName(uri: Uri): String? {
         val cursor: Cursor = contentResolver.query(
             uri,
@@ -125,6 +144,7 @@ class AndroidFrameScopeRepository(
 
     private companion object {
         const val TAG = "FrameScopeRepository"
+        const val NO_OPERATION = 0L
     }
 }
 
