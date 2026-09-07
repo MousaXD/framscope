@@ -491,7 +491,9 @@ mod native {
                 time_base_den: raw.time_base_den,
                 duration_ticks: (raw.duration_ticks != AV_NOPTS_VALUE)
                     .then_some(raw.duration_ticks),
-                frame_count: u64::try_from(raw.frame_count).ok().filter(|count| *count > 0),
+                frame_count: u64::try_from(raw.frame_count)
+                    .ok()
+                    .filter(|count| *count > 0),
                 width: u32::try_from(raw.width).ok().filter(|value| *value > 0),
                 height: u32::try_from(raw.height).ok().filter(|value| *value > 0),
                 pixel_format: (raw.pixel_format >= 0).then_some(raw.pixel_format),
@@ -500,7 +502,8 @@ mod native {
                 average_rate_den: raw.average_rate_den,
                 nominal_rate_num: raw.nominal_rate_num,
                 nominal_rate_den: raw.nominal_rate_den,
-                rotation_degrees: (raw.has_rotation != 0).then_some(raw.rotation_degrees),
+                rotation_degrees: (raw.has_rotation != 0)
+                    .then_some((360 - raw.rotation_degrees).rem_euclid(360)),
             })
         }
 
@@ -508,9 +511,8 @@ mod native {
             let mut raw = FsFrameInfo::default();
             let mut error = FsError::default();
             // SAFETY: &mut self guarantees exclusive access to the decoder state. Outputs are live.
-            let result = unsafe {
-                framescope_ffmpeg_next_frame(self.raw.as_ptr(), &mut raw, &mut error)
-            };
+            let result =
+                unsafe { framescope_ffmpeg_next_frame(self.raw.as_ptr(), &mut raw, &mut error) };
             match result {
                 1 => Ok(Some(NativeFrame {
                     epoch: raw.epoch,
@@ -538,9 +540,8 @@ mod native {
         pub fn seek_us(&mut self, timestamp_us: i64) -> Result<(), NativeError> {
             let mut error = FsError::default();
             // SAFETY: &mut self guarantees exclusive access to format/decoder state.
-            let result = unsafe {
-                framescope_ffmpeg_seek_us(self.raw.as_ptr(), timestamp_us, &mut error)
-            };
+            let result =
+                unsafe { framescope_ffmpeg_seek_us(self.raw.as_ptr(), timestamp_us, &mut error) };
             if result < 0 {
                 return Err(error_from_ffi(&error));
             }
