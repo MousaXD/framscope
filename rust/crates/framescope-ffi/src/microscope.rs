@@ -1,12 +1,14 @@
 use framescope_cache::{
-    FRAME_INDEX_SCHEMA_VERSION, FrameId, FrameIndex, FrameIndexError, FrameIndexStreamIdentity,
-    SourceIdentity,
+    FRAME_INDEX_SCHEMA_VERSION, FrameCacheHierarchy, FrameId, FrameIndex, FrameIndexError,
+    FrameIndexStreamIdentity, SourceIdentity,
 };
 use framescope_core::FrameScopeError;
 use framescope_video::{
-    CancellationToken, IndexingError, IndexingOptions, MicroscopeNavigationError, MicroscopeStep,
-    MicroscopeTarget, MicroscopeTimestampSelection, OpenOptions, VideoDecoder,
+    CachedNavigationError, CancellationToken, IndexingError, IndexingOptions,
+    MicroscopeFramePresentation, MicroscopeNavigationError, MicroscopePresentationError,
+    MicroscopeStep, MicroscopeTarget, MicroscopeTimestampSelection, OpenOptions, VideoDecoder,
     build_or_resume_frame_index, microscope_step, microscope_target, microscope_timestamp_us,
+    present_microscope_frame,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -23,6 +25,9 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use super::{ENGINE_VERSION, OperationId, operation_token};
 
 const MAX_MICROSCOPE_SESSIONS: usize = 4;
+const MICROSCOPE_RAM_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+const MICROSCOPE_DISK_CACHE_BUDGET_BYTES: u64 = 0;
+const MAX_PRESENTATION_RGBA_BYTES: usize = 256 * 1024 * 1024;
 static NEXT_SESSION_ID: AtomicI64 = AtomicI64::new(1);
 static MICROSCOPE_SESSIONS: OnceLock<Mutex<HashMap<i64, Arc<Mutex<NavigationSession>>>>> =
     OnceLock::new();
@@ -49,6 +54,17 @@ struct SessionSnapshot {
 }
 
 #[derive(Debug, Serialize)]
+struct PreparedFrameDetails {
+    session_id: i64,
+    frame_id: u64,
+    generation: i64,
+    width: u32,
+    height: u32,
+    stride_bytes: usize,
+    byte_len: usize,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum MicroscopeResponse {
     Ok {
@@ -62,8 +78,22 @@ enum MicroscopeResponse {
     },
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PreparedFrameResponse {
+    Ok {
+        engine: &'static str,
+        frame: PreparedFrameDetails,
+    },
+    Error {
+        engine: &'static str,
+        code: &'static str,
+        message: String,
+    },
+}
+
 #[derive(Debug)]
-struct MicroscopeFailure {
+pub(crate) struct MicroscopeFailure {
     code: &'static str,
     message: String,
 }
@@ -74,6 +104,10 @@ impl MicroscopeFailure {
             code,
             message: message.into(),
         }
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
     }
 }
 
@@ -112,8 +146,11 @@ struct NavigationSession {
     index: FrameIndex,
     // Declared after `index` so the SQLite connection is dropped before cleanup removes the files.
     _ephemeral_index_cleanup: Option<EphemeralIndexCleanup>,
+    frame_cache: FrameCacheHierarchy,
     frame_count: u64,
     current: Option<FrameId>,
+    presentation_generation: i64,
+    current_presentation: Option<MicroscopeFramePresentation>,
 }
 
 #[cfg(not(unix))]
@@ -145,6 +182,10 @@ pub(crate) fn jump_timestamp_response(
     serialize_response(jump_to_timestamp(session_id, timestamp_us, selection))
 }
 
+pub(crate) fn prepare_frame_response(session_id: i64) -> String {
+    serialize_prepared_frame_response(prepare_current_frame(session_id))
+}
+
 pub(crate) fn close_session(session_id: i64) -> bool {
     if session_id <= 0 {
         return false;
@@ -159,6 +200,13 @@ pub(crate) fn panic_response() -> String {
     serialize_response(Err(MicroscopeFailure::new(
         "bridge_error",
         "native microscope operation aborted safely after an internal panic",
+    )))
+}
+
+pub(crate) fn panic_frame_response() -> String {
+    serialize_prepared_frame_response(Err(MicroscopeFailure::new(
+        "bridge_error",
+        "native frame preparation aborted safely after an internal panic",
     )))
 }
 
@@ -178,6 +226,29 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
         concat!(
             r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
             r#""message":"failed to serialize microscope response"}"#,
+        )
+        .into()
+    })
+}
+
+fn serialize_prepared_frame_response(
+    result: Result<PreparedFrameDetails, MicroscopeFailure>,
+) -> String {
+    let response = match result {
+        Ok(frame) => PreparedFrameResponse::Ok {
+            engine: ENGINE_VERSION,
+            frame,
+        },
+        Err(error) => PreparedFrameResponse::Error {
+            engine: ENGINE_VERSION,
+            code: error.code,
+            message: error.message,
+        },
+    };
+    serde_json::to_string(&response).unwrap_or_else(|_| {
+        concat!(
+            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
+            r#""message":"failed to serialize frame preparation response"}"#,
         )
         .into()
     })
@@ -213,8 +284,9 @@ fn open_session(
         FrameIndexStreamIdentity::from_stream(probe.selected_stream()).map_err(from_index)?;
     drop(probe);
 
+    let cache_root = Path::new(cache_root);
     let index_path = frame_index_path(
-        Path::new(cache_root),
+        cache_root,
         &source_identity,
         &stream_identity,
         operation_id,
@@ -236,13 +308,22 @@ fn open_session(
 
     let frame_count = index.frame_count().map_err(from_index)?.unwrap_or(0);
     let current = (frame_count > 0).then_some(FrameId::ZERO);
+    let presentation_generation = if current.is_some() { 1 } else { 0 };
+    let frame_cache = FrameCacheHierarchy::open_resilient(
+        cache_root.join("microscope-frame-cache"),
+        MICROSCOPE_RAM_CACHE_BUDGET_BYTES,
+        MICROSCOPE_DISK_CACHE_BUDGET_BYTES,
+    );
     let session_id = next_session_id()?;
     let session = NavigationSession {
         _source_fd: source_fd,
         index,
         _ephemeral_index_cleanup: ephemeral_index_cleanup,
+        frame_cache,
         frame_count,
         current,
+        presentation_generation,
+        current_presentation: None,
     };
     let snapshot = snapshot(session_id, &session)?;
 
@@ -303,6 +384,29 @@ fn next_session_id() -> Result<i64, MicroscopeFailure> {
         })
 }
 
+fn next_presentation_generation(current: i64) -> Result<i64, MicroscopeFailure> {
+    current
+        .checked_add(1)
+        .filter(|next| *next > 0)
+        .ok_or_else(|| {
+            MicroscopeFailure::new("bridge_error", "frame presentation generation exhausted")
+        })
+}
+
+#[cfg(unix)]
+fn set_current_frame(
+    session: &mut NavigationSession,
+    frame_id: FrameId,
+) -> Result<(), MicroscopeFailure> {
+    if session.current != Some(frame_id) {
+        session.current = Some(frame_id);
+        session.current_presentation = None;
+        session.presentation_generation =
+            next_presentation_generation(session.presentation_generation)?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn step_session(session_id: i64, delta: i32) -> Result<SessionSnapshot, MicroscopeFailure> {
     let step = match delta {
@@ -320,7 +424,7 @@ fn step_session(session_id: i64, delta: i32) -> Result<SessionSnapshot, Microsco
             MicroscopeFailure::new("no_frames", "video contains no indexed frames")
         })?;
         let target = microscope_step(&session.index, current, step).map_err(from_microscope)?;
-        session.current = Some(target.frame_id());
+        set_current_frame(session, target.frame_id())?;
         snapshot(session_id, session)
     })
 }
@@ -340,7 +444,7 @@ fn jump_to_frame(session_id: i64, frame_id: i64) -> Result<SessionSnapshot, Micr
     with_session_mut(session_id, |session| {
         let target =
             microscope_target(&session.index, FrameId(requested)).map_err(from_microscope)?;
-        session.current = Some(target.frame_id());
+        set_current_frame(session, target.frame_id())?;
         snapshot(session_id, session)
     })
 }
@@ -373,7 +477,7 @@ fn jump_to_timestamp(
     with_session_mut(session_id, |session| {
         let target = microscope_timestamp_us(&session.index, timestamp_us, selection)
             .map_err(from_microscope)?;
-        session.current = Some(target.frame_id());
+        set_current_frame(session, target.frame_id())?;
         snapshot(session_id, session)
     })
 }
@@ -387,6 +491,103 @@ fn jump_to_timestamp(
     Err(MicroscopeFailure::new(
         "bridge_error",
         "microscope sessions are unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn prepare_current_frame(session_id: i64) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+    with_session_mut(session_id, |session| {
+        let frame_id = session.current.ok_or_else(|| {
+            MicroscopeFailure::new("no_frames", "video contains no indexed frames")
+        })?;
+        let source_fd = session._source_fd.as_fd();
+        let presentation = present_microscope_frame(
+            &session.index,
+            &mut session.frame_cache,
+            || open_decoder(source_fd, CancellationToken::new()),
+            frame_id,
+        )
+        .map_err(from_presentation)?;
+        if presentation.pixels.byte_len() > MAX_PRESENTATION_RGBA_BYTES {
+            return Err(MicroscopeFailure::new(
+                "frame_too_large",
+                "decoded frame exceeds the Android presentation byte limit",
+            ));
+        }
+        let details = PreparedFrameDetails {
+            session_id,
+            frame_id: presentation.frame_id().0,
+            generation: session.presentation_generation,
+            width: presentation.pixels.width,
+            height: presentation.pixels.height,
+            stride_bytes: presentation.pixels.stride_bytes,
+            byte_len: presentation.pixels.byte_len(),
+        };
+        session.current_presentation = Some(presentation);
+        Ok(details)
+    })
+}
+
+#[cfg(not(unix))]
+fn prepare_current_frame(_session_id: i64) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+    Err(MicroscopeFailure::new(
+        "bridge_error",
+        "microscope frame presentation is unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+pub(crate) fn copy_prepared_frame(
+    session_id: i64,
+    generation: i64,
+    destination: &mut [u8],
+) -> Result<usize, MicroscopeFailure> {
+    if generation <= 0 {
+        return Err(MicroscopeFailure::new(
+            "invalid_request",
+            "frame presentation generation must be positive",
+        ));
+    }
+    with_session_mut(session_id, |session| {
+        if generation != session.presentation_generation {
+            return Err(MicroscopeFailure::new(
+                "stale_generation",
+                "requested frame presentation is stale after navigation",
+            ));
+        }
+        let presentation = session.current_presentation.as_ref().ok_or_else(|| {
+            MicroscopeFailure::new(
+                "no_prepared_frame",
+                "no source-quality frame has been prepared for the current microscope position",
+            )
+        })?;
+        if session.current != Some(presentation.frame_id()) {
+            return Err(MicroscopeFailure::new(
+                "stale_generation",
+                "prepared frame no longer matches the current microscope position",
+            ));
+        }
+        let pixels = presentation.pixels.pixels();
+        if destination.len() < pixels.len() {
+            return Err(MicroscopeFailure::new(
+                "buffer_too_small",
+                "direct frame buffer is smaller than the prepared RGBA payload",
+            ));
+        }
+        destination[..pixels.len()].copy_from_slice(pixels);
+        Ok(pixels.len())
+    })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn copy_prepared_frame(
+    _session_id: i64,
+    _generation: i64,
+    _destination: &mut [u8],
+) -> Result<usize, MicroscopeFailure> {
+    Err(MicroscopeFailure::new(
+        "bridge_error",
+        "microscope frame presentation is unavailable on this platform",
     ))
 }
 
@@ -523,6 +724,45 @@ fn from_microscope(error: MicroscopeNavigationError) -> MicroscopeFailure {
         }
     };
     MicroscopeFailure::new(code, error.to_string())
+}
+
+fn from_cached_navigation(error: CachedNavigationError) -> MicroscopeFailure {
+    match error {
+        CachedNavigationError::Decoder(error) => from_frame_scope(error),
+        CachedNavigationError::Index(error) => from_index(error),
+        CachedNavigationError::Cache(error) => {
+            MicroscopeFailure::new("cache_error", error.to_string())
+        }
+        CachedNavigationError::IncompleteIndex => {
+            MicroscopeFailure::new("index_incomplete", "frame index is incomplete")
+        }
+        CachedNavigationError::FrameNotIndexed => {
+            MicroscopeFailure::new("frame_out_of_range", "frame is not indexed")
+        }
+        CachedNavigationError::StreamIdentityMismatch => MicroscopeFailure::new(
+            "stream_identity_mismatch",
+            "fresh decoder stream does not match the indexed stream",
+        ),
+        CachedNavigationError::TimelineMismatch => MicroscopeFailure::new(
+            "timeline_mismatch",
+            "decoded presentation timeline diverged from the persistent frame index",
+        ),
+        CachedNavigationError::UnexpectedEof => MicroscopeFailure::new(
+            "unexpected_eof",
+            "decoder reached EOF before the requested indexed frame",
+        ),
+    }
+}
+
+fn from_presentation(error: MicroscopePresentationError) -> MicroscopeFailure {
+    match error {
+        MicroscopePresentationError::Target(error) => from_microscope(error),
+        MicroscopePresentationError::Navigation(error) => from_cached_navigation(error),
+        MicroscopePresentationError::IdentityMismatch => MicroscopeFailure::new(
+            "presentation_identity_mismatch",
+            "microscope identity diverged from the source-quality frame presentation",
+        ),
+    }
 }
 
 fn from_io(error: io::Error) -> MicroscopeFailure {
@@ -672,6 +912,12 @@ mod tests {
             frame_index_path(root, &source, &stream, 11),
             frame_index_path(root, &source, &stream, 12)
         );
+    }
+
+    #[test]
+    fn presentation_generation_advances_and_rejects_overflow() {
+        assert_eq!(next_presentation_generation(1).unwrap(), 2);
+        assert!(next_presentation_generation(i64::MAX).is_err());
     }
 
     #[cfg(unix)]
