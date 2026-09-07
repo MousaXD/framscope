@@ -11,5 +11,7 @@ default = []
 system-ffmpeg = ["framescope-ffmpeg/system-ffmpeg"]
 
 [dependencies]
+framescope-cache = { path = "../framescope-cache" }
 framescope-core = { path = "../framescope-core" }
 framescope-ffmpeg = { path = "../framescope-ffmpeg" }
+thiserror.workspace = true
