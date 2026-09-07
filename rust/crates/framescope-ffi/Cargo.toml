@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 framescope-cache = { path = "../framescope-cache" }
 framescope-core = { path = "../framescope-core" }
+framescope-extraction-image = { path = "../framescope-extraction-image" }
 framescope-video = { path = "../framescope-video" }
 jni.workspace = true
 libc.workspace = true
