@@ -3,6 +3,7 @@ use crate::{
     FrameCacheKey, ProxyFormat, ProxyFrame, RamCacheStats, RamFrameCache, RamInsertResult,
     SourceIdentity,
 };
+use std::io;
 use std::path::Path;
 
 /// Result of a navigation-cache lookup.
@@ -28,10 +29,16 @@ pub struct CacheHierarchyStats {
 /// Lookup order is always RAM first, then compressed disk proxy storage. The hierarchy never
 /// promotes a proxy into `CachedFrame`; decoding proxy bytes back into RGBA is a rendering concern
 /// and cannot silently satisfy an original-quality request.
+///
+/// The disk tier is disposable. If it cannot be opened, the hierarchy keeps the RAM tier usable and
+/// records the disk failure. Preview navigation can then treat disk access as a recoverable miss and
+/// fall back to the authoritative source decoder.
 #[derive(Debug)]
 pub struct FrameCacheHierarchy {
     ram: RamFrameCache,
-    disk: DiskProxyCache,
+    disk: Option<DiskProxyCache>,
+    disk_budget_bytes: u64,
+    disk_unavailable_reason: Option<String>,
 }
 
 impl FrameCacheHierarchy {
@@ -40,9 +47,16 @@ impl FrameCacheHierarchy {
         ram_budget_bytes: usize,
         disk_budget_bytes: u64,
     ) -> Result<Self, DiskCacheError> {
+        let (disk, disk_unavailable_reason) = match DiskProxyCache::open(disk_root, disk_budget_bytes)
+        {
+            Ok(disk) => (Some(disk), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         Ok(Self {
             ram: RamFrameCache::new(ram_budget_bytes),
-            disk: DiskProxyCache::open(disk_root, disk_budget_bytes)?,
+            disk,
+            disk_budget_bytes,
+            disk_unavailable_reason,
         })
     }
 
@@ -50,7 +64,10 @@ impl FrameCacheHierarchy {
         if let Some(frame) = self.ram.get(key) {
             return Ok(CacheLookup::Full(frame));
         }
-        if let Some(proxy) = self.disk.get(key)? {
+        let Some(disk) = self.disk.as_mut() else {
+            return Err(self.disk_unavailable_error());
+        };
+        if let Some(proxy) = disk.get(key)? {
             return Ok(CacheLookup::Proxy(proxy));
         }
         Ok(CacheLookup::Miss)
@@ -75,13 +92,20 @@ impl FrameCacheHierarchy {
         format: ProxyFormat,
         bytes: &[u8],
     ) -> Result<DiskInsertResult, DiskCacheError> {
-        self.disk.insert(key, format, bytes)
+        let Some(disk) = self.disk.as_mut() else {
+            return Err(self.disk_unavailable_error());
+        };
+        disk.insert(key, format, bytes)
     }
 
     pub fn stats(&self) -> CacheHierarchyStats {
         CacheHierarchyStats {
             ram: self.ram.stats(),
-            disk: self.disk.stats(),
+            disk: self
+                .disk
+                .as_ref()
+                .map(DiskProxyCache::stats)
+                .unwrap_or_default(),
         }
     }
 
@@ -90,7 +114,24 @@ impl FrameCacheHierarchy {
     }
 
     pub fn disk_budget_bytes(&self) -> u64 {
-        self.disk.budget_bytes()
+        self.disk_budget_bytes
+    }
+
+    pub fn disk_available(&self) -> bool {
+        self.disk.is_some()
+    }
+
+    pub fn disk_unavailable_reason(&self) -> Option<&str> {
+        self.disk_unavailable_reason.as_deref()
+    }
+
+    fn disk_unavailable_error(&self) -> DiskCacheError {
+        DiskCacheError::Io(io::Error::other(
+            self.disk_unavailable_reason
+                .as_deref()
+                .unwrap_or("disk proxy cache is unavailable")
+                .to_owned(),
+        ))
     }
 }
 
@@ -99,12 +140,18 @@ impl CacheStore for FrameCacheHierarchy {
 
     fn invalidate_source(&mut self, source: &SourceIdentity) -> Result<(), Self::Error> {
         self.ram.invalidate_source(source);
-        self.disk.invalidate_source(source)
+        if let Some(disk) = self.disk.as_mut() {
+            disk.invalidate_source(source)?;
+        }
+        Ok(())
     }
 
     fn clear(&mut self) -> Result<(), Self::Error> {
         self.ram.clear();
-        self.disk.clear()
+        if let Some(disk) = self.disk.as_mut() {
+            disk.clear()?;
+        }
+        Ok(())
     }
 }
 
@@ -227,5 +274,29 @@ mod tests {
         assert_eq!(cache.disk_budget_bytes(), 1024);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unavailable_disk_tier_does_not_disable_ram_cache() {
+        let root = temp_root("disk-unavailable");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_file(&root);
+        fs::write(&root, b"not-a-directory").unwrap();
+
+        let source = strong_source("source-d");
+        let key = FrameCacheKey::new(&source, 0, FrameId(1)).unwrap();
+        let missing = FrameCacheKey::new(&source, 0, FrameId(2)).unwrap();
+        let mut cache = FrameCacheHierarchy::open(&root, 1024, 1024).unwrap();
+
+        assert!(!cache.disk_available());
+        assert!(cache.disk_unavailable_reason().is_some());
+        assert!(cache.lookup(&missing).is_err());
+
+        cache.insert_full(rgba_frame(key.clone()));
+        assert!(matches!(cache.lookup(&key), Ok(CacheLookup::Full(_))));
+        cache.clear().unwrap();
+        assert!(cache.lookup_full(&key).is_none());
+
+        let _ = fs::remove_file(root);
     }
 }
