@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 framescope-cache = { path = "../framescope-cache" }
 framescope-core = { path = "../framescope-core" }
+framescope-perceptual = { path = "../framescope-perceptual" }
 framescope-similarity = { path = "../framescope-similarity" }
 serde.workspace = true
 serde_json.workspace = true

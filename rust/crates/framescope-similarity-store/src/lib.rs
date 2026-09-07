@@ -2,6 +2,7 @@
 
 use framescope_cache::{FrameId, FrameIndexStreamIdentity, SourceIdentity};
 use framescope_core::{MediaDuration, MediaTimestamp};
+use framescope_perceptual::{HybridSimilarityEngine, HybridSimilarityPolicy};
 use framescope_similarity::{FrameGroup, SimilarityMode};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -9,39 +10,68 @@ use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 1;
+pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimilarityStoreConfig {
+    Basic(SimilarityMode),
+    Hybrid(HybridSimilarityPolicy),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimilarityStoreKey {
     pub source: SourceIdentity,
     pub stream: FrameIndexStreamIdentity,
-    pub mode: SimilarityMode,
+    pub config: SimilarityStoreConfig,
 }
 
 impl SimilarityStoreKey {
+    /// Backwards-compatible constructor for exact and direct-luma grouping modes.
     pub fn new(
         source: SourceIdentity,
         stream: FrameIndexStreamIdentity,
         mode: SimilarityMode,
     ) -> Result<Self, SimilarityStoreError> {
+        mode.validate()
+            .map_err(|error| SimilarityStoreError::InvalidConfig(error.to_string()))?;
+        Self::for_config(source, stream, SimilarityStoreConfig::Basic(mode))
+    }
+
+    pub fn new_hybrid(
+        source: SourceIdentity,
+        stream: FrameIndexStreamIdentity,
+        policy: HybridSimilarityPolicy,
+    ) -> Result<Self, SimilarityStoreError> {
+        HybridSimilarityEngine::new(policy)
+            .map_err(|error| SimilarityStoreError::InvalidConfig(error.to_string()))?;
+        Self::for_config(source, stream, SimilarityStoreConfig::Hybrid(policy))
+    }
+
+    fn for_config(
+        source: SourceIdentity,
+        stream: FrameIndexStreamIdentity,
+        config: SimilarityStoreConfig,
+    ) -> Result<Self, SimilarityStoreError> {
         if !source.is_reuse_safe() {
             return Err(SimilarityStoreError::UnsafeSourceIdentity);
         }
-        mode.validate()
-            .map_err(|error| SimilarityStoreError::InvalidMode(error.to_string()))?;
         Ok(Self {
             source,
             stream,
-            mode,
+            config,
         })
     }
 
     fn file_name(&self) -> String {
-        let suffix = match self.mode {
-            SimilarityMode::Exact => "exact".to_owned(),
-            SimilarityMode::LumaMeanAbsolute { minimum_similarity } => {
-                format!("luma-{minimum_similarity}")
-            }
+        let suffix = match self.config {
+            SimilarityStoreConfig::Basic(SimilarityMode::Exact) => "exact".to_owned(),
+            SimilarityStoreConfig::Basic(SimilarityMode::LumaMeanAbsolute {
+                minimum_similarity,
+            }) => format!("luma-{minimum_similarity}"),
+            SimilarityStoreConfig::Hybrid(HybridSimilarityPolicy {
+                max_hash_distance,
+                minimum_luma_similarity,
+            }) => format!("hybrid-h{max_hash_distance}-l{minimum_luma_similarity}"),
         };
         format!("stream-{}-{suffix}.json", self.stream.stream_index)
     }
@@ -59,8 +89,8 @@ pub enum SimilarityStoreLoad {
 pub enum SimilarityStoreError {
     #[error("source identity is unsafe for persisted similarity reuse")]
     UnsafeSourceIdentity,
-    #[error("invalid similarity mode: {0}")]
-    InvalidMode(String),
+    #[error("invalid similarity store configuration: {0}")]
+    InvalidConfig(String),
     #[error("invalid frame group: {0}")]
     InvalidGroup(String),
     #[error("similarity store I/O failed: {0}")]
@@ -73,23 +103,36 @@ pub enum SimilarityStoreError {
 struct PersistedKey {
     source: SourceIdentity,
     stream: FrameIndexStreamIdentity,
-    mode: PersistedMode,
+    config: PersistedConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PersistedMode {
+enum PersistedConfig {
     Exact,
-    LumaMeanAbsolute { minimum_similarity: u16 },
+    LumaMeanAbsolute {
+        minimum_similarity: u16,
+    },
+    Hybrid {
+        max_hash_distance: u8,
+        minimum_luma_similarity: u16,
+    },
 }
 
-impl From<SimilarityMode> for PersistedMode {
-    fn from(value: SimilarityMode) -> Self {
+impl From<SimilarityStoreConfig> for PersistedConfig {
+    fn from(value: SimilarityStoreConfig) -> Self {
         match value {
-            SimilarityMode::Exact => Self::Exact,
-            SimilarityMode::LumaMeanAbsolute { minimum_similarity } => {
-                Self::LumaMeanAbsolute { minimum_similarity }
-            }
+            SimilarityStoreConfig::Basic(SimilarityMode::Exact) => Self::Exact,
+            SimilarityStoreConfig::Basic(SimilarityMode::LumaMeanAbsolute {
+                minimum_similarity,
+            }) => Self::LumaMeanAbsolute { minimum_similarity },
+            SimilarityStoreConfig::Hybrid(HybridSimilarityPolicy {
+                max_hash_distance,
+                minimum_luma_similarity,
+            }) => Self::Hybrid {
+                max_hash_distance,
+                minimum_luma_similarity,
+            },
         }
     }
 }
@@ -186,7 +229,7 @@ impl SimilarityStore {
         let expected_key = PersistedKey {
             source: expected.source.clone(),
             stream: expected.stream.clone(),
-            mode: expected.mode.into(),
+            config: expected.config.into(),
         };
         if manifest.schema_version != SIMILARITY_STORE_SCHEMA_VERSION
             || manifest.key != expected_key
@@ -228,7 +271,7 @@ impl SimilarityStore {
             key: PersistedKey {
                 source: key.source.clone(),
                 stream: key.stream.clone(),
-                mode: key.mode.into(),
+                config: key.config.into(),
             },
             groups: groups.iter().map(PersistedFrameGroup::from).collect(),
         };
@@ -242,15 +285,19 @@ impl SimilarityStore {
     }
 
     pub fn invalidate_source(&self, source: &SourceIdentity) -> Result<(), SimilarityStoreError> {
-        let path = self
-            .root
-            .join(format!("v{SIMILARITY_STORE_SCHEMA_VERSION}"))
-            .join(source.stable_key());
-        match fs::remove_dir_all(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+        let source_key = source.stable_key();
+        for schema_version in 1..=SIMILARITY_STORE_SCHEMA_VERSION {
+            let path = self
+                .root
+                .join(format!("v{schema_version}"))
+                .join(&source_key);
+            match fs::remove_dir_all(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        Ok(())
     }
 }
 
@@ -349,11 +396,31 @@ mod tests {
         }
     }
 
+    fn hybrid(max_hash_distance: u8, minimum_luma_similarity: u16) -> HybridSimilarityPolicy {
+        HybridSimilarityPolicy {
+            max_hash_distance,
+            minimum_luma_similarity,
+        }
+    }
+
     #[test]
     fn round_trip_reuses_exact_identity() {
         let root = root("roundtrip");
         let store = SimilarityStore::new(&root);
         let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
+        store.save(&key, &[group()]).unwrap();
+        assert_eq!(
+            store.load(&key).unwrap(),
+            SimilarityStoreLoad::Reused(vec![group()])
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hybrid_round_trip_reuses_only_exact_policy() {
+        let root = root("hybrid-roundtrip");
+        let store = SimilarityStore::new(&root);
+        let key = SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
         store.save(&key, &[group()]).unwrap();
         assert_eq!(
             store.load(&key).unwrap(),
@@ -374,7 +441,44 @@ mod tests {
             },
         )
         .unwrap();
-        assert_ne!(store.path_for(&exact), store.path_for(&luma));
+        let hybrid_a =
+            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
+        let hybrid_b =
+            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(9, 9_700)).unwrap();
+        let hybrid_c =
+            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_800)).unwrap();
+
+        let paths = [
+            store.path_for(&exact),
+            store.path_for(&luma),
+            store.path_for(&hybrid_a),
+            store.path_for(&hybrid_b),
+            store.path_for(&hybrid_c),
+        ];
+        for left in 0..paths.len() {
+            for right in (left + 1)..paths.len() {
+                assert_ne!(paths[left], paths[right]);
+            }
+        }
+    }
+
+    #[test]
+    fn schema_bump_separates_old_persistence_namespace() {
+        let store = SimilarityStore::new(root("schema"));
+        let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
+        assert!(store.path_for(&key).starts_with(store.root.join("v2")));
+    }
+
+    #[test]
+    fn invalid_hybrid_policy_is_rejected_before_persistence() {
+        assert!(matches!(
+            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(65, 9_700)),
+            Err(SimilarityStoreError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 10_001)),
+            Err(SimilarityStoreError::InvalidConfig(_))
+        ));
     }
 
     #[test]
@@ -394,17 +498,23 @@ mod tests {
     }
 
     #[test]
-    fn source_invalidation_is_scoped() {
+    fn source_invalidation_is_scoped_and_cleans_legacy_schema() {
         let root = root("invalidate");
         let store = SimilarityStore::new(&root);
         let a = source("a");
         let b = source("b");
-        let ka = SimilarityStoreKey::new(a.clone(), stream(), SimilarityMode::Exact).unwrap();
-        let kb = SimilarityStoreKey::new(b, stream(), SimilarityMode::Exact).unwrap();
+        let ka = SimilarityStoreKey::new_hybrid(a.clone(), stream(), hybrid(8, 9_700)).unwrap();
+        let kb = SimilarityStoreKey::new_hybrid(b, stream(), hybrid(8, 9_700)).unwrap();
         store.save(&ka, &[group()]).unwrap();
         store.save(&kb, &[group()]).unwrap();
+
+        let legacy_a = root.join("v1").join(a.stable_key());
+        fs::create_dir_all(&legacy_a).unwrap();
+        fs::write(legacy_a.join("legacy.json"), b"legacy").unwrap();
+
         store.invalidate_source(&a).unwrap();
         assert_eq!(store.load(&ka).unwrap(), SimilarityStoreLoad::Missing);
+        assert!(!legacy_a.exists());
         assert!(matches!(
             store.load(&kb).unwrap(),
             SimilarityStoreLoad::Reused(_)
