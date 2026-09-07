@@ -1,6 +1,8 @@
 //! Narrow JNI boundary for the Android app.
 
+mod frame_handoff;
 mod microscope;
+pub mod presentation_handoff;
 
 use framescope_core::{FrameScopeError, MediaKind, StreamInfo, VideoInfo};
 use framescope_video::{CancellationToken, ObservedFrameRateMode, OpenOptions, VideoDecoder};
