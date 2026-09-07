@@ -38,7 +38,11 @@ class MainActivity : ComponentActivity() {
 
                 FrameScopeScreen(
                     state = state,
-                    onOpenVideo = { picker.launch(arrayOf("video/*")) },
+                    onOpenVideo = {
+                        viewModel.onPickerStarted()
+                        picker.launch(arrayOf("video/*"))
+                    },
+                    onCancelInspection = viewModel::cancelInspection,
                     onDismissError = viewModel::clearError,
                 )
             }

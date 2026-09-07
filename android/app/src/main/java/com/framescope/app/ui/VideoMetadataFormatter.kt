@@ -3,7 +3,8 @@ package com.framescope.app.ui
 import java.util.Locale
 
 object VideoMetadataFormatter {
-    fun duration(durationUs: Long): String {
+    fun duration(durationUs: Long?): String {
+        if (durationUs == null) return "Unknown"
         val totalSeconds = durationUs.coerceAtLeast(0) / 1_000_000
         val hours = totalSeconds / 3600
         val minutes = (totalSeconds % 3600) / 60
