@@ -191,11 +191,7 @@ where
         }
 
         current = next_frame_id(current)?;
-        decoded = next_decoded(
-            &mut decoder,
-            &mut decoded_frames,
-            &mut is_cancelled,
-        )?;
+        decoded = next_decoded(&mut decoder, &mut decoded_frames, &mut is_cancelled)?;
     }
 
     if selected_frames != plan.selected_count {
@@ -221,9 +217,11 @@ fn validate_plan(
     if status.lifecycle != FrameIndexLifecycle::Complete {
         return Err(BatchExtractionFailure::IncompleteIndex);
     }
-    let frame_count = status.frame_count.ok_or(BatchExtractionFailure::InvalidPlan(
-        "complete index is missing its frame count",
-    ))?;
+    let frame_count = status
+        .frame_count
+        .ok_or(BatchExtractionFailure::InvalidPlan(
+            "complete index is missing its frame count",
+        ))?;
     if plan.selected_count == 0 {
         return Err(BatchExtractionFailure::InvalidPlan(
             "selected frame count must be positive",
@@ -274,19 +272,13 @@ fn validate_plan(
     Ok(last_selected)
 }
 
-fn open_checked_decoder<D, F>(
-    index: &FrameIndex,
-    open: &mut F,
-) -> Result<D, BatchExtractionFailure>
+fn open_checked_decoder<D, F>(index: &FrameIndex, open: &mut F) -> Result<D, BatchExtractionFailure>
 where
     D: RgbaNavigationDecoder,
     F: FnMut() -> Result<D, FrameScopeError>,
 {
     let decoder = open().map_err(BatchExtractionFailure::Decoder)?;
-    ensure_stream_identity(
-        index,
-        decoder.selected_stream_for_rgba_navigation(),
-    )?;
+    ensure_stream_identity(index, decoder.selected_stream_for_rgba_navigation())?;
     Ok(decoder)
 }
 
@@ -633,7 +625,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(emitted, vec![(FrameId(1), 11), (FrameId(3), 13), (FrameId(5), 15)]);
+        assert_eq!(
+            emitted,
+            vec![(FrameId(1), 11), (FrameId(3), 13), (FrameId(5), 15)]
+        );
         assert_eq!(report.selected_frames, 3);
         assert_eq!(report.decoded_frames, 6);
         assert!(report.used_keyframe_seek);
@@ -649,11 +644,7 @@ mod tests {
     #[test]
     fn seek_alignment_failure_falls_back_before_any_output() {
         let (path, index) = complete_index();
-        let plan = plan_extraction(
-            &index,
-            ExtractionRequest::current_frame(FrameId(1)),
-        )
-        .unwrap();
+        let plan = plan_extraction(&index, ExtractionRequest::current_frame(FrameId(1))).unwrap();
         let good = source_frames();
         let counters = counters();
         let opened = Rc::new(Cell::new(0_u64));
