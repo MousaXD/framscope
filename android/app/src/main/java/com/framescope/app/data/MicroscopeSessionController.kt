@@ -81,14 +81,17 @@ class MicroscopeSessionController(
             )
 
         val prepared = frameBridge.prepare(target.sessionId)
+        if (prepared is NativeFramePreparation.Failure) {
+            return NativeFrameCopy.Failure(
+                code = prepared.code,
+                message = prepared.message,
+            )
+        }
         if (prepared !is NativeFramePreparation.Success) {
-            return when (prepared) {
-                is NativeFramePreparation.Failure -> NativeFrameCopy.Failure(
-                    code = prepared.code,
-                    message = prepared.message,
-                )
-                else -> error("unreachable")
-            }
+            return NativeFrameCopy.Failure(
+                code = "bridge_error",
+                message = "Native frame preparation returned an unsupported result.",
+            )
         }
         if (prepared.frame.sessionId != target.sessionId || prepared.frame.frameId != expectedFrameId) {
             return NativeFrameCopy.Failure(
