@@ -136,22 +136,16 @@ where
 
     let mut next_group = Some(first_group);
     let mut representative_frames = 0_u64;
-    let batch_result = extract_rgba_plan(
-        index,
-        plan,
-        open_fresh_decoder,
-        is_cancelled,
-        |frame| {
-            filter_representative(
-                frame,
-                &mut cursor,
-                &mut next_group,
-                &mut representative_frames,
-                group_count,
-                &mut visitor,
-            )
-        },
-    );
+    let batch_result = extract_rgba_plan(index, plan, open_fresh_decoder, is_cancelled, |frame| {
+        filter_representative(
+            frame,
+            &mut cursor,
+            &mut next_group,
+            &mut representative_frames,
+            group_count,
+            &mut visitor,
+        )
+    });
 
     let batch = match batch_result {
         Ok(report) => report,
@@ -164,9 +158,9 @@ where
         Err(BatchExtractionError::Visitor(FilterVisitorError::Visitor(error))) => {
             return Err(GroupBatchExtractionError::Visitor(error));
         }
-        Err(BatchExtractionError::Visitor(
-            FilterVisitorError::InvalidNavigation(message),
-        )) => return Err(GroupBatchExtractionError::InvalidNavigation(message)),
+        Err(BatchExtractionError::Visitor(FilterVisitorError::InvalidNavigation(message))) => {
+            return Err(GroupBatchExtractionError::InvalidNavigation(message));
+        }
     };
 
     if representative_frames != group_count || next_group.is_some() || cursor.remaining() != 0 {
@@ -229,9 +223,7 @@ where
     })
     .map_err(FilterVisitorError::Visitor)?;
 
-    *next_group = cursor
-        .next_group()
-        .map_err(FilterVisitorError::Groups)?;
+    *next_group = cursor.next_group().map_err(FilterVisitorError::Groups)?;
     Ok(())
 }
 
