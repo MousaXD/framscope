@@ -1,0 +1,56 @@
+name: Phase 4 similarity/grouping contracts
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase4-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_HOST_TOOLCHAIN: '1.85.1'
+
+jobs:
+  phase4-similarity-grouping:
+    name: phase4-similarity-grouping
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_HOST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_HOST_TOOLCHAIN"
+
+      - name: Enforce Phase 4 lint contracts
+        working-directory: rust
+        run: |
+          cargo fmt --all --check
+          cargo clippy -p framescope-similarity --all-targets -- -D warnings
+          cargo clippy -p framescope-perceptual --all-targets -- -D warnings
+          cargo clippy -p framescope-grouping --all-targets -- -D warnings
+          cargo clippy -p framescope-grouping-session --all-targets -- -D warnings
+          cargo clippy -p framescope-similarity-store --all-targets -- -D warnings
+
+      - name: Verify Phase 4 correctness contracts
+        working-directory: rust
+        run: |
+          cargo test -p framescope-similarity
+          cargo test -p framescope-perceptual
+          cargo test -p framescope-grouping
+          cargo test -p framescope-grouping-session
+          cargo test -p framescope-similarity-store
+
+      - name: Exercise bounded long-stream grouping contract
+        working-directory: rust
+        run: |
+          cargo test -p framescope-grouping-session tests::long_stream_is_consumed_incrementally_without_collecting_inputs -- --exact
