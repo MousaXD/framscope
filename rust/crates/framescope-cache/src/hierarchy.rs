@@ -66,11 +66,11 @@ impl FrameCacheHierarchy {
         ram_budget_bytes: usize,
         disk_budget_bytes: u64,
     ) -> Self {
-        let (disk, disk_unavailable_reason) = match DiskProxyCache::open(disk_root, disk_budget_bytes)
-        {
-            Ok(disk) => (Some(disk), None),
-            Err(error) => (None, Some(error.to_string())),
-        };
+        let (disk, disk_unavailable_reason) =
+            match DiskProxyCache::open(disk_root, disk_budget_bytes) {
+                Ok(disk) => (Some(disk), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
         Self {
             ram: RamFrameCache::new(ram_budget_bytes),
             disk,
