@@ -59,7 +59,8 @@ fn cleanup(path: &PathBuf) {
 #[test]
 fn roundtrip_lookup_and_complete_count() {
     let path = temp_db("roundtrip");
-    let (mut index, disposition) = FrameIndex::open_or_create(&path, source("a"), stream()).unwrap();
+    let (mut index, disposition) =
+        FrameIndex::open_or_create(&path, source("a"), stream()).unwrap();
     assert_eq!(disposition, FrameIndexOpenDisposition::Created);
     index.mark_building().unwrap();
     index
@@ -71,7 +72,10 @@ fn roundtrip_lookup_and_complete_count() {
         .unwrap();
     index.mark_complete().unwrap();
     assert_eq!(index.frame_count().unwrap(), Some(3));
-    assert_eq!(index.entry(FrameId(1)).unwrap().unwrap().timestamp_us(), Some(40_000));
+    assert_eq!(
+        index.entry(FrameId(1)).unwrap().unwrap().timestamp_us(),
+        Some(40_000)
+    );
     assert_eq!(
         index
             .frame_at_or_before(MediaTimestamp {
@@ -111,10 +115,22 @@ fn vfr_signed_and_repeated_timestamps_survive() {
             entry(4, 210, false, 0),
         ])
         .unwrap();
-    assert_eq!(index.frame_at_or_before_us(0).unwrap().unwrap().frame_id, FrameId(2));
-    assert_eq!(index.frame_at_or_after_us(0).unwrap().unwrap().frame_id, FrameId(1));
     assert_eq!(
-        index.entry(FrameId(4)).unwrap().unwrap().presentation_timestamp.unwrap().ticks,
+        index.frame_at_or_before_us(0).unwrap().unwrap().frame_id,
+        FrameId(2)
+    );
+    assert_eq!(
+        index.frame_at_or_after_us(0).unwrap().unwrap().frame_id,
+        FrameId(1)
+    );
+    assert_eq!(
+        index
+            .entry(FrameId(4))
+            .unwrap()
+            .unwrap()
+            .presentation_timestamp
+            .unwrap()
+            .ticks,
         210
     );
     drop(index);
@@ -173,7 +189,10 @@ fn garbage_database_is_recreated() {
     let path = temp_db("corrupt");
     fs::write(&path, b"not a sqlite database").unwrap();
     let (index, disposition) = FrameIndex::open_or_create(&path, source("a"), stream()).unwrap();
-    assert_eq!(disposition, FrameIndexOpenDisposition::RecoveredCorruptState);
+    assert_eq!(
+        disposition,
+        FrameIndexOpenDisposition::RecoveredCorruptState
+    );
     assert_eq!(index.status().unwrap().indexed_frames, 0);
     drop(index);
     cleanup(&path);
@@ -189,9 +208,12 @@ fn schema_zero_migrates_and_newer_schema_recreates() {
 
     let path = temp_db("newer");
     let connection = Connection::open(&path).unwrap();
-    connection.pragma_update(None, "user_version", 999_i64).unwrap();
+    connection
+        .pragma_update(None, "user_version", 999_i64)
+        .unwrap();
     drop(connection);
-    let (index, disposition) = FrameIndex::open_or_create(&path, source("schema"), stream()).unwrap();
+    let (index, disposition) =
+        FrameIndex::open_or_create(&path, source("schema"), stream()).unwrap();
     assert_eq!(
         disposition,
         FrameIndexOpenDisposition::RecreatedUnsupportedSchema
