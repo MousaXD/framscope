@@ -190,6 +190,12 @@ private fun MicroscopeFrameCard(
 
             FrameIdentity(frame = session.currentFrame, frameCount = session.frameCount)
 
+            MicroscopeTimelineControls(
+                session = session,
+                enabled = controlsEnabled,
+                onJumpFrame = onJumpFrame,
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
