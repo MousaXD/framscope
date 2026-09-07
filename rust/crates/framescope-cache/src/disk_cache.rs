@@ -364,10 +364,7 @@ fn resident_totals(root: &Path) -> io::Result<(u64, u64)> {
             )
         })
     })?;
-    Ok((
-        bytes,
-        u64::try_from(entries.len()).unwrap_or(u64::MAX),
-    ))
+    Ok((bytes, u64::try_from(entries.len()).unwrap_or(u64::MAX)))
 }
 
 fn cleanup_temporary_files(root: &Path) -> io::Result<()> {
