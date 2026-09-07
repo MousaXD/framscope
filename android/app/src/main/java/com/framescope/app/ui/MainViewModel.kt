@@ -13,7 +13,11 @@ import com.framescope.app.data.TimestampSelectionPolicy
 import com.framescope.app.data.VideoOpenException
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -95,6 +99,7 @@ class MainViewModel(
     private var microscopeJob: Job? = null
     private val inspectionGeneration = AtomicLong(0)
     private val microscopeGeneration = AtomicLong(0)
+    private val lifecycleCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
         viewModelScope.launch {
@@ -443,8 +448,12 @@ class MainViewModel(
         microscopeGeneration.incrementAndGet()
         microscopeJob?.cancel()
         microscopeJob = null
-        viewModelScope.launch {
-            repository.closeMicroscope()
+        lifecycleCleanupScope.launch {
+            try {
+                repository.closeMicroscope()
+            } finally {
+                lifecycleCleanupScope.cancel()
+            }
         }
         super.onCleared()
     }
