@@ -5,9 +5,7 @@
 //! a valid persisted result is reused without opening a decoder, while a missing/stale/corrupt
 //! result is rebuilt by consuming one sequential owned-RGBA frame at a time.
 
-use framescope_cache::{
-    FrameCacheError, FrameId, FrameIndex, FrameIndexError, OwnedRgbaFrame, SourceIdentity,
-};
+use framescope_cache::{FrameCacheError, FrameId, FrameIndex, FrameIndexError, OwnedRgbaFrame};
 use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
 use framescope_grouping_session::{GroupingSessionError, HybridGroupingSession};
 use framescope_perceptual::HybridSimilarityPolicy;
@@ -129,7 +127,9 @@ impl SimilarityGroupNavigator {
                 "similarity metadata row disappeared after validation".into(),
             ));
         };
-        if state != COMPLETE_STORE_STATE || from_sql_u64(stored_count, "group count")? != group_count {
+        if state != COMPLETE_STORE_STATE
+            || from_sql_u64(stored_count, "group count")? != group_count
+        {
             return Err(GroupNavigationError::InvalidPersistedNavigation(
                 "similarity metadata changed after validation".into(),
             ));
@@ -222,7 +222,10 @@ impl SimilarityGroupNavigator {
         ))
     }
 
-    fn group_by_ordinal(&self, ordinal: u64) -> Result<GroupNavigationTarget, GroupNavigationError> {
+    fn group_by_ordinal(
+        &self,
+        ordinal: u64,
+    ) -> Result<GroupNavigationTarget, GroupNavigationError> {
         let sql_ordinal = to_sql_u64(ordinal, "group ordinal")?;
         let raw: Option<RawGroup> = self
             .connection
@@ -397,8 +400,12 @@ fn validate_source_frame(
         )));
     }
     let stream = index.stream_identity();
-    if stream.width.is_some_and(|width| width != source.pixels.width)
-        || stream.height.is_some_and(|height| height != source.pixels.height)
+    if stream
+        .width
+        .is_some_and(|width| width != source.pixels.width)
+        || stream
+            .height
+            .is_some_and(|height| height != source.pixels.height)
     {
         return Err(GroupNavigationError::TimelineMismatch(format!(
             "source frame {} dimensions {}x{} do not match indexed stream dimensions",
@@ -650,26 +657,22 @@ mod tests {
         }
     }
 
-    fn complete_index(
-        root: &Path,
-        frame_count: u64,
-        strong_identity: bool,
-    ) -> FrameIndex {
+    fn complete_index(root: &Path, frame_count: u64, strong_identity: bool) -> FrameIndex {
         let source = if strong_identity {
             SourceIdentity::new(
                 12_345,
                 None,
-                Some(format!("test-content-{}", NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed))),
+                Some(format!(
+                    "test-content-{}",
+                    NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+                )),
             )
         } else {
             SourceIdentity::metadata_only(Some(12_345), None, None)
         };
-        let (mut index, _) = FrameIndex::open_or_create(
-            root.join("index.sqlite3"),
-            source,
-            stream_identity(),
-        )
-        .unwrap();
+        let (mut index, _) =
+            FrameIndex::open_or_create(root.join("index.sqlite3"), source, stream_identity())
+                .unwrap();
         let entries: Vec<_> = (0..frame_count).map(entry).collect();
         index.append_batch(&entries).unwrap();
         index.mark_complete().unwrap();
@@ -689,7 +692,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(analysis.summary.disposition, SimilarityAnalysisDisposition::Built);
+        assert_eq!(
+            analysis.summary.disposition,
+            SimilarityAnalysisDisposition::Built
+        );
         assert_eq!(analysis.summary.group_count, 2);
         let first = analysis.navigator.group_containing(FrameId(1)).unwrap();
         assert_eq!((first.first_frame.0, first.last_frame.0), (0, 1));
@@ -743,7 +749,10 @@ mod tests {
             || false,
         )
         .unwrap();
-        assert_eq!(second.summary.disposition, SimilarityAnalysisDisposition::Reused);
+        assert_eq!(
+            second.summary.disposition,
+            SimilarityAnalysisDisposition::Reused
+        );
         assert!(!opened.get());
 
         drop(second);
@@ -766,7 +775,10 @@ mod tests {
             },
             || false,
         );
-        assert!(matches!(result, Err(GroupNavigationError::UnsafeSourceIdentity)));
+        assert!(matches!(
+            result,
+            Err(GroupNavigationError::UnsafeSourceIdentity)
+        ));
         assert!(!opened.get());
         drop(index);
         let _ = std::fs::remove_dir_all(root);
@@ -810,7 +822,10 @@ mod tests {
             || Ok(source.take().unwrap()),
             || false,
         );
-        assert!(matches!(result, Err(GroupNavigationError::TimelineMismatch(_))));
+        assert!(matches!(
+            result,
+            Err(GroupNavigationError::TimelineMismatch(_))
+        ));
         drop(index);
         let _ = std::fs::remove_dir_all(root);
     }
