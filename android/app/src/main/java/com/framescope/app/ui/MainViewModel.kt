@@ -63,30 +63,24 @@ class MainViewModel(
     init {
         viewModelScope.launch {
             repository.engineVersion()
-                .onSuccess { version ->
-                    _uiState.update { it.copy(engineStatus = EngineStatus.Ready(version)) }
-                }
+                .onSuccess { version -> publishInitialEngineStatus(EngineStatus.Ready(version)) }
                 .onFailure { error ->
-                    _uiState.update {
-                        it.copy(
-                            engineStatus = EngineStatus.Unavailable(
-                                error.message ?: "Rust engine is unavailable.",
-                            ),
-                        )
-                    }
+                    publishInitialEngineStatus(
+                        EngineStatus.Unavailable(error.message ?: "Rust engine is unavailable."),
+                    )
                 }
         }
     }
 
     fun onPickerStarted() {
-        cancelRunningInspection()
         inspectionGeneration.incrementAndGet()
+        cancelRunningInspection()
         _uiState.update { it.copy(videoState = VideoInspectionState.Picking) }
     }
 
     fun onVideoSelected(uri: String) {
-        cancelRunningInspection()
         val generation = inspectionGeneration.incrementAndGet()
+        cancelRunningInspection()
 
         inspectJob = viewModelScope.launch {
             publishIfCurrent(generation, VideoInspectionState.Opening)
@@ -141,6 +135,16 @@ class MainViewModel(
         _uiState.update { state ->
             if (state.videoState is VideoInspectionState.Error) {
                 state.copy(videoState = VideoInspectionState.Idle)
+            } else {
+                state
+            }
+        }
+    }
+
+    private fun publishInitialEngineStatus(status: EngineStatus) {
+        _uiState.update { state ->
+            if (state.engineStatus == EngineStatus.Checking) {
+                state.copy(engineStatus = status)
             } else {
                 state
             }
