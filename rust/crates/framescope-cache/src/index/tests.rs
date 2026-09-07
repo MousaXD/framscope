@@ -31,7 +31,13 @@ fn stream() -> FrameIndexStreamIdentity {
     }
 }
 
-fn entry(frame: u64, ticks: i64, keyframe: bool, anchor: u64) -> FrameIndexEntry {
+fn entry(
+    frame: u64,
+    ticks: i64,
+    keyframe: bool,
+    anchor: u64,
+    anchor_ticks: i64,
+) -> FrameIndexEntry {
     let time_base = TimeBase::new(1, 1_000).unwrap();
     FrameIndexEntry {
         frame_id: FrameId(frame),
@@ -45,7 +51,7 @@ fn entry(frame: u64, ticks: i64, keyframe: bool, anchor: u64) -> FrameIndexEntry
         anchor: KeyframeAnchor::Keyframe {
             frame_id: FrameId(anchor),
             presentation_timestamp: Some(MediaTimestamp {
-                ticks: (anchor as i64) * 40,
+                ticks: anchor_ticks,
                 time_base,
             }),
         },
@@ -65,9 +71,9 @@ fn roundtrip_lookup_and_complete_count() {
     index.mark_building().unwrap();
     index
         .append_batch(&[
-            entry(0, 0, true, 0),
-            entry(1, 40, false, 0),
-            entry(2, 100, false, 0),
+            entry(0, 0, true, 0, 0),
+            entry(1, 40, false, 0, 0),
+            entry(2, 100, false, 0, 0),
         ])
         .unwrap();
     index.mark_complete().unwrap();
@@ -108,11 +114,11 @@ fn vfr_signed_and_repeated_timestamps_survive() {
     let (mut index, _) = FrameIndex::open_or_create(&path, source("vfr"), stream()).unwrap();
     index
         .append_batch(&[
-            entry(0, -20, true, 0),
-            entry(1, 0, false, 0),
-            entry(2, 0, false, 0),
-            entry(3, 75, false, 0),
-            entry(4, 210, false, 0),
+            entry(0, -20, true, 0, -20),
+            entry(1, 0, false, 0, -20),
+            entry(2, 0, false, 0, -20),
+            entry(3, 75, false, 0, -20),
+            entry(4, 210, false, 0, -20),
         ])
         .unwrap();
     assert_eq!(
@@ -142,7 +148,7 @@ fn incomplete_index_never_reports_complete_count() {
     let path = temp_db("partial");
     let (mut index, _) = FrameIndex::open_or_create(&path, source("partial"), stream()).unwrap();
     index.mark_building().unwrap();
-    index.append_batch(&[entry(0, 0, true, 0)]).unwrap();
+    index.append_batch(&[entry(0, 0, true, 0, 0)]).unwrap();
     index.mark_incomplete(Some("cancelled")).unwrap();
     let status = index.status().unwrap();
     assert_eq!(status.lifecycle, FrameIndexLifecycle::Incomplete);
@@ -157,7 +163,7 @@ fn incomplete_index_never_reports_complete_count() {
 fn stale_source_is_rebuilt() {
     let path = temp_db("stale");
     let (mut index, _) = FrameIndex::open_or_create(&path, source("old"), stream()).unwrap();
-    index.append_batch(&[entry(0, 0, true, 0)]).unwrap();
+    index.append_batch(&[entry(0, 0, true, 0, 0)]).unwrap();
     index.mark_complete().unwrap();
     drop(index);
     let (index, disposition) = FrameIndex::open_or_create(&path, source("new"), stream()).unwrap();
@@ -172,7 +178,7 @@ fn unverifiable_source_is_rebuilt_on_reopen() {
     let path = temp_db("weak");
     let weak = SourceIdentity::metadata_only(Some(100), Some(5), Some("document:5".into()));
     let (mut index, _) = FrameIndex::open_or_create(&path, weak.clone(), stream()).unwrap();
-    index.append_batch(&[entry(0, 0, true, 0)]).unwrap();
+    index.append_batch(&[entry(0, 0, true, 0, 0)]).unwrap();
     drop(index);
     let (index, disposition) = FrameIndex::open_or_create(&path, weak, stream()).unwrap();
     assert_eq!(
@@ -227,7 +233,7 @@ fn range_iteration_is_ordered_without_range_sized_allocation() {
     let path = temp_db("range");
     let (mut index, _) = FrameIndex::open_or_create(&path, source("range"), stream()).unwrap();
     let entries = (0..10)
-        .map(|id| entry(id, (id as i64) * 40, id == 0, 0))
+        .map(|id| entry(id, (id as i64) * 40, id == 0, 0, 0))
         .collect::<Vec<_>>();
     index.append_batch(&entries).unwrap();
     let mut seen = Vec::new();
