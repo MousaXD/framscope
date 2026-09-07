@@ -7,3 +7,5 @@ rust-version.workspace = true
 
 [dependencies]
 framescope-cache = { path = "../framescope-cache" }
+framescope-similarity = { path = "../framescope-similarity" }
+thiserror.workspace = true
