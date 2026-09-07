@@ -1,5 +1,6 @@
 //! Narrow JNI boundary for the Android app.
 
+mod frame_handoff;
 mod microscope;
 pub mod presentation_handoff;
 
