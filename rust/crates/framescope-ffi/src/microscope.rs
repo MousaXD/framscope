@@ -142,8 +142,8 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
-            r#""message":"failed to serialize microscope response"}"#,
+            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
+            r#"\"message\":\"failed to serialize microscope response\"}"#,
         )
         .into()
     })
@@ -252,7 +252,9 @@ fn next_session_id() -> Result<i64, MicroscopeFailure> {
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
             current.checked_add(1).filter(|next| *next > 0)
         })
-        .map_err(|_| MicroscopeFailure::new("bridge_error", "microscope session id space exhausted"))
+        .map_err(|_| {
+            MicroscopeFailure::new("bridge_error", "microscope session id space exhausted")
+        })
 }
 
 #[cfg(unix)]
@@ -268,9 +270,9 @@ fn step_session(session_id: i64, delta: i32) -> Result<SessionSnapshot, Microsco
         }
     };
     with_session_mut(session_id, |session| {
-        let current = session
-            .current
-            .ok_or_else(|| MicroscopeFailure::new("no_frames", "video contains no indexed frames"))?;
+        let current = session.current.ok_or_else(|| {
+            MicroscopeFailure::new("no_frames", "video contains no indexed frames")
+        })?;
         let target = microscope_step(&session.index, current, step).map_err(from_microscope)?;
         session.current = Some(target.frame_id());
         snapshot(session_id, session)
@@ -287,11 +289,11 @@ fn step_session(_session_id: i64, _delta: i32) -> Result<SessionSnapshot, Micros
 
 #[cfg(unix)]
 fn jump_to_frame(session_id: i64, frame_id: i64) -> Result<SessionSnapshot, MicroscopeFailure> {
-    let requested = u64::try_from(frame_id).map_err(|_| {
-        MicroscopeFailure::new("invalid_request", "frame id must be non-negative")
-    })?;
+    let requested = u64::try_from(frame_id)
+        .map_err(|_| MicroscopeFailure::new("invalid_request", "frame id must be non-negative"))?;
     with_session_mut(session_id, |session| {
-        let target = microscope_target(&session.index, FrameId(requested)).map_err(from_microscope)?;
+        let target =
+            microscope_target(&session.index, FrameId(requested)).map_err(from_microscope)?;
         session.current = Some(target.frame_id());
         snapshot(session_id, session)
     })
@@ -363,7 +365,10 @@ fn with_session_mut<T>(
 }
 
 #[cfg(unix)]
-fn snapshot(session_id: i64, session: &NavigationSession) -> Result<SessionSnapshot, MicroscopeFailure> {
+fn snapshot(
+    session_id: i64,
+    session: &NavigationSession,
+) -> Result<SessionSnapshot, MicroscopeFailure> {
     let current_target = session
         .current
         .map(|frame_id| microscope_target(&session.index, frame_id).map_err(from_microscope))
@@ -378,7 +383,9 @@ fn snapshot(session_id: i64, session: &NavigationSession) -> Result<SessionSnaps
         can_step_previous: current_target
             .as_ref()
             .is_some_and(MicroscopeTarget::has_previous),
-        can_step_next: current_target.as_ref().is_some_and(MicroscopeTarget::has_next),
+        can_step_next: current_target
+            .as_ref()
+            .is_some_and(MicroscopeTarget::has_next),
     })
 }
 
@@ -505,7 +512,9 @@ impl Read for FdLogicalReader {
             return Ok(0);
         }
         let remaining = self.len - self.position;
-        let count = buffer.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let count = buffer
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         let offset = libc::off_t::try_from(self.position)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source offset overflow"))?;
         // SAFETY: `buffer` is valid for `count` writable bytes. pread does not mutate the shared
