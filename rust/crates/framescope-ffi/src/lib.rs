@@ -1,9 +1,11 @@
 //! Narrow JNI boundary for the Android app.
 
+mod microscope;
+
 use framescope_core::{FrameScopeError, MediaKind, StreamInfo, VideoInfo};
 use framescope_video::{CancellationToken, ObservedFrameRateMode, OpenOptions, VideoDecoder};
 use jni::JNIEnv;
-use jni::objects::JClass;
+use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -314,6 +316,79 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeInspectVide
     let json = catch_unwind(AssertUnwindSafe(|| response_json(fd, operation_id)))
         .unwrap_or_else(|_| panic_json());
     to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeOpenMicroscopeSession(
+    mut env: JNIEnv,
+    _class: JClass,
+    fd: jint,
+    operation_id: jlong,
+    cache_root: JString,
+) -> jstring {
+    let cache_root: String = match env.get_string(&cache_root) {
+        Ok(value) => value.into(),
+        Err(_) => return ptr::null_mut(),
+    };
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        microscope::open_response(fd, operation_id, &cache_root)
+    }))
+    .unwrap_or_else(|_| microscope::panic_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeStepMicroscope(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+    delta: jint,
+) -> jstring {
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        microscope::step_response(session_id, delta)
+    }))
+    .unwrap_or_else(|_| microscope::panic_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeJumpMicroscopeFrame(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+    frame_id: jlong,
+) -> jstring {
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        microscope::jump_frame_response(session_id, frame_id)
+    }))
+    .unwrap_or_else(|_| microscope::panic_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeJumpMicroscopeTimestampUs(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+    timestamp_us: jlong,
+    selection: jint,
+) -> jstring {
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        microscope::jump_timestamp_response(session_id, timestamp_us, selection)
+    }))
+    .unwrap_or_else(|_| microscope::panic_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeCloseMicroscopeSession(
+    _env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+) -> jboolean {
+    let closed = catch_unwind(AssertUnwindSafe(|| microscope::close_session(session_id)))
+        .unwrap_or(false);
+    if closed { 1 } else { 0 }
 }
 
 #[unsafe(no_mangle)]
