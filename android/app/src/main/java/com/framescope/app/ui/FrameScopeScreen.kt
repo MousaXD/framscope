@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.framescope.app.data.InspectedVideo
+import com.framescope.app.data.MicroscopeSessionSnapshot
 
 @Composable
 fun FrameScopeScreen(
@@ -39,9 +40,8 @@ fun FrameScopeScreen(
     onOpenVideo: () -> Unit,
     onCancelInspection: () -> Unit,
     onDismissError: () -> Unit,
-    onStepMicroscope: (Int) -> Unit,
-    onJumpMicroscopeFrame: (Long) -> Unit,
-    onJumpMicroscopeTimestampUs: (Long) -> Unit,
+    onPreviousFrame: () -> Unit,
+    onNextFrame: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -62,7 +62,7 @@ fun FrameScopeScreen(
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = "Open a video and inspect its authoritative presentation timeline frame by frame.",
+                text = "Open a video and inspect its real stream metadata and timestamp-indexed frames.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -71,7 +71,9 @@ fun FrameScopeScreen(
 
             when (val videoState = state.videoState) {
                 is VideoInspectionState.Error -> ErrorCard(
+                    title = "Could not inspect video",
                     message = videoState.message,
+                    diagnostic = videoState.diagnostic,
                     onDismiss = onDismissError,
                 )
 
@@ -83,13 +85,44 @@ fun FrameScopeScreen(
                 VideoInspectionState.Idle -> Unit
             }
 
-            MicroscopePanel(
-                state = state.microscopeState,
-                onStep = onStepMicroscope,
-                onJumpFrame = onJumpMicroscopeFrame,
-                onJumpTimestampUs = onJumpMicroscopeTimestampUs,
-                onDismissError = onDismissError,
-            )
+            when (val microscopeState = state.microscopeState) {
+                MicroscopeUiState.Idle -> Unit
+                MicroscopeUiState.Opening -> BusyCard(
+                    "Preparing the timestamp index and microscope session…",
+                )
+
+                is MicroscopeUiState.LoadingFrame -> MicroscopeCard(
+                    session = microscopeState.session,
+                    busy = true,
+                    status = "Loading source-quality frame metadata…",
+                    onPreviousFrame = onPreviousFrame,
+                    onNextFrame = onNextFrame,
+                )
+
+                is MicroscopeUiState.Navigating -> MicroscopeCard(
+                    session = microscopeState.session,
+                    busy = true,
+                    status = "Seeking by indexed frame identity…",
+                    onPreviousFrame = onPreviousFrame,
+                    onNextFrame = onNextFrame,
+                )
+
+                is MicroscopeUiState.Ready -> MicroscopeCard(
+                    session = microscopeState.session,
+                    busy = false,
+                    status = null,
+                    onPreviousFrame = onPreviousFrame,
+                    onNextFrame = onNextFrame,
+                )
+
+                is MicroscopeUiState.Empty -> EmptyMicroscopeCard(microscopeState.session)
+                is MicroscopeUiState.Error -> ErrorCard(
+                    title = "Microscope unavailable",
+                    message = microscopeState.message,
+                    diagnostic = microscopeState.code,
+                    onDismiss = onDismissError,
+                )
+            }
 
             val inspectionActive = state.videoState == VideoInspectionState.Opening ||
                 state.videoState == VideoInspectionState.Inspecting
@@ -234,6 +267,137 @@ private fun VideoDetailsCard(video: InspectedVideo) {
 }
 
 @Composable
+private fun MicroscopeCard(
+    session: MicroscopeSessionSnapshot,
+    busy: Boolean,
+    status: String?,
+    onPreviousFrame: () -> Unit,
+    onNextFrame: () -> Unit,
+) {
+    val frame = session.currentFrame
+    val controls = MicroscopeUiFormatter.controls(session, busy)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = "Frame microscope",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "Indexed navigation uses stored frame identity and exact source timestamps.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+
+            if (frame != null && controls != null) {
+                MetadataRow("Frame", controls.framePosition)
+                MetadataRow("PTS", controls.timestamp)
+                controls.duration?.let { MetadataRow("Duration", it) }
+                MetadataRow("Keyframe", if (frame.keyframe) "Yes" else "No")
+                if (frame.corrupt) {
+                    Text(
+                        text = "Decoder marked this indexed frame as corrupt.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+
+                status?.let { MicroscopeBusyStatus(it) }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = onPreviousFrame,
+                        enabled = controls.canStepPrevious,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(52.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Text("Previous frame")
+                    }
+                    OutlinedButton(
+                        onClick = onNextFrame,
+                        enabled = controls.canStepNext,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(52.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Text("Next frame")
+                    }
+                }
+            } else {
+                Text(
+                    text = "No indexed frame is currently available.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MicroscopeBusyStatus(message: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(18.dp),
+            strokeWidth = 2.dp,
+        )
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun EmptyMicroscopeCard(session: MicroscopeSessionSnapshot) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Frame microscope",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = "The selected video produced no indexed frames.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "Indexed frame count: ${session.frameCount}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
 private fun MetadataRow(label: String, value: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -295,7 +459,12 @@ private fun StatusCard(message: String) {
 }
 
 @Composable
-private fun ErrorCard(message: String, onDismiss: () -> Unit) {
+private fun ErrorCard(
+    title: String,
+    message: String,
+    diagnostic: String?,
+    onDismiss: () -> Unit,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
@@ -306,7 +475,7 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(
-                text = "Could not inspect video",
+                text = title,
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer,
                 fontWeight = FontWeight.Medium,
@@ -316,6 +485,13 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )
+            diagnostic?.let {
+                Text(
+                    text = "Diagnostic: $it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
             OutlinedButton(
                 onClick = onDismiss,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.onErrorContainer),

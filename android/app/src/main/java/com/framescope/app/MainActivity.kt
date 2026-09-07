@@ -47,11 +47,8 @@ class MainActivity : ComponentActivity() {
                     },
                     onCancelInspection = viewModel::cancelInspection,
                     onDismissError = viewModel::clearError,
-                    onStepMicroscope = viewModel::stepMicroscope,
-                    onJumpMicroscopeFrame = viewModel::jumpMicroscopeFrame,
-                    onJumpMicroscopeTimestampUs = { timestampUs ->
-                        viewModel.jumpMicroscopeTimestampUs(timestampUs)
-                    },
+                    onPreviousFrame = { viewModel.stepMicroscope(-1) },
+                    onNextFrame = { viewModel.stepMicroscope(1) },
                 )
             }
         }
