@@ -48,7 +48,7 @@ pub enum ObservedFrameRateMode {
 /// The pixel bytes are independent from FFmpeg's reusable `AVFrame` and remain valid after the
 /// decoder advances, seeks, or is dropped. This is source-decoded full-resolution data, not a
 /// lossy Phase 3 disk proxy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecodedRgbaFrame {
     pub frame: DecodedFrame,
     pub stride_bytes: usize,
