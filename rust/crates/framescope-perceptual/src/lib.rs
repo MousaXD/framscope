@@ -131,9 +131,14 @@ mod tests {
                 let left_value = (x * 20) as u8;
                 let right_value = ((8 - x) * 20) as u8;
                 let offset = (y * 9 + x) * 4;
-                left[offset..offset + 4].copy_from_slice(&[left_value, left_value, left_value, 255]);
-                right[offset..offset + 4]
-                    .copy_from_slice(&[right_value, right_value, right_value, 255]);
+                left[offset..offset + 4]
+                    .copy_from_slice(&[left_value, left_value, left_value, 255]);
+                right[offset..offset + 4].copy_from_slice(&[
+                    right_value,
+                    right_value,
+                    right_value,
+                    255,
+                ]);
             }
         }
         let score = DHashEngine::compare(&frame(9, 8, 36, left), &frame(9, 8, 36, right));
