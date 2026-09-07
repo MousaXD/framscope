@@ -10,9 +10,10 @@ The source flow is:
 
 1. Android's document picker returns a `content://` URI.
 2. `ContentResolver.openFileDescriptor(uri, "r")` returns a `ParcelFileDescriptor`.
-3. Kotlin passes only the borrowed integer descriptor to `framescope-ffi`.
-4. Rust immediately calls `dup(2)` and creates its own `File` from the duplicated descriptor.
-5. Rust owns and closes only the duplicate. Android continues to own the original `ParcelFileDescriptor`, which is closed by Kotlin's `use` block.
+3. Kotlin passes only the borrowed integer descriptor and an operation ID to `framescope-ffi`.
+4. `framescope-ffi` creates a borrowed descriptor view for the duration of the JNI call.
+5. `VideoDecoder` / the FFmpeg backend immediately duplicates the descriptor and owns/closes only that duplicate.
+6. Android continues to own the original `ParcelFileDescriptor`, which is closed by Kotlin's `use` block.
 
 This ownership split prevents double-close bugs and keeps multi-gigabyte media streaming. No full-file `ByteArray`, RAM copy, or app-private duplicate is created.
 
@@ -42,33 +43,34 @@ Every inspection is assigned a monotonically increasing generation. Progress/res
 
 Picker cancellation is represented as `Cancelled`, not as an error.
 
-An active inspection can be cancelled from the UI. Its coroutine is cancelled and the generation is invalidated immediately. `AndroidFrameScopeRepository` deliberately rethrows `CancellationException` rather than wrapping it in `Result.failure`, so lifecycle cancellation cannot turn into an ordinary media error.
+An active native inspection also receives a monotonically increasing operation ID. `AndroidFrameScopeRepository.cancelActiveInspection()` forwards that ID through the existing JNI bridge before cancelling the coroutine job. Rust maps the operation ID to Agent 2's cloneable `CancellationToken`, which is observed by FFmpeg's interrupt callback and by the decoder loop.
 
-The current Phase 1 native inspection entry point is synchronous. Coroutine cancellation therefore suppresses stale results immediately, but a native call already executing can only stop early when the Phase 2 Rust engine exposes cooperative cancellation. Agent 2 should connect its cancellation primitive at the `framescope-ffi` boundary rather than adding a second Android bridge technology.
+The token registry also preserves a cancellation that races just ahead of native inspection startup: a pre-cancelled token is reused when that operation enters the JNI call. Completed operations remove their registry entry. The registry is bounded against an accumulation of pre-start cancellation tombstones.
 
-Until that engine seam lands, the duplicated Rust descriptor remains owned by Rust for the duration of the native call and is released on return. Kotlin then closes the original `ParcelFileDescriptor`.
+`AndroidFrameScopeRepository` deliberately rethrows `CancellationException` rather than wrapping it in `Result.failure`, so lifecycle cancellation cannot turn into an ordinary media error.
 
 ## Metadata contract
 
-The Android bridge requires:
+The JNI inspection path now opens Agent 2's FFmpeg-backed `VideoDecoder`; it no longer uses the Phase 1 ISO-BMFF metadata parser for Android inspection.
+
+The Android bridge receives:
 
 - `width`
 - `height`
-- `rotation_degrees` (defaults to `0` when absent)
-
-It accepts the following fields when Rust can provide them:
-
-- `duration_us`
-- `estimated_frame_rate` or `nominal_frame_rate`
-- `container`, `container_name`, or `container_format`
-- `codec` or `codec_name`
-- `video_stream_index` or `stream_index`
+- `rotation_degrees`
+- `duration_us` when available
+- `estimated_frame_rate` when available
+- `container`
+- `codec`
+- `video_stream_index`
 - `video_stream_count`
 - `audio_stream_count`
-- `pixel_format` or `pixel_format_name`
-- `variable_frame_rate` or `is_variable_frame_rate`
+- `pixel_format` when available
+- `variable_frame_rate` when enough decoded presentation timestamps are observed
 
-Missing optional values are displayed as unknown or omitted. The UI explicitly labels FPS as nominal/estimated information and does not use it as a timing source.
+FPS remains informational only. Frame timing in the Rust engine is driven by presentation timestamps and stream time bases, never by `frame_number / fps`.
+
+The JNI inspection samples only a small bounded number of decoded frames to classify CFR/VFR when possible. It does not retain frame buffers or build a frame cache.
 
 The Rust response remains the authority. Kotlin does not parse the container or duplicate video metadata extraction.
 
@@ -86,13 +88,12 @@ Stable native error codes are mapped to user-facing categories:
 
 Detailed native diagnostics are retained for logs/state diagnostics, while ordinary UI messages avoid exposing raw FFmpeg numeric error codes.
 
-## Agent 2 integration point
+## Phase 2 integration invariants
 
-Agent 2 can evolve `framescope-core` / `framescope-video` metadata and cancellation primitives without Android dependencies. Agent 3's bridge should remain the only place that converts the Rust result envelope into Android application models.
-
-When Agent 2's final API is available, the integrator should:
-
-1. project the engine's selected stream/container/codec metadata into the JSON fields above;
-2. wire the engine cancellation token through `framescope-ffi`;
-3. preserve the existing `dup` ownership invariant;
-4. keep frame buffers out of this Phase 2 metadata bridge.
+- `framescope-video` remains Android-independent.
+- `framescope-ffi` is the only Android JNI boundary.
+- Android owns and closes the original SAF descriptor.
+- FFmpeg owns and closes only its duplicated descriptor.
+- No URI-to-filesystem-path conversion is introduced.
+- No whole-video copy or unbounded buffering is introduced.
+- No frame buffers cross JNI in this Phase 2 metadata/control bridge.
