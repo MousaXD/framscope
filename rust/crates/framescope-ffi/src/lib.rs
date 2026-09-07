@@ -99,6 +99,12 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeVersion(
     to_jstring(&mut env, ENGINE_VERSION)
 }
 
+/// Build-time/link-time probe used by native verification. It is not part of the Kotlin API.
+#[unsafe(no_mangle)]
+pub extern "C" fn framescope_ffmpeg_link_probe() -> u32 {
+    framescope_video::ffmpeg::link_probe()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeInspectVideoFd(
     mut env: JNIEnv,
@@ -119,5 +125,11 @@ mod tests {
         let json = response_json(-1);
         assert!(json.contains("bridge_error"));
         assert!(json.contains("framescope-rust"));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn host_ffmpeg_link_probe_is_unavailable() {
+        assert_eq!(framescope_ffmpeg_link_probe(), 0);
     }
 }

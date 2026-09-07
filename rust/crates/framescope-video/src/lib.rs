@@ -1,7 +1,7 @@
 //! Bounded video-container inspection.
 //!
-//! Phase 1 intentionally implements only enough ISO BMFF (MP4/MOV) parsing to return
-//! trustworthy metadata without loading the source file into memory. Decoding belongs in Phase 2.
+//! Phase 1 implements bounded ISO BMFF metadata inspection. Phase 2 introduces an FFmpeg-backed
+//! Android foundation behind a separate linkage boundary; decoder APIs are implemented separately.
 
 use framescope_core::{FrameScopeError, VideoMetadata};
 use std::io::{Read, Seek, SeekFrom};
@@ -185,6 +185,7 @@ fn parse_mdia<R: Read + Seek>(
     Ok(())
 }
 
+pub mod ffmpeg;
 mod iso;
 
 use iso::{

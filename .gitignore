@@ -10,6 +10,9 @@
 /android/.idea/
 *.iml
 
+# Native dependency build/cache state
+/.native/
+
 # Signing and secrets
 *.jks
 *.keystore
