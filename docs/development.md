@@ -47,7 +47,7 @@ Gradle also invokes cargo-ndk through the `:app:buildRustArm64` task before Andr
 For the same native checks used by CI:
 
 ```bash
-./scripts/verify-native-android.sh
+bash ./scripts/verify-native-android.sh
 ```
 
 ## Android workflow
@@ -58,7 +58,7 @@ gradle testDebugUnitTest
 gradle lintDebug
 gradle assembleDebug
 cd ..
-./scripts/verify-debug-apk.sh
+bash ./scripts/verify-debug-apk.sh
 ```
 
 The application must continue to build without an `INTERNET` permission or broad storage permissions.
@@ -68,8 +68,8 @@ The application must continue to build without an `INTERNET` permission or broad
 Phase 2 media fixtures are generated, not committed:
 
 ```bash
-./scripts/generate-video-fixtures.sh
-./scripts/verify-video-fixtures.py
+bash ./scripts/generate-video-fixtures.sh
+python3 ./scripts/verify-video-fixtures.py
 ```
 
 See `fixtures/video/README.md` for the fixture contract. Fixture codec coverage does not by itself claim application decoder support.
