@@ -2,7 +2,7 @@
 
 FrameScope is an open-source Android application for precise, local-first video-frame inspection. Videos stay on the device. The normal app path has no backend, telemetry, analytics, ads, accounts, or network requirement.
 
-The repository has completed the Phase 2 video engine, Phase 3 frame-index/navigation/cache stack, and Phase 4 similarity/grouping foundation. Phase 5 microscope integration is in final acceptance.
+The repository has completed the Phase 2 video engine, Phase 3 frame-index/navigation/cache stack, Phase 4 similarity/grouping foundation, and Phase 5 frame microscope UI/integration. Phase 6 frame extraction is next.
 
 ## Phase status
 
@@ -10,7 +10,7 @@ The repository has completed the Phase 2 video engine, Phase 3 frame-index/navig
 - Phase 2: Video engine. **Complete.**
 - Phase 3: Frame indexing and caching. **Complete.**
 - Phase 4: Visual similarity and duplicate grouping. **Complete.**
-- Phase 5: Frame microscope UI and integration. **Final acceptance in progress.**
+- Phase 5: Frame microscope UI and integration. **Complete.**
 - Phase 6: Frame extraction. **Next.**
 
 ## Acceptance policy
