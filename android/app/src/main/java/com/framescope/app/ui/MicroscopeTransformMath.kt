@@ -1,7 +1,5 @@
 package com.framescope.app.ui
 
-import kotlin.math.abs
-
 internal data class MicroscopeViewportTransform(
     val scale: Float = 1f,
     val translationX: Float = 0f,
@@ -52,18 +50,4 @@ internal object MicroscopeTransformMath {
             translationY = candidateY.coerceIn(-maxY, maxY),
         )
     }
-
-    fun normalized(transform: MicroscopeViewportTransform): MicroscopeViewportTransform =
-        if (
-            !transform.scale.isFinite() ||
-            transform.scale <= MIN_SCALE ||
-            abs(transform.translationX) < 0.001f && abs(transform.translationY) < 0.001f
-        ) {
-            MicroscopeViewportTransform(
-                scale = transform.scale.takeIf { it.isFinite() }?.coerceIn(MIN_SCALE, MAX_SCALE)
-                    ?: MIN_SCALE,
-            )
-        } else {
-            transform.copy(scale = transform.scale.coerceIn(MIN_SCALE, MAX_SCALE))
-        }
 }
