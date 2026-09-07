@@ -17,6 +17,7 @@
 #include <libavutil/display.h>
 #include <libavutil/error.h>
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 
 #define FS_ERROR_MESSAGE_CAPACITY 256
 #define FS_FORMAT_NAME_CAPACITY 128
@@ -887,6 +888,85 @@ int32_t framescope_ffmpeg_next_frame(void *opaque, FsFrameInfo *out, FsError *er
             break;
         }
     }
+}
+
+int32_t framescope_ffmpeg_copy_current_frame_rgba(
+    void *opaque,
+    uint8_t *output,
+    size_t output_capacity,
+    int32_t *out_stride,
+    FsError *error
+) {
+    FsSession *session = (FsSession *)opaque;
+    struct SwsContext *scaler;
+    uint8_t *destination_data[4] = {NULL, NULL, NULL, NULL};
+    int destination_linesize[4] = {0, 0, 0, 0};
+    size_t stride;
+    size_t required;
+    int scaled_rows;
+
+    fs_clear_error(error);
+    if (session == NULL || session->frame == NULL || output == NULL || out_stride == NULL) {
+        fs_set_error(error, FS_ERR_BACKEND, 0, "decoded frame RGBA copy received invalid arguments");
+        return -1;
+    }
+    if (session->frame->width <= 0 || session->frame->height <= 0 || session->frame->format < 0 || session->frame->data[0] == NULL) {
+        fs_set_error(error, FS_ERR_DECODER, 0, "no valid decoded frame is available for RGBA copy");
+        return -1;
+    }
+    if (session->frame->width > INT_MAX / 4) {
+        fs_set_error(error, FS_ERR_DECODER, AVERROR(EOVERFLOW), "decoded frame width overflows RGBA stride");
+        return -1;
+    }
+
+    stride = (size_t)session->frame->width * 4U;
+    if ((size_t)session->frame->height > SIZE_MAX / stride) {
+        fs_set_error(error, FS_ERR_DECODER, AVERROR(EOVERFLOW), "decoded frame dimensions overflow RGBA buffer size");
+        return -1;
+    }
+    required = stride * (size_t)session->frame->height;
+    if (output_capacity < required) {
+        fs_set_error(error, FS_ERR_BACKEND, AVERROR(ENOSPC), "RGBA output buffer is smaller than the decoded frame");
+        return -1;
+    }
+
+    scaler = sws_getContext(
+        session->frame->width,
+        session->frame->height,
+        (enum AVPixelFormat)session->frame->format,
+        session->frame->width,
+        session->frame->height,
+        AV_PIX_FMT_RGBA,
+        SWS_BILINEAR,
+        NULL,
+        NULL,
+        NULL
+    );
+    if (scaler == NULL) {
+        fs_set_error(error, FS_ERR_DECODER, AVERROR(ENOMEM), "failed to create RGBA conversion context");
+        return -1;
+    }
+
+    destination_data[0] = output;
+    destination_linesize[0] = (int)stride;
+    scaled_rows = sws_scale(
+        scaler,
+        (const uint8_t *const *)session->frame->data,
+        session->frame->linesize,
+        0,
+        session->frame->height,
+        destination_data,
+        destination_linesize
+    );
+    sws_freeContext(scaler);
+
+    if (scaled_rows != session->frame->height) {
+        fs_set_error(error, FS_ERR_DECODER, 0, "FFmpeg did not convert the complete decoded frame to RGBA");
+        return -1;
+    }
+
+    *out_stride = (int32_t)stride;
+    return 0;
 }
 
 int32_t framescope_ffmpeg_seek_us(void *opaque, int64_t timestamp_us, FsError *error) {

@@ -116,6 +116,19 @@ pub struct NativeFrame {
     pub pixel_format_name: Option<String>,
 }
 
+/// Owned RGBA snapshot of the most recently decoded native frame.
+///
+/// The pixel buffer has no lifetime relationship with FFmpeg after this value is returned. This is
+/// the boundary Phase 3 cache code can safely retain; raw AVFrame pointers never leave the native
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRgbaFrame {
+    pub width: u32,
+    pub height: u32,
+    pub stride: usize,
+    pub pixels: Vec<u8>,
+}
+
 #[cfg(framescope_ffmpeg_native)]
 mod native {
     use super::*;
@@ -304,6 +317,13 @@ mod native {
             out: *mut FsFrameInfo,
             error: *mut FsError,
         ) -> i32;
+        fn framescope_ffmpeg_copy_current_frame_rgba(
+            session: *mut FsSession,
+            output: *mut u8,
+            output_capacity: usize,
+            out_stride: *mut i32,
+            error: *mut FsError,
+        ) -> i32;
         fn framescope_ffmpeg_seek_us(
             session: *mut FsSession,
             timestamp_us: i64,
@@ -394,6 +414,7 @@ mod native {
     pub struct Session {
         raw: NonNull<FsSession>,
         cancellation: CancellationToken,
+        last_frame_dimensions: Option<(u32, u32)>,
     }
 
     // SAFETY: the native FFmpeg state is exclusively owned by Session and every operation requiring
@@ -424,7 +445,11 @@ mod native {
                 )
             };
             let raw = NonNull::new(raw).ok_or_else(|| error_from_ffi(&error))?;
-            Ok(Self { raw, cancellation })
+            Ok(Self {
+                raw,
+                cancellation,
+                last_frame_dimensions: None,
+            })
         }
 
         #[cfg(unix)]
@@ -448,7 +473,11 @@ mod native {
                 )
             };
             let raw = NonNull::new(raw).ok_or_else(|| error_from_ffi(&error))?;
-            Ok(Self { raw, cancellation })
+            Ok(Self {
+                raw,
+                cancellation,
+                last_frame_dimensions: None,
+            })
         }
 
         pub fn container_info(&self) -> Result<NativeContainerInfo, NativeError> {
@@ -507,27 +536,34 @@ mod native {
         }
 
         pub fn next_frame(&mut self) -> Result<Option<NativeFrame>, NativeError> {
+            self.last_frame_dimensions = None;
             let mut raw = FsFrameInfo::default();
             let mut error = FsError::default();
             // SAFETY: &mut self guarantees exclusive access to the decoder state. Outputs are live.
             let result =
                 unsafe { framescope_ffmpeg_next_frame(self.raw.as_ptr(), &mut raw, &mut error) };
             match result {
-                1 => Ok(Some(NativeFrame {
-                    epoch: raw.epoch,
-                    index: raw.index,
-                    stream_index: raw.stream_index,
-                    timestamp_ticks: (raw.has_timestamp != 0).then_some(raw.timestamp_ticks),
-                    duration_ticks: (raw.has_duration != 0).then_some(raw.duration_ticks),
-                    time_base_num: raw.time_base_num,
-                    time_base_den: raw.time_base_den,
-                    keyframe: raw.keyframe != 0,
-                    corrupt: raw.corrupt != 0,
-                    width: raw.width,
-                    height: raw.height,
-                    pixel_format: (raw.pixel_format >= 0).then_some(raw.pixel_format),
-                    pixel_format_name: optional_text(&raw.pixel_format_name),
-                })),
+                1 => {
+                    self.last_frame_dimensions = u32::try_from(raw.width)
+                        .ok()
+                        .filter(|width| *width > 0)
+                        .zip(u32::try_from(raw.height).ok().filter(|height| *height > 0));
+                    Ok(Some(NativeFrame {
+                        epoch: raw.epoch,
+                        index: raw.index,
+                        stream_index: raw.stream_index,
+                        timestamp_ticks: (raw.has_timestamp != 0).then_some(raw.timestamp_ticks),
+                        duration_ticks: (raw.has_duration != 0).then_some(raw.duration_ticks),
+                        time_base_num: raw.time_base_num,
+                        time_base_den: raw.time_base_den,
+                        keyframe: raw.keyframe != 0,
+                        corrupt: raw.corrupt != 0,
+                        width: raw.width,
+                        height: raw.height,
+                        pixel_format: (raw.pixel_format >= 0).then_some(raw.pixel_format),
+                        pixel_format_name: optional_text(&raw.pixel_format_name),
+                    }))
+                }
                 0 => Ok(None),
                 -1 => Err(error_from_ffi(&error)),
                 other => Err(NativeError::backend(format!(
@@ -536,7 +572,64 @@ mod native {
             }
         }
 
+        /// Copy the most recently decoded frame into owned tightly-packed RGBA bytes.
+        ///
+        /// This must be called before another `next_frame` or seek. The returned Vec owns its data
+        /// and remains valid after the decoder advances or is dropped.
+        pub fn copy_current_frame_rgba(&mut self) -> Result<NativeRgbaFrame, NativeError> {
+            let (width, height) = self.last_frame_dimensions.ok_or_else(|| {
+                NativeError::backend("no decoded frame is available for RGBA copy")
+            })?;
+            let stride = usize::try_from(width)
+                .ok()
+                .and_then(|value| value.checked_mul(4))
+                .ok_or_else(|| NativeError::backend("decoded frame RGBA stride overflows usize"))?;
+            let required = stride
+                .checked_mul(
+                    usize::try_from(height)
+                        .map_err(|_| NativeError::backend("decoded frame height exceeds usize"))?,
+                )
+                .ok_or_else(|| NativeError::backend("decoded frame RGBA size overflows usize"))?;
+            let mut pixels = Vec::new();
+            pixels
+                .try_reserve_exact(required)
+                .map_err(|_| NativeError::backend("failed to allocate owned RGBA frame buffer"))?;
+            pixels.resize(required, 0);
+
+            let mut out_stride = 0_i32;
+            let mut error = FsError::default();
+            // SAFETY: pixels has exactly `required` initialized writable bytes and remains alive for
+            // the call. The native shim validates current-frame state and output capacity before
+            // conversion. &mut self prevents the reusable AVFrame from being advanced concurrently.
+            let result = unsafe {
+                framescope_ffmpeg_copy_current_frame_rgba(
+                    self.raw.as_ptr(),
+                    pixels.as_mut_ptr(),
+                    pixels.len(),
+                    &mut out_stride,
+                    &mut error,
+                )
+            };
+            if result < 0 {
+                return Err(error_from_ffi(&error));
+            }
+            let out_stride = usize::try_from(out_stride)
+                .ok()
+                .filter(|value| *value == stride)
+                .ok_or_else(|| {
+                    NativeError::backend("native RGBA conversion returned an invalid stride")
+                })?;
+
+            Ok(NativeRgbaFrame {
+                width,
+                height,
+                stride: out_stride,
+                pixels,
+            })
+        }
+
         pub fn seek_us(&mut self, timestamp_us: i64) -> Result<(), NativeError> {
+            self.last_frame_dimensions = None;
             let mut error = FsError::default();
             // SAFETY: &mut self guarantees exclusive access to format/decoder state.
             let result =
@@ -603,6 +696,10 @@ impl Session {
     }
 
     pub fn next_frame(&mut self) -> Result<Option<NativeFrame>, NativeError> {
+        Err(NativeError::backend("FFmpeg backend is not linked"))
+    }
+
+    pub fn copy_current_frame_rgba(&mut self) -> Result<NativeRgbaFrame, NativeError> {
         Err(NativeError::backend("FFmpeg backend is not linked"))
     }
 
