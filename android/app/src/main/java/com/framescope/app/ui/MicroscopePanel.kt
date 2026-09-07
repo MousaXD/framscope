@@ -36,12 +36,24 @@ import androidx.compose.ui.unit.dp
 import com.framescope.app.data.FrameDetails
 import com.framescope.app.data.MicroscopeFrame
 import com.framescope.app.data.MicroscopeSessionSnapshot
-import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+
+private sealed interface MicroscopePreviewState {
+    data object Loading : MicroscopePreviewState
+
+    data class Ready(
+        val bitmap: Bitmap,
+        val plan: MicroscopePreviewPlan,
+    ) : MicroscopePreviewState
+
+    data class Error(
+        val message: String,
+    ) : MicroscopePreviewState
+}
 
 @Composable
 internal fun MicroscopePanel(
@@ -99,9 +111,12 @@ private fun MicroscopeFrameCard(
     onJumpTimestampUs: (Long) -> Unit,
 ) {
     val descriptor = frame.descriptor
-    val bitmap by produceState<Bitmap?>(initialValue = null, frame) {
+    val preview by produceState<MicroscopePreviewState>(
+        initialValue = MicroscopePreviewState.Loading,
+        key1 = frame,
+    ) {
         value = withContext(Dispatchers.Default) {
-            frame.toArgbBitmapOrNull()
+            frame.toBoundedPreview()
         }
     }
 
@@ -127,17 +142,38 @@ private fun MicroscopeFrameCard(
                     .aspectRatio(descriptor.width.toFloat() / descriptor.height.toFloat()),
                 contentAlignment = Alignment.Center,
             ) {
-                val image = bitmap
-                if (image == null) {
-                    CircularProgressIndicator()
-                } else {
-                    Image(
-                        bitmap = image.asImageBitmap(),
-                        contentDescription = "Video frame ${descriptor.frameId + 1} of ${session.frameCount}",
+                when (val current = preview) {
+                    MicroscopePreviewState.Loading -> CircularProgressIndicator()
+                    is MicroscopePreviewState.Error -> Text(
+                        text = current.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    is MicroscopePreviewState.Ready -> Image(
+                        bitmap = current.bitmap.asImageBitmap(),
+                        contentDescription =
+                            "Video frame ${descriptor.frameId + 1} of ${session.frameCount}",
                         modifier = Modifier.fillMaxWidth(),
                         contentScale = ContentScale.Fit,
                     )
                 }
+            }
+
+            when (val current = preview) {
+                is MicroscopePreviewState.Ready -> {
+                    val plan = current.plan
+                    Text(
+                        text = if (plan.isDownscaled) {
+                            "Display preview ${plan.targetWidth} × ${plan.targetHeight} from authoritative source frame " +
+                                "${plan.sourceWidth} × ${plan.sourceHeight}."
+                        } else {
+                            "Display preview uses the authoritative source-frame dimensions."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                else -> Unit
             }
 
             FrameIdentity(frame = session.currentFrame, frameCount = session.frameCount)
@@ -170,7 +206,8 @@ private fun MicroscopeFrameCard(
             )
 
             Text(
-                text = "Pixels are decoded from the authoritative source timeline; lossy preview proxies are not used for this frame.",
+                text = "Preview pixels are sampled directly from the caller-owned authoritative RGBA frame; " +
+                    "disk proxies are never used for microscope identity, navigation, or extraction.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -188,18 +225,19 @@ private fun FrameIdentity(frame: FrameDetails?, frameCount: Long) {
             fontWeight = FontWeight.Medium,
         )
         Text(
-            text = frame.timestampUs?.let { "Timestamp: ${formatMicros(it)} ($it µs)" }
-                ?: "Timestamp: unavailable",
+            text = frame.timestampUs?.let {
+                "Timestamp: ${MicroscopePreviewMath.formatTimestampUs(it)} ($it µs)"
+            } ?: "Timestamp: unavailable",
             style = MaterialTheme.typography.bodyMedium,
         )
         Text(
-            text = "PTS: ${frame.timestampTicks ?: "unknown"} ticks · time base ${frame.timeBaseNumerator}/${frame.timeBaseDenominator}",
+            text = "PTS: ${MicroscopeUiFormatter.exactTimestamp(frame)}",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        frame.durationTicks?.let {
+        MicroscopeUiFormatter.exactDuration(frame)?.let {
             Text(
-                text = "Duration: $it ticks",
+                text = "Duration: $it",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -245,7 +283,7 @@ private fun JumpControls(
             onClick = {
                 frameInput.toLongOrNull()
                     ?.takeIf { it in 1..session.frameCount }
-                    ?.let { onJumpFrame(it - 1) }
+                    ?.let { onJumpFrame(it - 1L) }
             },
             enabled = enabled && frameInput.toLongOrNull()?.let { it in 1..session.frameCount } == true,
             modifier = Modifier.fillMaxWidth(),
@@ -255,12 +293,14 @@ private fun JumpControls(
 
         OutlinedTextField(
             value = timestampInput,
-            onValueChange = { value -> timestampInput = value.filter(Char::isDigit).take(19) },
+            onValueChange = { value ->
+                timestampInput = MicroscopePreviewMath.sanitizeSignedTimestampInput(value)
+            },
             enabled = enabled,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Jump to timestamp (µs)") },
+            label = { Text("Jump to timestamp (µs, signed)") },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
         )
         OutlinedButton(
             onClick = { timestampInput.toLongOrNull()?.let(onJumpTimestampUs) },
@@ -272,55 +312,52 @@ private fun JumpControls(
     }
 }
 
-private suspend fun MicroscopeFrame.toArgbBitmapOrNull(): Bitmap? {
+private suspend fun MicroscopeFrame.toBoundedPreview(): MicroscopePreviewState {
     val metadata = descriptor
-    if (!metadata.isSane()) return null
+    if (!metadata.isSane()) {
+        return MicroscopePreviewState.Error("Frame metadata is outside presentation safety bounds.")
+    }
+    val plan = MicroscopePreviewMath.plan(metadata.width, metadata.height)
+        ?: return MicroscopePreviewState.Error("Could not plan a bounded frame preview.")
 
     var bitmap: Bitmap? = null
     try {
-        bitmap = Bitmap.createBitmap(metadata.width, metadata.height, Bitmap.Config.ARGB_8888)
+        bitmap = Bitmap.createBitmap(plan.targetWidth, plan.targetHeight, Bitmap.Config.ARGB_8888)
         val source = rgba.duplicate()
-        val row = IntArray(metadata.width)
+        val row = IntArray(plan.targetWidth)
         val stride = metadata.strideBytes
 
-        for (y in 0 until metadata.height) {
+        for (outputY in 0 until plan.targetHeight) {
             currentCoroutineContext().ensureActive()
-            val rowStart = Math.multiplyExact(y.toLong(), stride)
-            for (x in 0 until metadata.width) {
-                val offsetLong = Math.addExact(rowStart, x.toLong() * 4L)
+            val sourceY = plan.sourceY(outputY)
+            val rowStart = Math.multiplyExact(sourceY.toLong(), stride)
+            for (outputX in 0 until plan.targetWidth) {
+                val sourceX = plan.sourceX(outputX)
+                val offsetLong = Math.addExact(rowStart, sourceX.toLong() * 4L)
                 val offset = Math.toIntExact(offsetLong)
                 val red = source.get(offset).toInt() and 0xff
                 val green = source.get(offset + 1).toInt() and 0xff
                 val blue = source.get(offset + 2).toInt() and 0xff
                 val alpha = source.get(offset + 3).toInt() and 0xff
-                row[x] = (alpha shl 24) or (red shl 16) or (green shl 8) or blue
+                row[outputX] =
+                    (alpha shl 24) or (red shl 16) or (green shl 8) or blue
             }
-            bitmap.setPixels(row, 0, metadata.width, 0, y, metadata.width, 1)
+            bitmap.setPixels(row, 0, plan.targetWidth, 0, outputY, plan.targetWidth, 1)
         }
-        return bitmap
+        return MicroscopePreviewState.Ready(bitmap = bitmap, plan = plan)
     } catch (cancelled: CancellationException) {
         bitmap?.recycle()
         throw cancelled
-    } catch (_: RuntimeException) {
-        bitmap?.recycle()
-        return null
     } catch (_: OutOfMemoryError) {
         bitmap?.recycle()
-        return null
-    }
-}
-
-private fun formatMicros(timestampUs: Long): String {
-    val nonNegative = timestampUs.coerceAtLeast(0L)
-    val totalSeconds = nonNegative / 1_000_000L
-    val micros = nonNegative % 1_000_000L
-    val hours = totalSeconds / 3_600L
-    val minutes = (totalSeconds % 3_600L) / 60L
-    val seconds = totalSeconds % 60L
-    return if (hours > 0L) {
-        String.format(Locale.US, "%d:%02d:%02d.%06d", hours, minutes, seconds, micros)
-    } else {
-        String.format(Locale.US, "%02d:%02d.%06d", minutes, seconds, micros)
+        return MicroscopePreviewState.Error(
+            "Android could not allocate the bounded display preview for this frame.",
+        )
+    } catch (_: RuntimeException) {
+        bitmap?.recycle()
+        return MicroscopePreviewState.Error(
+            "The authoritative frame could not be converted for display.",
+        )
     }
 }
 
