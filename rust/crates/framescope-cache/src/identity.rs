@@ -199,7 +199,7 @@ pub trait CacheStore {
     fn clear(&mut self) -> Result<(), Self::Error>;
 }
 
-/// Real no-op store useful for wiring/tests and future optional payload caching.
+/// Real no-op store useful for wiring/tests before payload caching exists.
 #[derive(Debug, Default)]
 pub struct NoopCacheStore;
 
@@ -241,7 +241,9 @@ mod tests {
 
     #[test]
     fn sampled_identity_is_bounded_and_restores_position() {
-        let bytes = (0..400_000).map(|value| (value % 251) as u8).collect::<Vec<_>>();
+        let bytes = (0..400_000)
+            .map(|value| (value % 251) as u8)
+            .collect::<Vec<_>>();
         let mut cursor = Cursor::new(bytes);
         cursor.seek(SeekFrom::Start(123)).unwrap();
         let id = SourceIdentity::from_seekable(&mut cursor, Some(7), Some("doc:7".into())).unwrap();
@@ -269,7 +271,11 @@ mod tests {
         let namespace = layout.source_namespace(&id);
         assert!(namespace.starts_with("v1/"));
         assert_eq!(namespace.len(), 3 + 64);
-        assert!(namespace[3..].chars().all(|value| value.is_ascii_hexdigit()));
+        assert!(
+            namespace[3..]
+                .chars()
+                .all(|value| value.is_ascii_hexdigit())
+        );
     }
 
     #[test]
