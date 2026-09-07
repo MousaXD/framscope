@@ -1,4 +1,5 @@
 use super::*;
+use crate::SourceIdentity;
 use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
 use rusqlite::Connection;
 use std::fs;
@@ -52,7 +53,7 @@ fn entry(frame: u64, ticks: i64, keyframe: bool, anchor: u64) -> FrameIndexEntry
 }
 
 fn cleanup(path: &PathBuf) {
-    let _ = store::purge_database_files(path);
+    let _ = super::store::purge_database_files(path);
 }
 
 #[test]
