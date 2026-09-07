@@ -56,6 +56,15 @@ impl FrameCacheHierarchy {
         Ok(CacheLookup::Miss)
     }
 
+    /// Look up only the source-quality RAM tier.
+    ///
+    /// This deliberately does not touch the compressed disk proxy tier. Callers such as frame
+    /// extraction or full-quality indexed navigation must never let a lossy proxy masquerade as
+    /// authoritative decoded pixels, and should not pay disk I/O merely to reject it.
+    pub fn lookup_full(&mut self, key: &FrameCacheKey) -> Option<CachedFrame> {
+        self.ram.get(key)
+    }
+
     pub fn insert_full(&mut self, frame: CachedFrame) -> RamInsertResult {
         self.ram.insert(frame)
     }
@@ -158,6 +167,31 @@ mod tests {
         let full = cache.lookup(&key).unwrap();
         assert!(matches!(full, CacheLookup::Full(_)));
         assert_eq!(cache.stats().disk.hits, disk_hits_before);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn full_quality_lookup_never_reads_disk_proxy_tier() {
+        let root = temp_root("full-only");
+        let source = strong_source("source-full");
+        let key = FrameCacheKey::new(&source, 0, FrameId(8)).unwrap();
+        let mut cache = FrameCacheHierarchy::open(&root, 1024, 1024).unwrap();
+        cache
+            .insert_proxy(&key, ProxyFormat::Jpeg, &[0xff, 0xd8, 0xff, 0xd9])
+            .unwrap();
+        let before = cache.stats();
+
+        assert!(cache.lookup_full(&key).is_none());
+        let after_miss = cache.stats();
+        assert_eq!(after_miss.disk.hits, before.disk.hits);
+        assert_eq!(after_miss.disk.misses, before.disk.misses);
+
+        cache.insert_full(rgba_frame(key.clone()));
+        assert!(cache.lookup_full(&key).is_some());
+        let after_hit = cache.stats();
+        assert_eq!(after_hit.disk.hits, before.disk.hits);
+        assert_eq!(after_hit.disk.misses, before.disk.misses);
 
         let _ = fs::remove_dir_all(root);
     }
