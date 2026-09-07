@@ -49,7 +49,8 @@ fn current_decoded_frame_copies_to_owned_tightly_packed_rgba() {
 
 #[test]
 fn video_decoder_exposes_source_quality_owned_rgba_with_pts_metadata() {
-    let mut decoder = VideoDecoder::open_path(fixture("h264-cfr.mp4")).expect("fixture should open");
+    let mut decoder =
+        VideoDecoder::open_path(fixture("h264-cfr.mp4")).expect("fixture should open");
     let first = decoder
         .next_frame_rgba()
         .expect("RGBA decode should succeed")
