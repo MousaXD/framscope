@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(unix)]
 use std::io::{Read, Seek, SeekFrom};
@@ -24,7 +24,8 @@ use super::{ENGINE_VERSION, OperationId, operation_token};
 
 const MAX_MICROSCOPE_SESSIONS: usize = 4;
 static NEXT_SESSION_ID: AtomicI64 = AtomicI64::new(1);
-static MICROSCOPE_SESSIONS: OnceLock<Mutex<HashMap<i64, NavigationSession>>> = OnceLock::new();
+static MICROSCOPE_SESSIONS: OnceLock<Mutex<HashMap<i64, Arc<Mutex<NavigationSession>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Serialize)]
 struct FrameDetails {
@@ -118,7 +119,9 @@ struct NavigationSession {
 #[cfg(not(unix))]
 struct NavigationSession;
 
-fn microscope_sessions() -> &'static Mutex<HashMap<i64, NavigationSession>> {
+type NavigationSessionHandle = Arc<Mutex<NavigationSession>>;
+
+fn microscope_sessions() -> &'static Mutex<HashMap<i64, NavigationSessionHandle>> {
     MICROSCOPE_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -252,7 +255,7 @@ fn open_session(
             "too many microscope sessions are already open",
         ));
     }
-    sessions.insert(session_id, session);
+    sessions.insert(session_id, Arc::new(Mutex::new(session)));
     Ok(snapshot)
 }
 
@@ -398,13 +401,22 @@ fn with_session_mut<T>(
             "microscope session id must be positive",
         ));
     }
-    let mut sessions = microscope_sessions().lock().map_err(|_| {
+
+    // Clone the per-session handle while holding the registry briefly, then release the global lock
+    // before taking the session lock. Future FFmpeg decode/render work may be expensive, and must
+    // never serialize unrelated sessions or block open/close operations behind a global mutex.
+    let handle = {
+        let sessions = microscope_sessions().lock().map_err(|_| {
+            MicroscopeFailure::new("bridge_error", "microscope session state is poisoned")
+        })?;
+        sessions.get(&session_id).cloned().ok_or_else(|| {
+            MicroscopeFailure::new("session_not_found", "microscope session is not open")
+        })?
+    };
+    let mut session = handle.lock().map_err(|_| {
         MicroscopeFailure::new("bridge_error", "microscope session state is poisoned")
     })?;
-    let session = sessions.get_mut(&session_id).ok_or_else(|| {
-        MicroscopeFailure::new("session_not_found", "microscope session is not open")
-    })?;
-    operation(session)
+    operation(&mut session)
 }
 
 #[cfg(unix)]
