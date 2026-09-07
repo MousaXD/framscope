@@ -8,6 +8,7 @@ use std::time::SystemTime;
 use thiserror::Error;
 
 const PROXY_CACHE_VERSION: &str = "v1";
+const MAX_PROXY_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +28,7 @@ impl ProxyFormat {
     fn validate(self, bytes: &[u8]) -> bool {
         match self {
             Self::Jpeg => bytes.len() >= 3 && bytes[..3] == [0xff, 0xd8, 0xff],
-            Self::WebP => {
-                bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
-            }
+            Self::WebP => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
         }
     }
 }
@@ -129,13 +128,28 @@ impl DiskProxyCache {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
+            let length = file.metadata()?.len();
+            if length > self.budget_bytes || length > MAX_PROXY_ENTRY_BYTES {
+                self.remove_corrupt_entry(&path)?;
+                continue;
+            }
+            let length = match usize::try_from(length) {
+                Ok(length) => length,
+                Err(_) => {
+                    self.remove_corrupt_entry(&path)?;
+                    continue;
+                }
+            };
+            let mut bytes = vec![0; length];
+            if let Err(error) = file.read_exact(&mut bytes) {
+                if error.kind() == io::ErrorKind::UnexpectedEof {
+                    self.remove_corrupt_entry(&path)?;
+                    continue;
+                }
+                return Err(error.into());
+            }
             if !format.validate(&bytes) {
-                let removed = remove_file_len(&path)?;
-                self.stats.corrupt_entries = self.stats.corrupt_entries.saturating_add(1);
-                self.stats.resident_bytes = self.stats.resident_bytes.saturating_sub(removed);
-                self.stats.resident_files = self.stats.resident_files.saturating_sub(1);
+                self.remove_corrupt_entry(&path)?;
                 continue;
             }
             self.stats.hits = self.stats.hits.saturating_add(1);
@@ -159,9 +173,12 @@ impl DiskProxyCache {
             return Err(DiskCacheError::InvalidProxy { format });
         }
         let byte_len = u64::try_from(bytes.len()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "proxy payload size exceeds u64")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "proxy payload size exceeds u64",
+            )
         })?;
-        if byte_len > self.budget_bytes {
+        if byte_len > self.budget_bytes || byte_len > MAX_PROXY_ENTRY_BYTES {
             return Ok(DiskInsertResult::TooLarge);
         }
 
@@ -170,7 +187,10 @@ impl DiskProxyCache {
             return Ok(DiskInsertResult::AlreadyPresent);
         }
         let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "proxy cache path has no parent")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "proxy cache path has no parent",
+            )
         })?;
         fs::create_dir_all(parent)?;
         let temp = temporary_path(parent, key, format);
@@ -230,6 +250,16 @@ impl DiskProxyCache {
             .join(format!("{}.{}", key.frame_id.0, format.extension()))
     }
 
+    fn remove_corrupt_entry(&mut self, path: &Path) -> Result<(), DiskCacheError> {
+        let removed = remove_file_len(path)?;
+        self.stats.corrupt_entries = self.stats.corrupt_entries.saturating_add(1);
+        self.stats.resident_bytes = self.stats.resident_bytes.saturating_sub(removed);
+        if removed > 0 {
+            self.stats.resident_files = self.stats.resident_files.saturating_sub(1);
+        }
+        Ok(())
+    }
+
     fn refresh_resident_totals(&mut self) -> Result<(), DiskCacheError> {
         let (bytes, files) = resident_totals(&self.root)?;
         self.stats.resident_bytes = bytes;
@@ -241,7 +271,10 @@ impl DiskProxyCache {
         let mut entries = collect_proxy_files(&self.root)?;
         let total = entries.iter().try_fold(0_u64, |total, entry| {
             total.checked_add(entry.len).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "proxy cache byte count overflow")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "proxy cache byte count overflow",
+                )
             })
         })?;
         self.stats.resident_bytes = total;
@@ -306,13 +339,14 @@ fn collect_proxy_files_recursive(root: &Path, files: &mut Vec<ProxyFile>) -> io:
         if !file_type.is_file() || is_temporary(&entry.path()) {
             continue;
         }
-        let extension = entry.path().extension().and_then(|value| value.to_str());
+        let path = entry.path();
+        let extension = path.extension().and_then(|value| value.to_str());
         if !matches!(extension, Some("jpg" | "webp")) {
             continue;
         }
         let metadata = entry.metadata()?;
         files.push(ProxyFile {
-            path: entry.path(),
+            path,
             len: metadata.len(),
             modified: metadata.modified().ok(),
         });
@@ -324,10 +358,16 @@ fn resident_totals(root: &Path) -> io::Result<(u64, u64)> {
     let entries = collect_proxy_files(root)?;
     let bytes = entries.iter().try_fold(0_u64, |total, entry| {
         total.checked_add(entry.len).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "proxy cache byte count overflow")
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proxy cache byte count overflow",
+            )
         })
     })?;
-    Ok((bytes, u64::try_from(entries.len()).unwrap_or(u64::MAX)))
+    Ok((
+        bytes,
+        u64::try_from(entries.len()).unwrap_or(u64::MAX),
+    ))
 }
 
 fn cleanup_temporary_files(root: &Path) -> io::Result<()> {
@@ -480,7 +520,6 @@ mod tests {
         cache
             .insert(&key(&source, 1), ProxyFormat::Jpeg, &jpeg(24))
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         cache
             .insert(&key(&source, 2), ProxyFormat::Jpeg, &jpeg(24))
             .unwrap();
@@ -514,12 +553,8 @@ mod tests {
         let key_a = key(&source_a, 4);
         let key_b = key(&source_b, 4);
         let mut cache = DiskProxyCache::open(&root.0, 1_024).unwrap();
-        cache
-            .insert(&key_a, ProxyFormat::Jpeg, &jpeg(20))
-            .unwrap();
-        cache
-            .insert(&key_b, ProxyFormat::Jpeg, &jpeg(20))
-            .unwrap();
+        cache.insert(&key_a, ProxyFormat::Jpeg, &jpeg(20)).unwrap();
+        cache.insert(&key_b, ProxyFormat::Jpeg, &jpeg(20)).unwrap();
 
         cache.invalidate_source(&source_a).unwrap();
         assert!(cache.get(&key_a).unwrap().is_none());
@@ -545,9 +580,7 @@ mod tests {
         let source = source("content-a");
         let key = key(&source, 5);
         let mut cache = DiskProxyCache::open(&root.0, 1_024).unwrap();
-        cache
-            .insert(&key, ProxyFormat::WebP, &webp(20))
-            .unwrap();
+        cache.insert(&key, ProxyFormat::WebP, &webp(20)).unwrap();
         fs::remove_dir_all(cache.root()).unwrap();
 
         assert!(cache.get(&key).unwrap().is_none());
