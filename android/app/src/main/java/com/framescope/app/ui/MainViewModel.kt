@@ -345,6 +345,7 @@ class MainViewModel(
                                 session = updated,
                                 inspectionGenerationAtStart = inspectionRevision,
                                 microscopeRevision = microscopeRevision,
+                                publishLoadingState = false,
                             )
                         }
                     }
@@ -366,12 +367,15 @@ class MainViewModel(
         session: MicroscopeSessionSnapshot,
         inspectionGenerationAtStart: Long,
         microscopeRevision: Long,
+        publishLoadingState: Boolean = true,
     ) {
-        publishMicroscopeIfCurrent(
-            inspectionGenerationAtStart,
-            microscopeRevision,
-            MicroscopeUiState.LoadingFrame(session),
-        )
+        if (publishLoadingState) {
+            publishMicroscopeIfCurrent(
+                inspectionGenerationAtStart,
+                microscopeRevision,
+                MicroscopeUiState.LoadingFrame(session),
+            )
+        }
         repository.loadMicroscopeFrame()
             .onSuccess { frame ->
                 if (!isCurrent(inspectionGenerationAtStart, microscopeRevision)) return@onSuccess
