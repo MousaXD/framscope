@@ -21,6 +21,10 @@ pub use framescope_core::{
 pub use indexing::{
     FrameIndexDecoder, IndexingError, IndexingOptions, IndexingReport, build_or_resume_frame_index,
 };
+pub use microscope::{
+    MicroscopeNavigationError, MicroscopeStep, MicroscopeTarget, MicroscopeTimestampSelection,
+    microscope_step, microscope_target, microscope_timestamp_us,
+};
 pub use navigation::{
     NavigationDecoder, NavigationError, NavigationResult, TimestampSelection, navigate_to_frame,
     navigate_to_timestamp, resolve_timestamp,
@@ -217,6 +221,7 @@ mod engine;
 pub mod ffmpeg;
 mod indexing;
 mod iso;
+mod microscope;
 mod navigation;
 mod preview_navigation;
 
