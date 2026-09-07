@@ -12,7 +12,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -75,7 +74,7 @@ internal fun MicroscopeZoomableImage(
                 if (!enabled || !swipeEnabled || transform.scale > MicroscopeTransformMath.MIN_SCALE) {
                     return@pointerInput
                 }
-                var totalHorizontalDrag by mutableFloatStateOf(0f)
+                var totalHorizontalDrag = 0f
                 detectHorizontalDragGestures(
                     onDragStart = { totalHorizontalDrag = 0f },
                     onHorizontalDrag = { _, dragAmount -> totalHorizontalDrag += dragAmount },
