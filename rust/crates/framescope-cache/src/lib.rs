@@ -120,7 +120,11 @@ mod tests {
         let namespace = layout.source_namespace(&id);
         assert!(namespace.starts_with("v1/"));
         assert_eq!(namespace.len(), 3 + 64);
-        assert!(namespace[3..].chars().all(|value| value.is_ascii_hexdigit()));
+        assert!(
+            namespace[3..]
+                .chars()
+                .all(|value| value.is_ascii_hexdigit())
+        );
     }
 
     #[test]
