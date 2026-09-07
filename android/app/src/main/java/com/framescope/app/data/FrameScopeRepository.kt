@@ -230,9 +230,15 @@ class AndroidFrameScopeRepository(
 
     private fun nextOperationId(): Long {
         while (true) {
-            val current = nextOperationId.getAndIncrement()
-            if (current > 0L) return current
-            nextOperationId.compareAndSet(Long.MIN_VALUE, 1L)
+            val current = nextOperationId.get()
+            if (current <= 0L || current == Long.MAX_VALUE) {
+                throw VideoOpenException(
+                    kind = VideoOpenErrorKind.NativeFailure,
+                    message = "FrameScope cannot start another native video operation in this process.",
+                    diagnostic = "Native operation id space is exhausted.",
+                )
+            }
+            if (nextOperationId.compareAndSet(current, current + 1L)) return current
         }
     }
 
