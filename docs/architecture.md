@@ -14,8 +14,8 @@ NativeBridge
 framescope-ffi
         ↓
 framescope-video ─── framescope-core
-        ↓
-future decoder/index services
+        ↓ Android only
+framescope-ffmpeg
 
 framescope-cache (independent cache contracts in Phase 1)
 ```
@@ -68,7 +68,20 @@ The parser is seek-based and bounded. It walks box headers and reads only the sm
 - `tkhd` for dimensions and common rotation matrices;
 - `stts` sample counts for estimated FPS when available.
 
-The crate has no Android dependency.
+Host builds remain platform-neutral. On Android, this crate now has a target-specific dependency on `framescope-ffmpeg` that establishes FFmpeg availability without exposing native build configuration to Kotlin or UI code. The actual Phase 2 decoder API is not implemented by the FFmpeg foundation change.
+
+### `framescope-ffmpeg`
+
+Phase 2's narrow Android FFmpeg linkage boundary.
+
+Current responsibilities:
+
+- validate that the pinned Android FFmpeg headers and static libraries are present;
+- centralize Cargo native library search/link flags;
+- reject unsupported Android architectures at build time;
+- expose only a tiny linked-version/probe surface so the final JNI library must resolve FFmpeg symbols.
+
+It intentionally does **not** implement frame decoding. Decoder abstractions remain the responsibility of `framescope-video`. Detailed native build, codec, licensing, cache, and reproduction instructions live in [`ffmpeg-android.md`](ffmpeg-android.md).
 
 ### `framescope-cache`
 
@@ -86,31 +99,43 @@ It intentionally does not define frame blobs, eviction policy, or disk format ye
 
 The only Rust crate allowed to depend on JNI. It converts Android file descriptors into owned duplicate descriptors, calls `framescope-video`, and serializes success/failure envelopes.
 
-## Phase 1 video-stack decision
+The Phase 2 FFmpeg foundation adds a C-ABI build/link probe to this library for automated verification only; it does not add a Kotlin decoder interface.
 
-**FFmpeg is deferred to Phase 2.**
+## Phase 2 FFmpeg/Android native foundation
 
-Bundling FFmpeg now would add a large native build, codec configuration, licensing/build-surface decisions, and ABI complexity before FrameScope decodes a single frame. Instead, Phase 1 proves the Rust/Android ownership path with a legitimate native MP4/MOV metadata parser.
+Phase 2 now has a reproducible FFmpeg build/linkage layer while preserving the Phase 1 application boundaries.
 
-This is not a permanent home-grown decoder strategy. `framescope-video` is the boundary where the Phase 2 decoder backend will be introduced. The current metadata parser can remain as lightweight format probing or be narrowed later without changing Android architecture.
+The native foundation uses:
 
-FrameScope does not use `MediaMetadataRetriever` as its media engine or fallback. This avoids locking future frame semantics to Android framework decoding.
+- FFmpeg 9.0.1 from the official source archive, pinned by SHA-256;
+- Android NDK r27d (`27.3.13750724`);
+- Android API 26;
+- `arm64-v8a` / Rust `aarch64-linux-android` only;
+- static position-independent FFmpeg archives linked into `libframescope_ffi.so`;
+- FFmpeg's built-in H.264, HEVC, VP9, and AV1 software decoders;
+- MP4/MOV, Matroska/WebM, and AVI demuxer support in the pinned native build.
+
+The build does not use random precompiled FFmpeg binaries and does not enable external codec libraries such as x264, x265, libaom, or dav1d. Hardware MediaCodec decoding is not implemented by this layer.
+
+Gradle owns packaging while the native toolchain stays centralized in scripts and `framescope-ffmpeg`: `preBuild` prepares the pinned FFmpeg prefix, `cargo-ndk` builds the Rust JNI library, and Gradle packages only the resulting `libframescope_ffi.so` for `arm64-v8a`. Generated FFmpeg source/build state stays under ignored `.native/` paths and can be cached by CI.
+
+See [`ffmpeg-android.md`](ffmpeg-android.md) for exact configure options, licensing implications, reproduction commands, validation, and Agent 2/Agent 4 handoff points.
 
 ## Android/NDK baseline
 
 - `minSdk 26`.
 - `compileSdk 36`.
 - `targetSdk 36`.
-- `arm64-v8a` Phase 1 ABI.
+- `arm64-v8a` current ABI.
 - NDK r27d LTS.
 - Gradle 8.13 + Android Gradle Plugin 8.13.2.
 - Kotlin 2.4.10.
 - Jetpack Compose BOM 2026.06.00.
 - Java 17 bytecode.
 
-Phase 1 deliberately stays on the stable Android 16/API 36 baseline instead of adopting the newest Compose train that requires compileSdk 37. The UI does not need Android 17 preview APIs, so that dependency would add churn without product value.
+FrameScope deliberately stays on the stable Android 16/API 36 baseline instead of adopting the newest Compose train that requires compileSdk 37. The UI does not need Android 17 preview APIs, so that dependency would add churn without product value.
 
-The ABI is deliberately explicit. Adding another architecture is a build configuration change plus another Rust target, not a media-engine rewrite.
+The ABI is deliberately explicit. Adding another architecture is a build configuration change plus another Rust target and FFmpeg prefix, not a media-engine rewrite.
 
 ## Large-video invariant
 
@@ -134,9 +159,9 @@ compressed disk cache
 indexed source-video decoder fallback
 ```
 
-## Future video engine: Phase 2
+## Phase 2 decoder work still to land
 
-`framescope-video` will gain a decoder abstraction around an FFmpeg-based backend. The API must model:
+`framescope-video` will gain a decoder abstraction around the FFmpeg backend. The API must model:
 
 - presentation timestamps rather than assuming constant FPS;
 - variable-frame-rate tracks;
@@ -146,7 +171,7 @@ indexed source-video decoder fallback
 - pixel format/color-space metadata;
 - cancellation and bounded decode work.
 
-The application should request frame/timestamp operations, not manipulate FFmpeg handles directly.
+The application should request frame/timestamp operations, not manipulate FFmpeg handles directly. The FFmpeg/NDK foundation does not claim these decoder features are implemented yet.
 
 ## Future indexing and caching: Phase 3
 
