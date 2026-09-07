@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/framescope-core",
+    "crates/framescope-video",
+    "crates/framescope-cache",
+    "crates/framescope-ffi",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "GPL-3.0-only"
+rust-version = "1.85"
+
+[workspace.dependencies]
+blake3 = "=1.8.2"
+jni = "=0.21.1"
+libc = "=0.2.175"
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.143"
+thiserror = "=2.0.16"
