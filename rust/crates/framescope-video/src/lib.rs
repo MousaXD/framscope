@@ -25,6 +25,9 @@ pub use microscope::{
     MicroscopeNavigationError, MicroscopeStep, MicroscopeTarget, MicroscopeTimestampSelection,
     microscope_step, microscope_target, microscope_timestamp_us,
 };
+pub use microscope_presentation::{
+    MicroscopeFramePresentation, MicroscopePresentationError, present_microscope_frame,
+};
 pub use navigation::{
     NavigationDecoder, NavigationError, NavigationResult, TimestampSelection, navigate_to_frame,
     navigate_to_timestamp, resolve_timestamp,
@@ -222,6 +225,7 @@ pub mod ffmpeg;
 mod indexing;
 mod iso;
 mod microscope;
+mod microscope_presentation;
 mod navigation;
 mod preview_navigation;
 
