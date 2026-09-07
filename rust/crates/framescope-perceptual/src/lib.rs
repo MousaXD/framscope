@@ -145,6 +145,14 @@ impl HybridSimilarityEngine {
         left: &OwnedRgbaFrame,
         right: &OwnedRgbaFrame,
     ) -> Result<HybridDecision, HybridSimilarityError> {
+        if (left.width, left.height) != (right.width, right.height) {
+            return Err(SimilarityError::DimensionMismatch {
+                left: (left.width, left.height),
+                right: (right.width, right.height),
+            }
+            .into());
+        }
+
         let perceptual = DHashEngine::compare(left, right);
         if perceptual.hamming_distance > self.policy.max_hash_distance {
             return Ok(HybridDecision::RejectedByHash { perceptual });
@@ -309,14 +317,23 @@ mod tests {
     }
 
     #[test]
-    fn resolution_mismatch_is_not_silently_accepted() {
+    fn resolution_mismatch_is_rejected_before_hash_short_circuit() {
         let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
-            max_hash_distance: 4,
+            max_hash_distance: 0,
             minimum_luma_similarity: 9_900,
         })
         .unwrap();
-        let small = solid(80);
-        let large = frame(18, 16, 72, vec![80; 18 * 16 * 4]);
+        let (small, _) = gradients();
+        let mut pixels = vec![0_u8; 18 * 16 * 4];
+        for y in 0..16 {
+            for x in 0..18 {
+                let value = ((17 - x) * 12) as u8;
+                let offset = (y * 18 + x) * 4;
+                pixels[offset..offset + 4].copy_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let large = frame(18, 16, 72, pixels);
+        assert!(DHashEngine::compare(&small, &large).hamming_distance > 0);
         assert!(matches!(
             engine.compare(&small, &large),
             Err(HybridSimilarityError::Similarity(
