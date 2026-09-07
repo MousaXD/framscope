@@ -1,10 +1,12 @@
-//! Deterministic perceptual candidate signals for frame-similarity escalation.
+//! Deterministic perceptual candidate signals and safe confirmation for frame similarity.
 //!
-//! These hashes are intentionally not final grouping verdicts. A small Hamming distance means two
-//! frames are worth confirming with a stronger pixel-domain metric; it does not mean a literal
-//! percentage of pixels changed.
+//! Perceptual hashes are never final grouping verdicts. A small Hamming distance means two frames
+//! are worth confirming with a stronger pixel-domain metric; it does not mean a literal percentage
+//! of pixels changed.
 
 use framescope_cache::OwnedRgbaFrame;
+use framescope_similarity::{SimilarityEngine, SimilarityError, SimilarityMode, SimilarityScore};
+use thiserror::Error;
 
 pub const PERCEPTUAL_SCALE: u16 = 10_000;
 pub const DHASH_BITS: u32 = 64;
@@ -75,6 +77,88 @@ impl DHashEngine {
     }
 }
 
+/// Two-stage policy: dHash may reject obvious differences cheaply, but only the full visible-pixel
+/// luma metric is allowed to accept a pair as similar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridSimilarityPolicy {
+    pub max_hash_distance: u8,
+    pub minimum_luma_similarity: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HybridDecision {
+    RejectedByHash {
+        perceptual: PerceptualScore,
+    },
+    RejectedByLuma {
+        perceptual: PerceptualScore,
+        luma: SimilarityScore,
+    },
+    Accepted {
+        perceptual: PerceptualScore,
+        luma: SimilarityScore,
+    },
+}
+
+impl HybridDecision {
+    pub fn accepted(self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum HybridSimilarityError {
+    #[error("dHash distance threshold {0} exceeds {DHASH_BITS} bits")]
+    InvalidHashDistance(u8),
+    #[error(transparent)]
+    Similarity(#[from] SimilarityError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridSimilarityEngine {
+    policy: HybridSimilarityPolicy,
+    confirmation: SimilarityEngine,
+}
+
+impl HybridSimilarityEngine {
+    pub fn new(policy: HybridSimilarityPolicy) -> Result<Self, HybridSimilarityError> {
+        if u32::from(policy.max_hash_distance) > DHASH_BITS {
+            return Err(HybridSimilarityError::InvalidHashDistance(
+                policy.max_hash_distance,
+            ));
+        }
+        let confirmation = SimilarityEngine::new(SimilarityMode::LumaMeanAbsolute {
+            minimum_similarity: policy.minimum_luma_similarity,
+        })?;
+        Ok(Self {
+            policy,
+            confirmation,
+        })
+    }
+
+    pub fn policy(&self) -> HybridSimilarityPolicy {
+        self.policy
+    }
+
+    pub fn compare(
+        &self,
+        left: &OwnedRgbaFrame,
+        right: &OwnedRgbaFrame,
+    ) -> Result<HybridDecision, HybridSimilarityError> {
+        let perceptual = DHashEngine::compare(left, right);
+        if perceptual.hamming_distance > self.policy.max_hash_distance {
+            return Ok(HybridDecision::RejectedByHash { perceptual });
+        }
+
+        let luma = self.confirmation.compare(left, right)?;
+        if self.confirmation.accepts(luma) {
+            Ok(HybridDecision::Accepted { perceptual, luma })
+        } else {
+            Ok(HybridDecision::RejectedByLuma { perceptual, luma })
+        }
+    }
+}
+
 fn sample_coordinate(size: u32, index: usize, sample_count: usize) -> usize {
     debug_assert!(size > 0);
     debug_assert!(sample_count > 1);
@@ -106,6 +190,27 @@ mod tests {
         frame(9, 8, 36, vec![value; 9 * 8 * 4])
     }
 
+    fn gradients() -> (OwnedRgbaFrame, OwnedRgbaFrame) {
+        let mut left = vec![0_u8; 9 * 8 * 4];
+        let mut right = vec![0_u8; 9 * 8 * 4];
+        for y in 0..8 {
+            for x in 0..9 {
+                let left_value = (x * 20) as u8;
+                let right_value = ((8 - x) * 20) as u8;
+                let offset = (y * 9 + x) * 4;
+                left[offset..offset + 4]
+                    .copy_from_slice(&[left_value, left_value, left_value, 255]);
+                right[offset..offset + 4].copy_from_slice(&[
+                    right_value,
+                    right_value,
+                    right_value,
+                    255,
+                ]);
+            }
+        }
+        (frame(9, 8, 36, left), frame(9, 8, 36, right))
+    }
+
     #[test]
     fn identical_frames_have_zero_distance() {
         let left = solid(40);
@@ -124,24 +229,8 @@ mod tests {
 
     #[test]
     fn horizontal_structure_changes_hash() {
-        let mut left = vec![0_u8; 9 * 8 * 4];
-        let mut right = vec![0_u8; 9 * 8 * 4];
-        for y in 0..8 {
-            for x in 0..9 {
-                let left_value = (x * 20) as u8;
-                let right_value = ((8 - x) * 20) as u8;
-                let offset = (y * 9 + x) * 4;
-                left[offset..offset + 4]
-                    .copy_from_slice(&[left_value, left_value, left_value, 255]);
-                right[offset..offset + 4].copy_from_slice(&[
-                    right_value,
-                    right_value,
-                    right_value,
-                    255,
-                ]);
-            }
-        }
-        let score = DHashEngine::compare(&frame(9, 8, 36, left), &frame(9, 8, 36, right));
+        let (left, right) = gradients();
+        let score = DHashEngine::compare(&left, &right);
         assert!(score.hamming_distance > 0);
         assert!(score.basis_points < PERCEPTUAL_SCALE);
     }
@@ -168,5 +257,71 @@ mod tests {
         let small = solid(80);
         let large = frame(18, 16, 72, vec![80; 18 * 16 * 4]);
         assert_eq!(DHashEngine::hash(&small), DHashEngine::hash(&large));
+    }
+
+    #[test]
+    fn invalid_hash_threshold_is_rejected() {
+        let error = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 65,
+            minimum_luma_similarity: 9_900,
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            HybridSimilarityError::InvalidHashDistance(65)
+        ));
+    }
+
+    #[test]
+    fn brightness_hash_collision_is_rejected_by_luma_confirmation() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 4,
+            minimum_luma_similarity: 9_900,
+        })
+        .unwrap();
+        let decision = engine.compare(&solid(10), &solid(240)).unwrap();
+        assert!(matches!(decision, HybridDecision::RejectedByLuma { .. }));
+        assert!(!decision.accepted());
+    }
+
+    #[test]
+    fn obvious_structure_change_is_rejected_before_full_confirmation() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 8,
+            minimum_luma_similarity: 9_900,
+        })
+        .unwrap();
+        let (left, right) = gradients();
+        let decision = engine.compare(&left, &right).unwrap();
+        assert!(matches!(decision, HybridDecision::RejectedByHash { .. }));
+    }
+
+    #[test]
+    fn small_luma_change_can_be_confirmed() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 4,
+            minimum_luma_similarity: 9_900,
+        })
+        .unwrap();
+        let decision = engine.compare(&solid(100), &solid(101)).unwrap();
+        assert!(decision.accepted());
+        assert!(matches!(decision, HybridDecision::Accepted { .. }));
+    }
+
+    #[test]
+    fn resolution_mismatch_is_not_silently_accepted() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 4,
+            minimum_luma_similarity: 9_900,
+        })
+        .unwrap();
+        let small = solid(80);
+        let large = frame(18, 16, 72, vec![80; 18 * 16 * 4]);
+        assert!(matches!(
+            engine.compare(&small, &large),
+            Err(HybridSimilarityError::Similarity(
+                SimilarityError::DimensionMismatch { .. }
+            ))
+        ));
     }
 }
