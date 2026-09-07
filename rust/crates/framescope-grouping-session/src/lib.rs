@@ -158,7 +158,8 @@ mod tests {
     #[test]
     fn cancellation_before_push_does_not_mutate_session_progress() {
         let token = GroupingCancellationToken::default();
-        let mut session = HybridGroupingSession::with_cancellation(policy(), token.clone()).unwrap();
+        let mut session =
+            HybridGroupingSession::with_cancellation(policy(), token.clone()).unwrap();
         token.cancel();
 
         assert!(matches!(
@@ -173,7 +174,8 @@ mod tests {
     #[test]
     fn cancellation_after_progress_stops_before_next_frame() {
         let token = GroupingCancellationToken::default();
-        let mut session = HybridGroupingSession::with_cancellation(policy(), token.clone()).unwrap();
+        let mut session =
+            HybridGroupingSession::with_cancellation(policy(), token.clone()).unwrap();
         assert!(session.push(&entry(0), solid(20)).unwrap().is_none());
         token.cancel();
 
@@ -181,7 +183,10 @@ mod tests {
             session.push(&entry(1), solid(20)),
             Err(GroupingSessionError::Cancelled)
         ));
-        assert!(matches!(session.finish(), Err(GroupingSessionError::Cancelled)));
+        assert!(matches!(
+            session.finish(),
+            Err(GroupingSessionError::Cancelled)
+        ));
         assert_eq!(session.stats().frames_processed, 1);
     }
 
@@ -201,7 +206,11 @@ mod tests {
         let mut emitted = 0_u64;
 
         for id in 0..20_000_u64 {
-            if session.push(&entry(id), solid((id % 2) as u8)).unwrap().is_some() {
+            if session
+                .push(&entry(id), solid((id % 2) as u8))
+                .unwrap()
+                .is_some()
+            {
                 emitted += 1;
             }
         }
