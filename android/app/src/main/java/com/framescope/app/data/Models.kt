@@ -1,19 +1,31 @@
 package com.framescope.app.data
 
 data class VideoMetadata(
-    val durationUs: Long,
+    val durationUs: Long?,
     val width: Int,
     val height: Int,
     val estimatedFrameRate: Double?,
     val rotationDegrees: Int,
+    val container: String? = null,
+    val codec: String? = null,
+    val videoStreamIndex: Int? = null,
+    val videoStreamCount: Int? = null,
+    val audioStreamCount: Int? = null,
+    val pixelFormat: String? = null,
+    val variableFrameRate: Boolean? = null,
 ) {
     fun isSane(): Boolean =
-        durationUs > 0 &&
+        (durationUs == null || durationUs > 0) &&
             width in 1..65_535 &&
             height in 1..65_535 &&
             rotationDegrees in setOf(0, 90, 180, 270) &&
             (estimatedFrameRate == null ||
-                (estimatedFrameRate.isFinite() && estimatedFrameRate > 0.0 && estimatedFrameRate <= 1_000.0))
+                (estimatedFrameRate.isFinite() && estimatedFrameRate > 0.0 && estimatedFrameRate <= 1_000.0)) &&
+            (videoStreamIndex == null || videoStreamIndex >= 0) &&
+            (videoStreamCount == null || videoStreamCount > 0) &&
+            (audioStreamCount == null || audioStreamCount >= 0) &&
+            (videoStreamIndex == null || videoStreamCount == null || videoStreamIndex < videoStreamCount) &&
+            listOf(container, codec, pixelFormat).all { value -> value == null || value.length <= 256 }
 }
 
 data class InspectedVideo(
@@ -34,3 +46,25 @@ sealed interface NativeInspection {
         val engine: String?,
     ) : NativeInspection
 }
+
+enum class InspectionProgress {
+    Opening,
+    Inspecting,
+}
+
+enum class VideoOpenErrorKind {
+    InvalidUri,
+    UnreadableUri,
+    PermissionRevoked,
+    UnsupportedVideo,
+    NoVideoTrack,
+    CorruptMedia,
+    DecoderFailure,
+    NativeFailure,
+}
+
+class VideoOpenException(
+    val kind: VideoOpenErrorKind,
+    message: String,
+    val diagnostic: String? = null,
+) : IllegalStateException(message)
