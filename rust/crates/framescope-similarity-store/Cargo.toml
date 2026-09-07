@@ -10,6 +10,7 @@ framescope-cache = { path = "../framescope-cache" }
 framescope-core = { path = "../framescope-core" }
 framescope-perceptual = { path = "../framescope-perceptual" }
 framescope-similarity = { path = "../framescope-similarity" }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -1,16 +1,26 @@
-//! Versioned disposable persistence for derived frame-similarity groups.
+//! Versioned, bounded, disposable persistence for derived frame-similarity groups.
+//!
+//! The source video and authoritative Phase 3 index remain truth. Similarity results are derived
+//! cache state: incomplete, stale, or corrupt databases are never reused.
 
 use framescope_cache::{FrameId, FrameIndexStreamIdentity, SourceIdentity};
-use framescope_core::{MediaDuration, MediaTimestamp};
+use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
 use framescope_perceptual::{HybridSimilarityEngine, HybridSimilarityPolicy};
-use framescope_similarity::{FrameGroup, SimilarityMode};
+use framescope_similarity::{FrameGroup, SIMILARITY_SCALE, SimilarityMode};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
-pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 2;
+pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 3;
+const META_ROW_ID: i64 = 1;
+const STATE_BUILDING: i64 = 1;
+const STATE_COMPLETE: i64 = 2;
+const WRITE_BATCH_GROUPS: usize = 128;
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimilarityStoreConfig {
@@ -26,7 +36,6 @@ pub struct SimilarityStoreKey {
 }
 
 impl SimilarityStoreKey {
-    /// Backwards-compatible constructor for exact and direct-luma grouping modes.
     pub fn new(
         source: SourceIdentity,
         stream: FrameIndexStreamIdentity,
@@ -73,15 +82,16 @@ impl SimilarityStoreKey {
                 minimum_luma_similarity,
             }) => format!("hybrid-h{max_hash_distance}-l{minimum_luma_similarity}"),
         };
-        format!("stream-{}-{suffix}.json", self.stream.stream_index)
+        format!("stream-{}-{suffix}.sqlite3", self.stream.stream_index)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimilarityStoreLoad {
     Missing,
-    Reused(Vec<FrameGroup>),
+    Reused { group_count: u64 },
     InvalidatedStale,
+    InvalidatedIncomplete,
     InvalidatedCorrupt,
 }
 
@@ -93,9 +103,13 @@ pub enum SimilarityStoreError {
     InvalidConfig(String),
     #[error("invalid frame group: {0}")]
     InvalidGroup(String),
+    #[error("similarity store numeric value is outside the supported SQLite range: {0}")]
+    NumericRange(&'static str),
     #[error("similarity store I/O failed: {0}")]
     Io(#[from] io::Error),
-    #[error("similarity store serialization failed: {0}")]
+    #[error("similarity store SQLite operation failed: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("similarity store key serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
 }
 
@@ -104,6 +118,16 @@ struct PersistedKey {
     source: SourceIdentity,
     stream: FrameIndexStreamIdentity,
     config: PersistedConfig,
+}
+
+impl From<&SimilarityStoreKey> for PersistedKey {
+    fn from(value: &SimilarityStoreKey) -> Self {
+        Self {
+            source: value.source.clone(),
+            stream: value.stream.clone(),
+            config: value.config.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,58 +161,6 @@ impl From<SimilarityStoreConfig> for PersistedConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct PersistedFrameGroup {
-    representative_frame: FrameId,
-    first_frame: FrameId,
-    last_frame: FrameId,
-    frame_count: u64,
-    start_timestamp: MediaTimestamp,
-    end_timestamp: MediaTimestamp,
-    start_duration: Option<MediaDuration>,
-    end_duration: Option<MediaDuration>,
-    representative_similarity_floor: u16,
-}
-
-impl From<&FrameGroup> for PersistedFrameGroup {
-    fn from(value: &FrameGroup) -> Self {
-        Self {
-            representative_frame: value.representative_frame,
-            first_frame: value.first_frame,
-            last_frame: value.last_frame,
-            frame_count: value.frame_count,
-            start_timestamp: value.start_timestamp,
-            end_timestamp: value.end_timestamp,
-            start_duration: value.start_duration,
-            end_duration: value.end_duration,
-            representative_similarity_floor: value.representative_similarity_floor,
-        }
-    }
-}
-
-impl From<PersistedFrameGroup> for FrameGroup {
-    fn from(value: PersistedFrameGroup) -> Self {
-        Self {
-            representative_frame: value.representative_frame,
-            first_frame: value.first_frame,
-            last_frame: value.last_frame,
-            frame_count: value.frame_count,
-            start_timestamp: value.start_timestamp,
-            end_timestamp: value.end_timestamp,
-            start_duration: value.start_duration,
-            end_duration: value.end_duration,
-            representative_similarity_floor: value.representative_similarity_floor,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Manifest {
-    schema_version: u32,
-    key: PersistedKey,
-    groups: Vec<PersistedFrameGroup>,
-}
-
 #[derive(Debug, Clone)]
 pub struct SimilarityStore {
     root: PathBuf,
@@ -206,82 +178,116 @@ impl SimilarityStore {
             .join(key.file_name())
     }
 
-    pub fn load(
-        &self,
-        expected: &SimilarityStoreKey,
-    ) -> Result<SimilarityStoreLoad, SimilarityStoreError> {
-        let path = self.path_for(expected);
-        remove_if_present(&temp_path(&path))?;
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(SimilarityStoreLoad::Missing);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let manifest: Manifest = match serde_json::from_slice(&bytes) {
-            Ok(value) => value,
-            Err(_) => {
-                remove_if_present(&path)?;
-                return Ok(SimilarityStoreLoad::InvalidatedCorrupt);
-            }
-        };
-        let expected_key = PersistedKey {
-            source: expected.source.clone(),
-            stream: expected.stream.clone(),
-            config: expected.config.into(),
-        };
-        if manifest.schema_version != SIMILARITY_STORE_SCHEMA_VERSION
-            || manifest.key != expected_key
-        {
-            remove_if_present(&path)?;
-            return Ok(SimilarityStoreLoad::InvalidatedStale);
-        }
-        let groups = manifest
-            .groups
-            .into_iter()
-            .map(FrameGroup::from)
-            .collect::<Vec<_>>();
-        if groups.iter().any(invalid_group) {
-            remove_if_present(&path)?;
-            return Ok(SimilarityStoreLoad::InvalidatedCorrupt);
-        }
-        Ok(SimilarityStoreLoad::Reused(groups))
-    }
-
-    pub fn save(
+    pub fn begin(
         &self,
         key: &SimilarityStoreKey,
-        groups: &[FrameGroup],
-    ) -> Result<(), SimilarityStoreError> {
-        if groups.iter().any(invalid_group) {
-            return Err(SimilarityStoreError::InvalidGroup(
-                "group ranges must be ordered, non-empty, and match frame_count".into(),
-            ));
-        }
-        let path = self.path_for(key);
-        let parent = path.parent().ok_or_else(|| {
+    ) -> Result<SimilarityStoreWriter, SimilarityStoreError> {
+        let final_path = self.path_for(key);
+        let parent = final_path.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "store path has no parent")
         })?;
         fs::create_dir_all(parent)?;
-        let temp = temp_path(&path);
-        remove_if_present(&temp)?;
-        let manifest = Manifest {
-            schema_version: SIMILARITY_STORE_SCHEMA_VERSION,
-            key: PersistedKey {
-                source: key.source.clone(),
-                stream: key.stream.clone(),
-                config: key.config.into(),
-            },
-            groups: groups.iter().map(PersistedFrameGroup::from).collect(),
-        };
-        fs::write(&temp, serde_json::to_vec(&manifest)?)?;
-        remove_if_present(&path)?;
-        if let Err(error) = fs::rename(&temp, &path) {
-            let _ = remove_if_present(&temp);
-            return Err(error.into());
+
+        let building_path = building_path(&final_path);
+        purge_database_files(&building_path)?;
+        let connection = Connection::open(&building_path)?;
+        configure_connection(&connection)?;
+        create_schema(&connection)?;
+        let key_json = serde_json::to_string(&PersistedKey::from(key))?;
+        connection.execute(
+            "INSERT INTO similarity_meta (id, state, key_json, group_count)
+             VALUES (?1, ?2, ?3, 0)",
+            params![META_ROW_ID, STATE_BUILDING, key_json],
+        )?;
+
+        Ok(SimilarityStoreWriter {
+            connection,
+            final_path,
+            building_path,
+            pending: Vec::with_capacity(WRITE_BATCH_GROUPS),
+            next_ordinal: 0,
+        })
+    }
+
+    pub fn visit_groups<F>(
+        &self,
+        expected: &SimilarityStoreKey,
+        mut visitor: F,
+    ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
+    where
+        F: FnMut(FrameGroup),
+    {
+        let path = self.path_for(expected);
+        if !path.exists() {
+            return Ok(SimilarityStoreLoad::Missing);
         }
-        Ok(())
+        if !has_sqlite_header(&path)? {
+            purge_database_files(&path)?;
+            return Ok(SimilarityStoreLoad::InvalidatedCorrupt);
+        }
+
+        let connection = Connection::open(&path)?;
+        configure_connection(&connection)?;
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version != i64::from(SIMILARITY_STORE_SCHEMA_VERSION) {
+            drop(connection);
+            purge_database_files(&path)?;
+            return Ok(SimilarityStoreLoad::InvalidatedStale);
+        }
+
+        let meta: Option<(i64, String, i64)> = connection
+            .query_row(
+                "SELECT state, key_json, group_count FROM similarity_meta WHERE id = ?1",
+                params![META_ROW_ID],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((state, key_json, stored_count)) = meta else {
+            drop(connection);
+            purge_database_files(&path)?;
+            return Ok(SimilarityStoreLoad::InvalidatedCorrupt);
+        };
+        if state != STATE_COMPLETE {
+            drop(connection);
+            purge_database_files(&path)?;
+            return Ok(SimilarityStoreLoad::InvalidatedIncomplete);
+        }
+
+        let persisted_key: PersistedKey = match serde_json::from_str(&key_json) {
+            Ok(value) => value,
+            Err(_) => {
+                drop(connection);
+                purge_database_files(&path)?;
+                return Ok(SimilarityStoreLoad::InvalidatedCorrupt);
+            }
+        };
+        if persisted_key != PersistedKey::from(expected) {
+            drop(connection);
+            purge_database_files(&path)?;
+            return Ok(SimilarityStoreLoad::InvalidatedStale);
+        }
+        let group_count = from_sql_u64(stored_count, "stored group count")?;
+
+        if !quick_check_ok(&connection)? || !validate_rows(&connection, group_count)? {
+            drop(connection);
+            purge_database_files(&path)?;
+            return Ok(SimilarityStoreLoad::InvalidatedCorrupt);
+        }
+
+        let mut statement = connection.prepare_cached(
+            "SELECT representative_frame, first_frame, last_frame, frame_count,
+                    start_ticks, start_tb_num, start_tb_den,
+                    end_ticks, end_tb_num, end_tb_den,
+                    start_duration_ticks, start_duration_tb_num, start_duration_tb_den,
+                    end_duration_ticks, end_duration_tb_num, end_duration_tb_den,
+                    representative_similarity_floor
+             FROM similarity_groups ORDER BY ordinal",
+        )?;
+        let rows = statement.query_map([], decode_group)?;
+        for row in rows {
+            visitor(row?);
+        }
+        Ok(SimilarityStoreLoad::Reused { group_count })
     }
 
     pub fn invalidate_source(&self, source: &SourceIdentity) -> Result<(), SimilarityStoreError> {
@@ -301,23 +307,305 @@ impl SimilarityStore {
     }
 }
 
+pub struct SimilarityStoreWriter {
+    connection: Connection,
+    final_path: PathBuf,
+    building_path: PathBuf,
+    pending: Vec<FrameGroup>,
+    next_ordinal: u64,
+}
+
+impl SimilarityStoreWriter {
+    pub fn append(&mut self, group: &FrameGroup) -> Result<(), SimilarityStoreError> {
+        validate_group(group)?;
+        self.pending.push(group.clone());
+        if self.pending.len() >= WRITE_BATCH_GROUPS {
+            self.flush_batch()?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<u64, SimilarityStoreError> {
+        self.flush_batch()?;
+        let count = self.next_ordinal;
+        self.connection.execute(
+            "UPDATE similarity_meta SET state = ?1, group_count = ?2 WHERE id = ?3",
+            params![
+                STATE_COMPLETE,
+                to_sql_u64(count, "group count")?,
+                META_ROW_ID
+            ],
+        )?;
+        self.connection.execute_batch("PRAGMA optimize;")?;
+        drop(self.connection);
+
+        fs::rename(&self.building_path, &self.final_path)?;
+        sync_parent(&self.final_path)?;
+        Ok(count)
+    }
+
+    fn flush_batch(&mut self) -> Result<(), SimilarityStoreError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut statement = transaction.prepare_cached(
+                "INSERT INTO similarity_groups (
+                    ordinal, representative_frame, first_frame, last_frame, frame_count,
+                    start_ticks, start_tb_num, start_tb_den,
+                    end_ticks, end_tb_num, end_tb_den,
+                    start_duration_ticks, start_duration_tb_num, start_duration_tb_den,
+                    end_duration_ticks, end_duration_tb_num, end_duration_tb_den,
+                    representative_similarity_floor
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                    ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                 )",
+            )?;
+            for group in &self.pending {
+                let ordinal = to_sql_u64(self.next_ordinal, "group ordinal")?;
+                let start_duration = group.start_duration;
+                let end_duration = group.end_duration;
+                statement.execute(params![
+                    ordinal,
+                    to_sql_u64(group.representative_frame.0, "representative frame")?,
+                    to_sql_u64(group.first_frame.0, "first frame")?,
+                    to_sql_u64(group.last_frame.0, "last frame")?,
+                    to_sql_u64(group.frame_count, "represented frame count")?,
+                    group.start_timestamp.ticks,
+                    group.start_timestamp.time_base.numerator,
+                    group.start_timestamp.time_base.denominator,
+                    group.end_timestamp.ticks,
+                    group.end_timestamp.time_base.numerator,
+                    group.end_timestamp.time_base.denominator,
+                    start_duration.map(|value| value.ticks),
+                    start_duration.map(|value| value.time_base.numerator),
+                    start_duration.map(|value| value.time_base.denominator),
+                    end_duration.map(|value| value.ticks),
+                    end_duration.map(|value| value.time_base.numerator),
+                    end_duration.map(|value| value.time_base.denominator),
+                    i64::from(group.representative_similarity_floor),
+                ])?;
+                self.next_ordinal = self
+                    .next_ordinal
+                    .checked_add(1)
+                    .ok_or(SimilarityStoreError::NumericRange("group ordinal"))?;
+            }
+        }
+        transaction.execute(
+            "UPDATE similarity_meta SET group_count = ?1 WHERE id = ?2",
+            params![to_sql_u64(self.next_ordinal, "group count")?, META_ROW_ID],
+        )?;
+        transaction.commit()?;
+        self.pending.clear();
+        Ok(())
+    }
+}
+
+fn configure_connection(connection: &Connection) -> Result<(), SimilarityStoreError> {
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.pragma_update(None, "journal_mode", "DELETE")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    Ok(())
+}
+
+fn create_schema(connection: &Connection) -> Result<(), SimilarityStoreError> {
+    connection.execute_batch(
+        "CREATE TABLE similarity_meta (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            state INTEGER NOT NULL CHECK(state IN (1, 2)),
+            key_json TEXT NOT NULL,
+            group_count INTEGER NOT NULL CHECK(group_count >= 0)
+         );
+         CREATE TABLE similarity_groups (
+            ordinal INTEGER PRIMARY KEY CHECK(ordinal >= 0),
+            representative_frame INTEGER NOT NULL CHECK(representative_frame >= 0),
+            first_frame INTEGER NOT NULL CHECK(first_frame >= 0),
+            last_frame INTEGER NOT NULL CHECK(last_frame >= 0),
+            frame_count INTEGER NOT NULL CHECK(frame_count > 0),
+            start_ticks INTEGER NOT NULL,
+            start_tb_num INTEGER NOT NULL CHECK(start_tb_num > 0),
+            start_tb_den INTEGER NOT NULL CHECK(start_tb_den > 0),
+            end_ticks INTEGER NOT NULL,
+            end_tb_num INTEGER NOT NULL CHECK(end_tb_num > 0),
+            end_tb_den INTEGER NOT NULL CHECK(end_tb_den > 0),
+            start_duration_ticks INTEGER,
+            start_duration_tb_num INTEGER,
+            start_duration_tb_den INTEGER,
+            end_duration_ticks INTEGER,
+            end_duration_tb_num INTEGER,
+            end_duration_tb_den INTEGER,
+            representative_similarity_floor INTEGER NOT NULL
+                CHECK(representative_similarity_floor BETWEEN 0 AND 10000)
+         );",
+    )?;
+    connection.pragma_update(None, "user_version", SIMILARITY_STORE_SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn quick_check_ok(connection: &Connection) -> Result<bool, SimilarityStoreError> {
+    let result: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    Ok(result == "ok")
+}
+
+fn validate_rows(
+    connection: &Connection,
+    expected_count: u64,
+) -> Result<bool, SimilarityStoreError> {
+    let (count, min_ordinal, max_ordinal): (i64, Option<i64>, Option<i64>) = connection.query_row(
+        "SELECT COUNT(*), MIN(ordinal), MAX(ordinal) FROM similarity_groups",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    if from_sql_u64(count, "database group count")? != expected_count {
+        return Ok(false);
+    }
+    if expected_count > 0
+        && (min_ordinal != Some(0)
+            || max_ordinal != Some(to_sql_u64(expected_count - 1, "maximum group ordinal")?))
+    {
+        return Ok(false);
+    }
+
+    let mut statement = connection.prepare_cached(
+        "SELECT representative_frame, first_frame, last_frame, frame_count,
+                start_ticks, start_tb_num, start_tb_den,
+                end_ticks, end_tb_num, end_tb_den,
+                start_duration_ticks, start_duration_tb_num, start_duration_tb_den,
+                end_duration_ticks, end_duration_tb_num, end_duration_tb_den,
+                representative_similarity_floor
+         FROM similarity_groups ORDER BY ordinal",
+    )?;
+    let rows = statement.query_map([], decode_group)?;
+    for row in rows {
+        let group = row?;
+        if invalid_group(&group) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn decode_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<FrameGroup> {
+    let start_time_base = decode_time_base(row.get(5)?, row.get(6)?, 5)?;
+    let end_time_base = decode_time_base(row.get(8)?, row.get(9)?, 8)?;
+    let start_duration = decode_duration(row.get(10)?, row.get(11)?, row.get(12)?, 10)?;
+    let end_duration = decode_duration(row.get(13)?, row.get(14)?, row.get(15)?, 13)?;
+    let floor: i64 = row.get(16)?;
+    let representative_similarity_floor =
+        u16::try_from(floor).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(16, floor))?;
+    Ok(FrameGroup {
+        representative_frame: FrameId(sql_i64_to_u64(row.get(0)?, 0)?),
+        first_frame: FrameId(sql_i64_to_u64(row.get(1)?, 1)?),
+        last_frame: FrameId(sql_i64_to_u64(row.get(2)?, 2)?),
+        frame_count: sql_i64_to_u64(row.get(3)?, 3)?,
+        start_timestamp: MediaTimestamp {
+            ticks: row.get(4)?,
+            time_base: start_time_base,
+        },
+        end_timestamp: MediaTimestamp {
+            ticks: row.get(7)?,
+            time_base: end_time_base,
+        },
+        start_duration,
+        end_duration,
+        representative_similarity_floor,
+    })
+}
+
+fn decode_time_base(numerator: i32, denominator: i32, column: usize) -> rusqlite::Result<TimeBase> {
+    TimeBase::new(numerator, denominator).ok_or(rusqlite::Error::IntegralValueOutOfRange(
+        column,
+        i64::from(numerator),
+    ))
+}
+
+fn decode_duration(
+    ticks: Option<i64>,
+    numerator: Option<i32>,
+    denominator: Option<i32>,
+    column: usize,
+) -> rusqlite::Result<Option<MediaDuration>> {
+    match (ticks, numerator, denominator) {
+        (None, None, None) => Ok(None),
+        (Some(ticks), Some(numerator), Some(denominator)) if ticks > 0 => Ok(Some(MediaDuration {
+            ticks,
+            time_base: decode_time_base(numerator, denominator, column)?,
+        })),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn validate_group(group: &FrameGroup) -> Result<(), SimilarityStoreError> {
+    if invalid_group(group) {
+        return Err(SimilarityStoreError::InvalidGroup(
+            "group ranges must be ordered, non-empty, contiguous, and use valid timing/score data"
+                .into(),
+        ));
+    }
+    to_sql_u64(group.representative_frame.0, "representative frame")?;
+    to_sql_u64(group.first_frame.0, "first frame")?;
+    to_sql_u64(group.last_frame.0, "last frame")?;
+    to_sql_u64(group.frame_count, "represented frame count")?;
+    Ok(())
+}
+
 fn invalid_group(group: &FrameGroup) -> bool {
     let expected = group
         .last_frame
         .0
         .checked_sub(group.first_frame.0)
         .and_then(|delta| delta.checked_add(1));
+    let invalid_duration = |duration: Option<MediaDuration>| {
+        duration.is_some_and(|value| {
+            value.ticks <= 0 || value.time_base.numerator <= 0 || value.time_base.denominator <= 0
+        })
+    };
     group.first_frame.0 > group.last_frame.0
         || group.frame_count == 0
         || expected != Some(group.frame_count)
         || group.representative_frame.0 < group.first_frame.0
         || group.representative_frame.0 > group.last_frame.0
+        || group.start_timestamp.time_base.numerator <= 0
+        || group.start_timestamp.time_base.denominator <= 0
+        || group.end_timestamp.time_base.numerator <= 0
+        || group.end_timestamp.time_base.denominator <= 0
+        || group.representative_similarity_floor > SIMILARITY_SCALE
+        || invalid_duration(group.start_duration)
+        || invalid_duration(group.end_duration)
 }
 
-fn temp_path(path: &Path) -> PathBuf {
+fn has_sqlite_header(path: &Path) -> io::Result<bool> {
+    let mut file = File::open(path)?;
+    let mut header = [0_u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => Ok(&header == SQLITE_HEADER),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn building_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    name.push(".building");
     path.with_file_name(name)
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn purge_database_files(path: &Path) -> io::Result<()> {
+    remove_if_present(path)?;
+    remove_if_present(&sidecar_path(path, "-journal"))?;
+    remove_if_present(&sidecar_path(path, "-wal"))?;
+    remove_if_present(&sidecar_path(path, "-shm"))?;
+    Ok(())
 }
 
 fn remove_if_present(path: &Path) -> io::Result<()> {
@@ -328,10 +616,29 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+fn sync_parent(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "store path has no parent"))?;
+    File::open(parent)?.sync_all()
+}
+
+fn to_sql_u64(value: u64, label: &'static str) -> Result<i64, SimilarityStoreError> {
+    i64::try_from(value).map_err(|_| SimilarityStoreError::NumericRange(label))
+}
+
+fn from_sql_u64(value: i64, label: &'static str) -> Result<u64, SimilarityStoreError> {
+    u64::try_from(value).map_err(|_| SimilarityStoreError::NumericRange(label))
+}
+
+fn sql_i64_to_u64(value: i64, column: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(column, value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framescope_core::{CodecInfo, MediaKind, StreamInfo, TimeBase};
+    use framescope_core::{CodecInfo, MediaKind, StreamInfo};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn root(tag: &str) -> PathBuf {
@@ -369,19 +676,19 @@ mod tests {
         .unwrap()
     }
 
-    fn group() -> FrameGroup {
+    fn group(first: u64, last: u64, start_ticks: i64) -> FrameGroup {
         let time_base = TimeBase::new(1, 1000).unwrap();
         FrameGroup {
-            representative_frame: FrameId(10),
-            first_frame: FrameId(10),
-            last_frame: FrameId(11),
-            frame_count: 2,
+            representative_frame: FrameId(first),
+            first_frame: FrameId(first),
+            last_frame: FrameId(last),
+            frame_count: last - first + 1,
             start_timestamp: MediaTimestamp {
-                ticks: 100,
+                ticks: start_ticks,
                 time_base,
             },
             end_timestamp: MediaTimestamp {
-                ticks: 140,
+                ticks: start_ticks + 40,
                 time_base,
             },
             start_duration: Some(MediaDuration {
@@ -404,28 +711,77 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_reuses_exact_identity() {
+    fn streaming_round_trip_preserves_exact_timing() {
         let root = root("roundtrip");
         let store = SimilarityStore::new(&root);
         let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
-        store.save(&key, &[group()]).unwrap();
+        let expected = group(10, 11, -25);
+        let mut writer = store.begin(&key).unwrap();
+        writer.append(&expected).unwrap();
+        assert_eq!(writer.finish().unwrap(), 1);
+
+        let mut loaded = None;
         assert_eq!(
-            store.load(&key).unwrap(),
-            SimilarityStoreLoad::Reused(vec![group()])
+            store
+                .visit_groups(&key, |value| loaded = Some(value))
+                .unwrap(),
+            SimilarityStoreLoad::Reused { group_count: 1 }
         );
+        assert_eq!(loaded, Some(expected));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn hybrid_round_trip_reuses_only_exact_policy() {
-        let root = root("hybrid-roundtrip");
+    fn interrupted_build_never_replaces_last_complete_result() {
+        let root = root("interrupt");
+        let store = SimilarityStore::new(&root);
+        let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
+        let original = group(0, 0, 0);
+        let mut writer = store.begin(&key).unwrap();
+        writer.append(&original).unwrap();
+        writer.finish().unwrap();
+
+        let mut interrupted = store.begin(&key).unwrap();
+        interrupted.append(&group(1, 1, 40)).unwrap();
+        drop(interrupted);
+
+        let mut loaded = None;
+        assert_eq!(
+            store
+                .visit_groups(&key, |value| loaded = Some(value))
+                .unwrap(),
+            SimilarityStoreLoad::Reused { group_count: 1 }
+        );
+        assert_eq!(loaded, Some(original));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn large_group_set_is_written_and_visited_incrementally() {
+        let root = root("large");
         let store = SimilarityStore::new(&root);
         let key = SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
-        store.save(&key, &[group()]).unwrap();
+        let mut writer = store.begin(&key).unwrap();
+        for id in 0..20_000_u64 {
+            writer
+                .append(&group(id, id, i64::try_from(id).unwrap()))
+                .unwrap();
+        }
+        assert_eq!(writer.finish().unwrap(), 20_000);
+
+        let mut count = 0_u64;
         assert_eq!(
-            store.load(&key).unwrap(),
-            SimilarityStoreLoad::Reused(vec![group()])
+            store
+                .visit_groups(&key, |value| {
+                    assert_eq!(value.first_frame, FrameId(count));
+                    count += 1;
+                })
+                .unwrap(),
+            SimilarityStoreLoad::Reused {
+                group_count: 20_000
+            }
         );
+        assert_eq!(count, 20_000);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -433,64 +789,24 @@ mod tests {
     fn config_changes_namespace() {
         let store = SimilarityStore::new(root("config"));
         let exact = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
-        let luma = SimilarityStoreKey::new(
-            source("a"),
-            stream(),
-            SimilarityMode::LumaMeanAbsolute {
-                minimum_similarity: 9_700,
-            },
-        )
-        .unwrap();
         let hybrid_a =
             SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
         let hybrid_b =
             SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(9, 9_700)).unwrap();
-        let hybrid_c =
-            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_800)).unwrap();
-
-        let paths = [
-            store.path_for(&exact),
-            store.path_for(&luma),
-            store.path_for(&hybrid_a),
-            store.path_for(&hybrid_b),
-            store.path_for(&hybrid_c),
-        ];
-        for left in 0..paths.len() {
-            for right in (left + 1)..paths.len() {
-                assert_ne!(paths[left], paths[right]);
-            }
-        }
+        assert_ne!(store.path_for(&exact), store.path_for(&hybrid_a));
+        assert_ne!(store.path_for(&hybrid_a), store.path_for(&hybrid_b));
     }
 
     #[test]
-    fn schema_bump_separates_old_persistence_namespace() {
-        let store = SimilarityStore::new(root("schema"));
-        let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
-        assert!(store.path_for(&key).starts_with(store.root.join("v2")));
-    }
-
-    #[test]
-    fn invalid_hybrid_policy_is_rejected_before_persistence() {
-        assert!(matches!(
-            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(65, 9_700)),
-            Err(SimilarityStoreError::InvalidConfig(_))
-        ));
-        assert!(matches!(
-            SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 10_001)),
-            Err(SimilarityStoreError::InvalidConfig(_))
-        ));
-    }
-
-    #[test]
-    fn corrupt_manifest_is_disposable() {
+    fn corrupt_file_is_disposable() {
         let root = root("corrupt");
         let store = SimilarityStore::new(&root);
         let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
         let path = store.path_for(&key);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, b"not-json").unwrap();
+        fs::write(&path, b"not-sqlite").unwrap();
         assert_eq!(
-            store.load(&key).unwrap(),
+            store.visit_groups(&key, |_| {}).unwrap(),
             SimilarityStoreLoad::InvalidatedCorrupt
         );
         assert!(!path.exists());
@@ -498,26 +814,55 @@ mod tests {
     }
 
     #[test]
-    fn source_invalidation_is_scoped_and_cleans_legacy_schema() {
+    fn source_invalidation_is_scoped_and_removes_old_schema_namespaces() {
         let root = root("invalidate");
         let store = SimilarityStore::new(&root);
         let a = source("a");
         let b = source("b");
-        let ka = SimilarityStoreKey::new_hybrid(a.clone(), stream(), hybrid(8, 9_700)).unwrap();
-        let kb = SimilarityStoreKey::new_hybrid(b, stream(), hybrid(8, 9_700)).unwrap();
-        store.save(&ka, &[group()]).unwrap();
-        store.save(&kb, &[group()]).unwrap();
-
-        let legacy_a = root.join("v1").join(a.stable_key());
-        fs::create_dir_all(&legacy_a).unwrap();
-        fs::write(legacy_a.join("legacy.json"), b"legacy").unwrap();
+        let ka = SimilarityStoreKey::new(a.clone(), stream(), SimilarityMode::Exact).unwrap();
+        let kb = SimilarityStoreKey::new(b.clone(), stream(), SimilarityMode::Exact).unwrap();
+        for key in [&ka, &kb] {
+            let mut writer = store.begin(key).unwrap();
+            writer.append(&group(0, 0, 0)).unwrap();
+            writer.finish().unwrap();
+        }
+        let legacy = root.join("v2").join(a.stable_key());
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("legacy.json"), b"old").unwrap();
 
         store.invalidate_source(&a).unwrap();
-        assert_eq!(store.load(&ka).unwrap(), SimilarityStoreLoad::Missing);
-        assert!(!legacy_a.exists());
+        assert_eq!(
+            store.visit_groups(&ka, |_| {}).unwrap(),
+            SimilarityStoreLoad::Missing
+        );
         assert!(matches!(
-            store.load(&kb).unwrap(),
-            SimilarityStoreLoad::Reused(_)
+            store.visit_groups(&kb, |_| {}).unwrap(),
+            SimilarityStoreLoad::Reused { group_count: 1 }
+        ));
+        assert!(!legacy.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unsafe_source_identity_is_rejected() {
+        let source = SourceIdentity::metadata_only(Some(100), Some(10), Some("doc".into()));
+        assert!(matches!(
+            SimilarityStoreKey::new(source, stream(), SimilarityMode::Exact),
+            Err(SimilarityStoreError::UnsafeSourceIdentity)
+        ));
+    }
+
+    #[test]
+    fn invalid_group_is_rejected_before_persistence() {
+        let root = root("invalid");
+        let store = SimilarityStore::new(&root);
+        let key = SimilarityStoreKey::new(source("a"), stream(), SimilarityMode::Exact).unwrap();
+        let mut invalid = group(2, 2, 0);
+        invalid.frame_count = 99;
+        let mut writer = store.begin(&key).unwrap();
+        assert!(matches!(
+            writer.append(&invalid),
+            Err(SimilarityStoreError::InvalidGroup(_))
         ));
         let _ = fs::remove_dir_all(root);
     }
