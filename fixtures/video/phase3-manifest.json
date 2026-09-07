@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "timestamp_selection": {
+    "at_or_before": "greatest presentation timestamp <= target; null only when target is before the first frame",
+    "at_or_after": "smallest presentation timestamp >= target; null only when target is after the final frame",
+    "nearest": "minimum absolute presentation-time distance; ties choose the earlier frame",
+    "exact_frame_index": "sequential presentation-frame index, zero based; out-of-range is not clamped"
+  },
+  "fixtures": [
+    {
+      "file": "h264-dense-keyframes.mp4",
+      "purpose": "Dense keyframe anchors for exact nearest-earlier anchor mapping",
+      "frame_count": 24,
+      "keyframe_indices": [0, 3, 6, 9, 12, 15, 18, 21],
+      "variable_frame_rate": false,
+      "requires_b_frames": false
+    },
+    {
+      "file": "h264-long-gop-bframes.mp4",
+      "purpose": "Sparse keyframes plus B-frame reorder behavior",
+      "frame_count": 36,
+      "keyframe_indices": [0, 24],
+      "variable_frame_rate": false,
+      "requires_b_frames": true
+    },
+    {
+      "file": "h264-vfr-transitions.mp4",
+      "purpose": "Three presentation-rate regimes proving PTS, not FPS, is authoritative",
+      "frame_count": 11,
+      "keyframe_indices": [0],
+      "variable_frame_rate": true,
+      "requires_b_frames": true
+    }
+  ],
+  "stress": {
+    "file": "h264-stress-long.mp4",
+    "rate": 24,
+    "default_duration_seconds": 45,
+    "expected_default_frame_count": 1080,
+    "minimum_persist_batches": 2,
+    "memory_rule": "test instrumentation must prove peak live decoded frames and peak buffered metadata are bounded by configured limits, not by total frame count"
+  }
+}
