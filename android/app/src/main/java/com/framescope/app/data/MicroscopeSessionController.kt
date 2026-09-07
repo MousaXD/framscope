@@ -29,9 +29,16 @@ class MicroscopeSessionController(
         operationId: Long,
         cacheRoot: String,
     ): NativeMicroscope {
-        val requestRevision = revision.incrementAndGet()
+        val requestRevision = nextRevision() ?: return revisionExhaustedFailure(currentEngine())
         val result = nativeBridge.openMicroscopeSession(fd, operationId, cacheRoot)
-        if (result !is NativeMicroscope.Success) return result
+
+        if (result !is NativeMicroscope.Success) {
+            return if (revision.get() == requestRevision) {
+                result
+            } else {
+                staleFailure(result.engine)
+            }
+        }
 
         var previousSessionId: Long? = null
         val committed = synchronized(stateLock) {
@@ -82,29 +89,61 @@ class MicroscopeSessionController(
 
         val prepared = frameBridge.prepare(target.sessionId)
         if (prepared is NativeFramePreparation.Failure) {
-            return NativeFrameCopy.Failure(
-                code = prepared.code,
-                message = prepared.message,
-            )
+            return if (isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
+                NativeFrameCopy.Failure(
+                    code = prepared.code,
+                    message = prepared.message,
+                )
+            } else {
+                staleFrameFailure()
+            }
         }
         if (prepared !is NativeFramePreparation.Success) {
-            return NativeFrameCopy.Failure(
-                code = "bridge_error",
-                message = "Native frame preparation returned an unsupported result.",
-            )
+            return if (isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
+                NativeFrameCopy.Failure(
+                    code = "bridge_error",
+                    message = "Native frame preparation returned an unsupported result.",
+                )
+            } else {
+                staleFrameFailure()
+            }
         }
         if (prepared.frame.sessionId != target.sessionId || prepared.frame.frameId != expectedFrameId) {
-            return NativeFrameCopy.Failure(
-                code = "stale_result",
-                message = "Prepared frame no longer matches the requested microscope position.",
-            )
+            return if (isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
+                presentationIdentityFailure()
+            } else {
+                staleFrameFailure()
+            }
         }
         if (!isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
             return staleFrameFailure()
         }
 
         val copied = frameBridge.copy(prepared.frame)
-        if (copied !is NativeFrameCopy.Success) return copied
+        if (copied is NativeFrameCopy.Failure) {
+            return if (isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
+                copied
+            } else {
+                staleFrameFailure()
+            }
+        }
+        if (copied !is NativeFrameCopy.Success) {
+            return if (isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
+                NativeFrameCopy.Failure(
+                    code = "bridge_error",
+                    message = "Native frame copy returned an unsupported result.",
+                )
+            } else {
+                staleFrameFailure()
+            }
+        }
+        if (copied.frame != prepared.frame) {
+            return if (isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
+                presentationIdentityFailure()
+            } else {
+                staleFrameFailure()
+            }
+        }
         return if (isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
             copied
         } else {
@@ -113,7 +152,7 @@ class MicroscopeSessionController(
     }
 
     fun closeCurrent(): Boolean {
-        revision.incrementAndGet()
+        invalidateRevision()
         val sessionId = synchronized(stateLock) {
             val value = snapshot?.sessionId
             snapshot = null
@@ -126,15 +165,28 @@ class MicroscopeSessionController(
     private fun navigate(call: (Long) -> NativeMicroscope): NativeMicroscope {
         val target = synchronized(stateLock) { snapshot }
             ?: return noSessionFailure()
-        val requestRevision = revision.incrementAndGet()
+        val requestRevision = nextRevision() ?: return revisionExhaustedFailure(currentEngine())
         val result = call(target.sessionId)
-        if (result !is NativeMicroscope.Success) return result
+
+        if (result !is NativeMicroscope.Success) {
+            return if (isRequestCurrent(requestRevision, target.sessionId)) {
+                result
+            } else {
+                staleFailure(result.engine)
+            }
+        }
+        if (result.session.sessionId != target.sessionId) {
+            return if (isRequestCurrent(requestRevision, target.sessionId)) {
+                sessionIdentityFailure(result.engine)
+            } else {
+                staleFailure(result.engine)
+            }
+        }
 
         val committed = synchronized(stateLock) {
             if (
                 revision.get() != requestRevision ||
-                snapshot?.sessionId != target.sessionId ||
-                result.session.sessionId != target.sessionId
+                snapshot?.sessionId != target.sessionId
             ) {
                 false
             } else {
@@ -144,6 +196,35 @@ class MicroscopeSessionController(
             }
         }
         return if (committed) result else staleFailure(result.engine)
+    }
+
+    private fun nextRevision(): Long? {
+        while (true) {
+            val current = revision.get()
+            if (current < 0L || current == Long.MAX_VALUE) return null
+            val next = current + 1L
+            if (revision.compareAndSet(current, next)) return next
+        }
+    }
+
+    /**
+     * Invalidate in-flight work. If the monotonic counter is exhausted, move it to a terminal
+     * negative sentinel. No later request can receive a revision after that point.
+     */
+    private fun invalidateRevision() {
+        while (true) {
+            val current = revision.get()
+            if (current < 0L) return
+            val next = if (current == Long.MAX_VALUE) TERMINAL_REVISION else current + 1L
+            if (revision.compareAndSet(current, next)) return
+        }
+    }
+
+    private fun isRequestCurrent(
+        requestRevision: Long,
+        sessionId: Long,
+    ): Boolean = synchronized(stateLock) {
+        revision.get() == requestRevision && snapshot?.sessionId == sessionId
     }
 
     private fun isStillCurrent(
@@ -168,6 +249,20 @@ class MicroscopeSessionController(
         engine = engine,
     )
 
+    private fun revisionExhaustedFailure(engine: String?): NativeMicroscope.Failure =
+        NativeMicroscope.Failure(
+            code = "request_revision_exhausted",
+            message = "Microscope request ordering space is exhausted for this controller.",
+            engine = engine,
+        )
+
+    private fun sessionIdentityFailure(engine: String?): NativeMicroscope.Failure =
+        NativeMicroscope.Failure(
+            code = "session_identity_mismatch",
+            message = "Native navigation returned a different microscope session.",
+            engine = engine,
+        )
+
     private fun noSessionFrameFailure(): NativeFrameCopy.Failure = NativeFrameCopy.Failure(
         code = "session_not_found",
         message = "No microscope session is currently open.",
@@ -177,4 +272,13 @@ class MicroscopeSessionController(
         code = "stale_result",
         message = "A newer microscope request superseded this frame result.",
     )
+
+    private fun presentationIdentityFailure(): NativeFrameCopy.Failure = NativeFrameCopy.Failure(
+        code = "presentation_identity_mismatch",
+        message = "Prepared or copied RGBA metadata does not match the authoritative microscope target.",
+    )
+
+    private companion object {
+        const val TERMINAL_REVISION = Long.MIN_VALUE
+    }
 }
