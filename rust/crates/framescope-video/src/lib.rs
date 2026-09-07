@@ -25,6 +25,10 @@ pub use navigation::{
     NavigationDecoder, NavigationError, NavigationResult, TimestampSelection, navigate_to_frame,
     navigate_to_timestamp, resolve_timestamp,
 };
+pub use preview_navigation::{
+    EncodedPreview, PreviewEncoder, PreviewNavigationError, PreviewNavigationResult, PreviewSource,
+    navigate_to_frame_preview,
+};
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;
 
@@ -214,6 +218,7 @@ pub mod ffmpeg;
 mod indexing;
 mod iso;
 mod navigation;
+mod preview_navigation;
 
 use iso::{
     parse_hdlr_is_video, parse_mdhd, parse_minf_sample_count, parse_mvhd, parse_tkhd,
