@@ -1,6 +1,7 @@
 #![cfg(feature = "system-ffmpeg")]
 
 use framescope_ffmpeg::{CancellationToken, Session};
+use framescope_video::VideoDecoder;
 use std::path::PathBuf;
 
 fn fixture(name: &str) -> PathBuf {
@@ -44,6 +45,32 @@ fn current_decoded_frame_copies_to_owned_tightly_packed_rgba() {
         rgba.pixels, snapshot,
         "owned pixels changed after decoder advanced"
     );
+}
+
+#[test]
+fn video_decoder_exposes_source_quality_owned_rgba_with_pts_metadata() {
+    let mut decoder = VideoDecoder::open_path(fixture("h264-cfr.mp4")).expect("fixture should open");
+    let first = decoder
+        .next_frame_rgba()
+        .expect("RGBA decode should succeed")
+        .expect("fixture should contain a frame");
+
+    assert_eq!(first.frame.index, 0);
+    assert!(first.frame.presentation_timestamp.is_some());
+    assert_eq!((first.frame.width, first.frame.height), (64, 48));
+    assert_eq!(first.stride_bytes, 64 * 4);
+    assert_eq!(
+        first.pixels.len(),
+        first.stride_bytes * first.frame.height as usize
+    );
+
+    let snapshot = first.pixels.clone();
+    let second = decoder
+        .next_frame_rgba()
+        .expect("second RGBA decode should succeed")
+        .expect("fixture should contain another frame");
+    assert_eq!(second.frame.index, 1);
+    assert_eq!(first.pixels, snapshot, "owned pixels changed after decode");
 }
 
 #[test]
