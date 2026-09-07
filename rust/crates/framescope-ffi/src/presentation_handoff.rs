@@ -51,9 +51,7 @@ pub(crate) fn copy_presentation_rgba(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framescope_cache::{
-        FrameCacheHierarchy, FrameId, FrameIndexEntry, KeyframeAnchor, OwnedRgbaFrame,
-    };
+    use framescope_cache::{FrameId, FrameIndexEntry, KeyframeAnchor, OwnedRgbaFrame};
     use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
     use framescope_video::{CachedFrameSource, MicroscopeTarget};
 
