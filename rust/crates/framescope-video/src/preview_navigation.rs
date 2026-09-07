@@ -91,7 +91,7 @@ where
     )
     .map_err(DiskCacheError::from)?;
 
-    let mut cache_warning = None;
+    let mut lookup_warning = None;
     match cache.lookup(&key) {
         Ok(CacheLookup::Proxy(proxy)) => {
             return Ok(PreviewNavigationResult {
@@ -113,12 +113,11 @@ where
                 PreviewSource::EncodedFromRam,
                 0,
                 encoder,
-                None,
             );
         }
         Ok(CacheLookup::Miss) => {}
         Err(error) => {
-            cache_warning = Some(format!(
+            lookup_warning = Some(format!(
                 "disk proxy lookup failed; falling back to authoritative source decode: {error}"
             ));
         }
@@ -129,7 +128,7 @@ where
         CachedFrameSource::Ram => PreviewSource::EncodedFromRam,
         CachedFrameSource::Decoded => PreviewSource::EncodedFromDecode,
     };
-    encode_and_store(
+    let mut result = encode_and_store(
         cache,
         &key,
         frame_id,
@@ -137,8 +136,14 @@ where
         source,
         decoded.decoded_frames,
         encoder,
-        cache_warning,
-    )
+    )?;
+    if let Some(warning) = lookup_warning {
+        result.cache_warning = Some(match result.cache_warning.take() {
+            Some(existing) => format!("{warning}; {existing}"),
+            None => warning,
+        });
+    }
+    Ok(result)
 }
 
 fn encode_and_store<E: PreviewEncoder>(
@@ -149,19 +154,17 @@ fn encode_and_store<E: PreviewEncoder>(
     source: PreviewSource,
     decoded_frames: u64,
     encoder: &mut E,
-    cache_warning: Option<String>,
 ) -> Result<PreviewNavigationResult, PreviewNavigationError> {
     let encoded = encoder
         .encode(pixels)
         .map_err(PreviewNavigationError::Encoding)?;
     let (proxy_insert_result, cache_warning) =
         match cache.insert_proxy(key, encoded.format, &encoded.bytes) {
-            Ok(result) => (Some(result), cache_warning),
+            Ok(result) => (Some(result), None),
             Err(error) => (
                 None,
-                Some(append_cache_warning(
-                    cache_warning,
-                    format!("disk proxy insert failed; preview remains usable: {error}"),
+                Some(format!(
+                    "disk proxy insert failed; preview remains usable: {error}"
                 )),
             ),
         };
@@ -174,13 +177,6 @@ fn encode_and_store<E: PreviewEncoder>(
         proxy_insert_result,
         cache_warning,
     })
-}
-
-fn append_cache_warning(existing: Option<String>, next: String) -> String {
-    match existing {
-        Some(existing) => format!("{existing}; {next}"),
-        None => next,
-    }
 }
 
 #[cfg(test)]
@@ -434,7 +430,9 @@ mod tests {
         assert!(decoded.load(Ordering::Relaxed) > 0);
         assert_eq!(result.bytes, vec![0xff, 0xd8, 0xff, 0xd9]);
         assert!(result.proxy_insert_result.is_none());
-        let warning = result.cache_warning.expect("disk failure should be diagnostic");
+        let warning = result
+            .cache_warning
+            .expect("disk failure should be diagnostic");
         assert!(warning.contains("disk proxy lookup failed"));
         assert!(warning.contains("disk proxy insert failed"));
 
