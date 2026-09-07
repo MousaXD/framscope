@@ -4,14 +4,15 @@
 //! derived view over adjacent presentation frames; they never delete or renumber timeline entries.
 
 use framescope_cache::{FrameId, FrameIndexEntry, OwnedRgbaFrame};
+use framescope_core::{MediaDuration, MediaTimestamp};
 
 pub const SIMILARITY_SCALE: u16 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimilarityMode {
-    /// Only byte-identical RGBA frames are grouped.
+    /// Only identical visible RGBA pixels are grouped. Row padding is not image content.
     Exact,
-    /// Compare mean absolute luma difference after an exact-byte fast path.
+    /// Compare mean absolute luma difference after an exact-visible-pixel fast path.
     ///
     /// `minimum_similarity` is expressed on a 0..=10_000 scale where 10_000 means identical.
     LumaMeanAbsolute { minimum_similarity: u16 },
@@ -51,6 +52,7 @@ impl SimilarityScore {
 pub enum SimilarityError {
     InvalidThreshold(u16),
     DimensionMismatch { left: (u32, u32), right: (u32, u32) },
+    FrameLayoutOverflow,
     MissingTimestamp(FrameId),
     NonContiguousFrameIds { previous: FrameId, current: FrameId },
 }
@@ -65,6 +67,7 @@ impl std::fmt::Display for SimilarityError {
             Self::DimensionMismatch { left, right } => {
                 write!(f, "frame dimensions differ: {left:?} vs {right:?}")
             }
+            Self::FrameLayoutOverflow => write!(f, "RGBA frame layout does not fit address space"),
             Self::MissingTimestamp(frame_id) => {
                 write!(f, "frame {} has no presentation timestamp", frame_id.0)
             }
@@ -107,7 +110,19 @@ impl SimilarityEngine {
             });
         }
 
-        if left.stride_bytes == right.stride_bytes && left.pixels() == right.pixels() {
+        let width_bytes = usize::try_from(left.width)
+            .ok()
+            .and_then(|width| width.checked_mul(4))
+            .ok_or(SimilarityError::FrameLayoutOverflow)?;
+        let height = usize::try_from(left.height).map_err(|_| SimilarityError::FrameLayoutOverflow)?;
+
+        let visible_pixels_identical = (0..height).all(|y| {
+            let left_start = y * left.stride_bytes;
+            let right_start = y * right.stride_bytes;
+            left.pixels()[left_start..left_start + width_bytes]
+                == right.pixels()[right_start..right_start + width_bytes]
+        });
+        if visible_pixels_identical {
             return Ok(SimilarityScore::IDENTICAL);
         }
 
@@ -117,16 +132,14 @@ impl SimilarityEngine {
                 exact: false,
             }),
             SimilarityMode::LumaMeanAbsolute { .. } => {
-                let width = usize::try_from(left.width).expect("u32 width always fits usize");
-                let height = usize::try_from(left.height).expect("u32 height always fits usize");
                 let mut total_difference: u128 = 0;
                 let pixel_count = u128::from(left.width) * u128::from(left.height);
 
                 for y in 0..height {
-                    let left_row =
-                        &left.pixels()[y * left.stride_bytes..y * left.stride_bytes + width * 4];
-                    let right_row =
-                        &right.pixels()[y * right.stride_bytes..y * right.stride_bytes + width * 4];
+                    let left_start = y * left.stride_bytes;
+                    let right_start = y * right.stride_bytes;
+                    let left_row = &left.pixels()[left_start..left_start + width_bytes];
+                    let right_row = &right.pixels()[right_start..right_start + width_bytes];
                     for (left_px, right_px) in
                         left_row.chunks_exact(4).zip(right_row.chunks_exact(4))
                     {
@@ -174,8 +187,14 @@ pub struct FrameGroup {
     pub first_frame: FrameId,
     pub last_frame: FrameId,
     pub frame_count: u64,
-    pub start_timestamp_ticks: i64,
-    pub end_timestamp_ticks: i64,
+    /// Exact presentation timestamp of the first represented frame.
+    pub start_timestamp: MediaTimestamp,
+    /// Exact presentation timestamp of the last represented frame.
+    pub end_timestamp: MediaTimestamp,
+    /// Original duration of the first represented frame, when known.
+    pub start_duration: Option<MediaDuration>,
+    /// Original duration of the last represented frame, when known.
+    pub end_duration: Option<MediaDuration>,
     /// Lowest candidate-to-representative similarity observed within this group.
     pub representative_similarity_floor: u16,
 }
@@ -222,8 +241,10 @@ impl FrameGrouper {
                     first_frame: entry.frame_id,
                     last_frame: entry.frame_id,
                     frame_count: 1,
-                    start_timestamp_ticks: timestamp.ticks,
-                    end_timestamp_ticks: timestamp.ticks,
+                    start_timestamp: timestamp,
+                    end_timestamp: timestamp,
+                    start_duration: entry.duration,
+                    end_duration: entry.duration,
                     representative_similarity_floor: SIMILARITY_SCALE,
                 },
                 representative: pixels.clone(),
@@ -245,7 +266,8 @@ impl FrameGrouper {
         if self.engine.accepts(previous_score) && self.engine.accepts(representative_score) {
             active.metadata.last_frame = entry.frame_id;
             active.metadata.frame_count += 1;
-            active.metadata.end_timestamp_ticks = timestamp.ticks;
+            active.metadata.end_timestamp = timestamp;
+            active.metadata.end_duration = entry.duration;
             active.metadata.representative_similarity_floor = active
                 .metadata
                 .representative_similarity_floor
@@ -261,8 +283,10 @@ impl FrameGrouper {
                 first_frame: entry.frame_id,
                 last_frame: entry.frame_id,
                 frame_count: 1,
-                start_timestamp_ticks: timestamp.ticks,
-                end_timestamp_ticks: timestamp.ticks,
+                start_timestamp: timestamp,
+                end_timestamp: timestamp,
+                start_duration: entry.duration,
+                end_duration: entry.duration,
                 representative_similarity_floor: SIMILARITY_SCALE,
             },
             representative: pixels.clone(),
@@ -280,7 +304,11 @@ impl FrameGrouper {
 mod tests {
     use super::*;
     use framescope_cache::KeyframeAnchor;
-    use framescope_core::{MediaTimestamp, TimeBase};
+    use framescope_core::TimeBase;
+
+    fn time_base() -> TimeBase {
+        TimeBase::new(1, 1000).unwrap()
+    }
 
     fn rgba(value: u8) -> OwnedRgbaFrame {
         OwnedRgbaFrame::new(
@@ -297,9 +325,12 @@ mod tests {
             frame_id: FrameId(id),
             presentation_timestamp: Some(MediaTimestamp {
                 ticks,
-                time_base: TimeBase::new(1, 1000).unwrap(),
+                time_base: time_base(),
             }),
-            duration: None,
+            duration: Some(MediaDuration {
+                ticks: if id == 1 { 85 } else { 40 },
+                time_base: time_base(),
+            }),
             keyframe: id == 0,
             corrupt: false,
             anchor: if id == 0 {
@@ -307,7 +338,7 @@ mod tests {
                     frame_id: FrameId(0),
                     presentation_timestamp: Some(MediaTimestamp {
                         ticks,
-                        time_base: TimeBase::new(1, 1000).unwrap(),
+                        time_base: time_base(),
                     }),
                 }
             } else {
@@ -315,7 +346,7 @@ mod tests {
                     frame_id: FrameId(0),
                     presentation_timestamp: Some(MediaTimestamp {
                         ticks: 0,
-                        time_base: TimeBase::new(1, 1000).unwrap(),
+                        time_base: time_base(),
                     }),
                 }
             },
@@ -323,10 +354,19 @@ mod tests {
     }
 
     #[test]
-    fn exact_mode_only_accepts_identical_pixels() {
+    fn exact_mode_only_accepts_identical_visible_pixels() {
         let engine = SimilarityEngine::new(SimilarityMode::Exact).unwrap();
         assert!(engine.accepts(engine.compare(&rgba(50), &rgba(50)).unwrap()));
         assert!(!engine.accepts(engine.compare(&rgba(50), &rgba(51)).unwrap()));
+    }
+
+    #[test]
+    fn exact_mode_ignores_row_padding_bytes() {
+        let left = OwnedRgbaFrame::new(1, 1, 8, vec![10, 20, 30, 255, 1, 2, 3, 4]).unwrap();
+        let right = OwnedRgbaFrame::new(1, 1, 12, vec![10, 20, 30, 255, 9, 9, 9, 9, 8, 8, 8, 8])
+            .unwrap();
+        let engine = SimilarityEngine::new(SimilarityMode::Exact).unwrap();
+        assert_eq!(engine.compare(&left, &right).unwrap(), SimilarityScore::IDENTICAL);
     }
 
     #[test]
@@ -342,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn grouping_preserves_frame_and_timestamp_ranges() {
+    fn grouping_preserves_frame_timestamp_time_base_and_duration_ranges() {
         let mut grouper = FrameGrouper::new(SimilarityMode::Exact).unwrap();
         assert!(grouper.push(&entry(0, 0), rgba(10)).unwrap().is_none());
         assert!(grouper.push(&entry(1, 40), rgba(10)).unwrap().is_none());
@@ -350,11 +390,15 @@ mod tests {
         assert_eq!(first.first_frame, FrameId(0));
         assert_eq!(first.last_frame, FrameId(1));
         assert_eq!(first.frame_count, 2);
-        assert_eq!(first.start_timestamp_ticks, 0);
-        assert_eq!(first.end_timestamp_ticks, 40);
+        assert_eq!(first.start_timestamp.ticks, 0);
+        assert_eq!(first.end_timestamp.ticks, 40);
+        assert_eq!(first.start_timestamp.time_base, time_base());
+        assert_eq!(first.end_timestamp.time_base, time_base());
+        assert_eq!(first.start_duration.unwrap().ticks, 40);
+        assert_eq!(first.end_duration.unwrap().ticks, 85);
         let second = grouper.finish().unwrap();
         assert_eq!(second.representative_frame, FrameId(2));
-        assert_eq!(second.start_timestamp_ticks, 125);
+        assert_eq!(second.start_timestamp.ticks, 125);
     }
 
     #[test]
