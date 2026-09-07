@@ -128,11 +128,17 @@ class MainViewModel(
     fun onVideoSelected(uri: String) {
         val generation = inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
-        invalidateMicroscopeWork(closeSession = true)
+        invalidateMicroscopeWork(closeSession = false)
 
         inspectJob = viewModelScope.launch {
-            publishIfCurrent(generation, VideoInspectionState.Opening)
             try {
+                // Source replacement owns teardown. Await it before inspecting the replacement so a late
+                // close can never destroy the newly opened native session, and a failed replacement still
+                // leaves no previous-session ownership behind.
+                repository.closeMicroscope()
+                if (generation != inspectionGeneration.get()) return@launch
+
+                publishIfCurrent(generation, VideoInspectionState.Opening)
                 repository.inspect(uri) { progress ->
                     val nextState = when (progress) {
                         InspectionProgress.Opening -> VideoInspectionState.Opening
@@ -211,28 +217,52 @@ class MainViewModel(
     }
 
     fun clearError() {
-        var closeMicroscopeSession = false
-        _uiState.update { state ->
-            val microscopeState = when (val microscope = state.microscopeState) {
-                is MicroscopeUiState.Error -> {
-                    if (microscope.session != null) {
-                        closeMicroscopeSession = true
-                    }
-                    MicroscopeUiState.Idle
+        val state = _uiState.value
+        val microscopeError = state.microscopeState as? MicroscopeUiState.Error
+        if (microscopeError?.session != null) {
+            closeMicroscopeErrorBeforeClearing(microscopeError)
+            if (state.videoState is VideoInspectionState.Error) {
+                _uiState.update { current ->
+                    current.copy(videoState = VideoInspectionState.Idle)
                 }
-                else -> microscope
             }
-            state.copy(
-                videoState = if (state.videoState is VideoInspectionState.Error) {
+            return
+        }
+
+        _uiState.update { current ->
+            current.copy(
+                videoState = if (current.videoState is VideoInspectionState.Error) {
                     VideoInspectionState.Idle
                 } else {
-                    state.videoState
+                    current.videoState
                 },
-                microscopeState = microscopeState,
+                microscopeState = if (current.microscopeState is MicroscopeUiState.Error) {
+                    MicroscopeUiState.Idle
+                } else {
+                    current.microscopeState
+                },
             )
         }
-        if (closeMicroscopeSession) {
-            invalidateMicroscopeWork(closeSession = true)
+    }
+
+    private fun closeMicroscopeErrorBeforeClearing(error: MicroscopeUiState.Error) {
+        val inspectionRevision = inspectionGeneration.get()
+        val microscopeRevision = microscopeGeneration.incrementAndGet()
+        microscopeJob?.cancel()
+        microscopeJob = viewModelScope.launch {
+            try {
+                repository.closeMicroscope()
+                if (!isCurrent(inspectionRevision, microscopeRevision)) return@launch
+                _uiState.update { current ->
+                    if (current.microscopeState == error) {
+                        current.copy(microscopeState = MicroscopeUiState.Idle)
+                    } else {
+                        current
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            }
         }
     }
 
@@ -244,7 +274,6 @@ class MainViewModel(
         microscopeJob?.cancel()
         microscopeJob = viewModelScope.launch {
             try {
-                repository.closeMicroscope()
                 if (!isCurrent(inspectionGenerationAtStart, microscopeRevision)) return@launch
                 publishMicroscopeIfCurrent(
                     inspectionGenerationAtStart,
