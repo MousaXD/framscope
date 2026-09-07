@@ -386,8 +386,8 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeCloseMicros
     _class: JClass,
     session_id: jlong,
 ) -> jboolean {
-    let closed = catch_unwind(AssertUnwindSafe(|| microscope::close_session(session_id)))
-        .unwrap_or(false);
+    let closed =
+        catch_unwind(AssertUnwindSafe(|| microscope::close_session(session_id))).unwrap_or(false);
     if closed { 1 } else { 0 }
 }
 
@@ -471,7 +471,7 @@ mod tests {
             rotation_degrees: Some(-90),
         };
         let info = VideoInfo {
-            container: ContainerInfo {
+            container: framescope_core::ContainerInfo {
                 format_name: "mov,mp4,m4a,3gp,3g2,mj2".into(),
                 format_long_name: Some("QuickTime / MOV".into()),
                 duration_us: None,
