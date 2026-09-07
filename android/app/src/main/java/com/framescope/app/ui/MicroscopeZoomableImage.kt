@@ -51,7 +51,19 @@ internal fun MicroscopeZoomableImage(
     Box(
         modifier = modifier
             .clipToBounds()
-            .onSizeChanged { viewportSize = it }
+            .onSizeChanged { size ->
+                viewportSize = size
+                transform = MicroscopeTransformMath.applyGesture(
+                    current = transform,
+                    zoomChange = 1f,
+                    panX = 0f,
+                    panY = 0f,
+                    centroidX = size.width / 2f,
+                    centroidY = size.height / 2f,
+                    viewportWidth = size.width.toFloat(),
+                    viewportHeight = size.height.toFloat(),
+                )
+            }
             .transformable(
                 state = transformableState,
                 canPan = { transform.scale > MicroscopeTransformMath.MIN_SCALE },
