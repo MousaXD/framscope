@@ -585,14 +585,15 @@ mod native {
                 .and_then(|value| value.checked_mul(4))
                 .ok_or_else(|| NativeError::backend("decoded frame RGBA stride overflows usize"))?;
             let required = stride
-                .checked_mul(usize::try_from(height).map_err(|_| {
-                    NativeError::backend("decoded frame height exceeds usize")
-                })?)
+                .checked_mul(
+                    usize::try_from(height)
+                        .map_err(|_| NativeError::backend("decoded frame height exceeds usize"))?,
+                )
                 .ok_or_else(|| NativeError::backend("decoded frame RGBA size overflows usize"))?;
             let mut pixels = Vec::new();
-            pixels.try_reserve_exact(required).map_err(|_| {
-                NativeError::backend("failed to allocate owned RGBA frame buffer")
-            })?;
+            pixels
+                .try_reserve_exact(required)
+                .map_err(|_| NativeError::backend("failed to allocate owned RGBA frame buffer"))?;
             pixels.resize(required, 0);
 
             let mut out_stride = 0_i32;
@@ -615,7 +616,9 @@ mod native {
             let out_stride = usize::try_from(out_stride)
                 .ok()
                 .filter(|value| *value == stride)
-                .ok_or_else(|| NativeError::backend("native RGBA conversion returned an invalid stride"))?;
+                .ok_or_else(|| {
+                    NativeError::backend("native RGBA conversion returned an invalid stride")
+                })?;
 
             Ok(NativeRgbaFrame {
                 width,
