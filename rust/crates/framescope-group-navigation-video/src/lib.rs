@@ -98,9 +98,8 @@ fn validate_stream_identity(
     expected: &FrameIndexStreamIdentity,
     decoder: &VideoDecoder,
 ) -> Result<(), SimilaritySourceError> {
-    let actual = FrameIndexStreamIdentity::from_stream(decoder.selected_stream()).map_err(|error| {
-        SimilaritySourceError::new("stream_identity_error", error.to_string())
-    })?;
+    let actual = FrameIndexStreamIdentity::from_stream(decoder.selected_stream())
+        .map_err(|error| SimilaritySourceError::new("stream_identity_error", error.to_string()))?;
     if &actual != expected {
         return Err(SimilaritySourceError::new(
             "stream_identity_mismatch",
@@ -179,32 +178,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mapped.frame_id, FrameId(3));
-        assert_eq!(mapped.presentation_timestamp, decoded(3).presentation_timestamp);
+        assert_eq!(
+            mapped.presentation_timestamp,
+            decoded(3).presentation_timestamp
+        );
         assert_eq!(mapped.duration, decoded(3).duration);
         assert_eq!(mapped.pixels.byte_len(), 8);
     }
 
     #[test]
     fn decoder_local_sequence_mismatch_is_rejected() {
-        let error = indexed_frame_from_decoded(
-            FrameId(4),
-            decoded(3),
-            8,
-            vec![0, 0, 0, 255, 0, 0, 0, 255],
-        )
-        .unwrap_err();
+        let error =
+            indexed_frame_from_decoded(FrameId(4), decoded(3), 8, vec![0, 0, 0, 255, 0, 0, 0, 255])
+                .unwrap_err();
         assert_eq!(error.code, "decoder_sequence_mismatch");
     }
 
     #[test]
     fn malformed_rgba_geometry_is_rejected() {
-        let error = indexed_frame_from_decoded(
-            FrameId(0),
-            decoded(0),
-            4,
-            vec![0, 0, 0, 255],
-        )
-        .unwrap_err();
+        let error =
+            indexed_frame_from_decoded(FrameId(0), decoded(0), 4, vec![0, 0, 0, 255]).unwrap_err();
         assert_eq!(error.code, "invalid_rgba_frame");
     }
 
