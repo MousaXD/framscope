@@ -19,7 +19,8 @@ const VFR_SAMPLE_FRAMES: usize = 12;
 
 type OperationId = i64;
 
-static INSPECTION_TOKENS: OnceLock<Mutex<HashMap<OperationId, CancellationToken>>> = OnceLock::new();
+static INSPECTION_TOKENS: OnceLock<Mutex<HashMap<OperationId, CancellationToken>>> =
+    OnceLock::new();
 
 #[derive(Debug, Serialize)]
 struct InspectionMetadata {
@@ -111,10 +112,7 @@ fn cancel_operation(operation_id: OperationId) -> bool {
 }
 
 #[cfg(target_family = "unix")]
-fn inspect_fd(
-    fd: i32,
-    operation_id: OperationId,
-) -> Result<InspectionMetadata, FrameScopeError> {
+fn inspect_fd(fd: i32, operation_id: OperationId) -> Result<InspectionMetadata, FrameScopeError> {
     if fd < 0 {
         return Err(FrameScopeError::Bridge("invalid file descriptor".into()));
     }
@@ -132,10 +130,7 @@ fn inspect_fd(
 }
 
 #[cfg(not(target_family = "unix"))]
-fn inspect_fd(
-    _fd: i32,
-    operation_id: OperationId,
-) -> Result<InspectionMetadata, FrameScopeError> {
+fn inspect_fd(_fd: i32, operation_id: OperationId) -> Result<InspectionMetadata, FrameScopeError> {
     let (_cancellation, _operation) = operation_token(operation_id)?;
     Err(FrameScopeError::Bridge(
         "file-descriptor inspection is only available on Android/Unix targets".into(),
