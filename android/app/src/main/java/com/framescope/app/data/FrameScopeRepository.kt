@@ -137,8 +137,15 @@ class AndroidFrameScopeRepository(
                 } finally {
                     activeNativeOperationId.compareAndSet(operationId, NO_OPERATION)
                 }
-                currentCoroutineContext().ensureActive()
-                microscopeResult(nativeResult)
+                try {
+                    currentCoroutineContext().ensureActive()
+                    microscopeResult(nativeResult)
+                } catch (cancelled: CancellationException) {
+                    if (nativeResult is NativeMicroscope.Success) {
+                        microscopeController.closeIfCurrent(nativeResult.session.sessionId)
+                    }
+                    throw cancelled
+                }
             }
         }
     } catch (cancelled: CancellationException) {
