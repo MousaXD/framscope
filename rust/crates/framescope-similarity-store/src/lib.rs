@@ -285,15 +285,19 @@ impl SimilarityStore {
     }
 
     pub fn invalidate_source(&self, source: &SourceIdentity) -> Result<(), SimilarityStoreError> {
-        let path = self
-            .root
-            .join(format!("v{SIMILARITY_STORE_SCHEMA_VERSION}"))
-            .join(source.stable_key());
-        match fs::remove_dir_all(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.into()),
+        let source_key = source.stable_key();
+        for schema_version in 1..=SIMILARITY_STORE_SCHEMA_VERSION {
+            let path = self
+                .root
+                .join(format!("v{schema_version}"))
+                .join(&source_key);
+            match fs::remove_dir_all(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
+        Ok(())
     }
 }
 
@@ -494,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn source_invalidation_is_scoped() {
+    fn source_invalidation_is_scoped_and_cleans_legacy_schema() {
         let root = root("invalidate");
         let store = SimilarityStore::new(&root);
         let a = source("a");
@@ -503,8 +507,14 @@ mod tests {
         let kb = SimilarityStoreKey::new_hybrid(b, stream(), hybrid(8, 9_700)).unwrap();
         store.save(&ka, &[group()]).unwrap();
         store.save(&kb, &[group()]).unwrap();
+
+        let legacy_a = root.join("v1").join(a.stable_key());
+        fs::create_dir_all(&legacy_a).unwrap();
+        fs::write(legacy_a.join("legacy.json"), b"legacy").unwrap();
+
         store.invalidate_source(&a).unwrap();
         assert_eq!(store.load(&ka).unwrap(), SimilarityStoreLoad::Missing);
+        assert!(!legacy_a.exists());
         assert!(matches!(
             store.load(&kb).unwrap(),
             SimilarityStoreLoad::Reused(_)
