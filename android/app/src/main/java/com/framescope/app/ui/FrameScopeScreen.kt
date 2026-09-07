@@ -37,6 +37,7 @@ import com.framescope.app.data.InspectedVideo
 fun FrameScopeScreen(
     state: FrameScopeUiState,
     onOpenVideo: () -> Unit,
+    onCancelInspection: () -> Unit,
     onDismissError: () -> Unit,
 ) {
     Surface(
@@ -58,44 +59,60 @@ fun FrameScopeScreen(
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = "Open a video and inspect its frames precisely.",
+                text = "Open a video and inspect its real stream metadata and timing.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            EngineStatusCard(state)
+            EngineStatusCard(state.engineStatus)
 
-            state.errorMessage?.let { message ->
-                ErrorCard(message = message, onDismiss = onDismissError)
+            when (val videoState = state.videoState) {
+                is VideoInspectionState.Error -> ErrorCard(
+                    message = videoState.message,
+                    onDismiss = onDismissError,
+                )
+
+                is VideoInspectionState.Ready -> VideoDetailsCard(videoState.video)
+                VideoInspectionState.Cancelled -> StatusCard("Video inspection cancelled.")
+                VideoInspectionState.Picking -> StatusCard("Waiting for Android's video picker…")
+                VideoInspectionState.Opening -> BusyCard("Opening selected video…")
+                VideoInspectionState.Inspecting -> BusyCard("Inspecting video in Rust…")
+                VideoInspectionState.Idle -> Unit
             }
 
-            state.video?.let { video ->
-                VideoDetailsCard(video)
-            }
+            val inspectionActive = state.videoState == VideoInspectionState.Opening ||
+                state.videoState == VideoInspectionState.Inspecting
 
-            Button(
-                onClick = onOpenVideo,
-                enabled = !state.isInspecting,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-            ) {
-                if (state.isInspecting) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(22.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
+            if (inspectionActive) {
+                OutlinedButton(
+                    onClick = onCancelInspection,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text("Cancel Inspection")
+                }
+            } else if (state.videoState != VideoInspectionState.Picking) {
+                Button(
+                    onClick = onOpenVideo,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text(
+                        if (state.videoState is VideoInspectionState.Ready) {
+                            "Open Another Video"
+                        } else {
+                            "Open Video"
+                        },
                     )
-                    Spacer(Modifier.size(12.dp))
-                    Text("Inspecting in Rust…")
-                } else {
-                    Text(if (state.video == null) "Open Video" else "Open Another Video")
                 }
             }
 
             Text(
-                text = "Local only · No account · No network · No telemetry",
+                text = "Local only · SAF access · No broad storage permission · No telemetry",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.CenterHorizontally),
@@ -105,7 +122,7 @@ fun FrameScopeScreen(
 }
 
 @Composable
-private fun EngineStatusCard(state: FrameScopeUiState) {
+private fun EngineStatusCard(status: EngineStatus) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -115,18 +132,32 @@ private fun EngineStatusCard(state: FrameScopeUiState) {
             modifier = Modifier.padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            val engineLabel = when {
-                state.engineError != null -> "Rust engine: unavailable"
-                state.engineVersion != null -> "Rust engine: ready"
-                else -> "Rust engine: checking…"
+            val title: String
+            val detail: String
+            when (status) {
+                EngineStatus.Checking -> {
+                    title = "Rust engine: checking…"
+                    detail = "Loading native engine…"
+                }
+
+                is EngineStatus.Ready -> {
+                    title = "Rust engine: ready"
+                    detail = status.version
+                }
+
+                is EngineStatus.Unavailable -> {
+                    title = "Rust engine: unavailable"
+                    detail = status.message
+                }
             }
+
             Text(
-                text = engineLabel,
+                text = title,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                text = state.engineVersion ?: state.engineError ?: "Loading native engine…",
+                text = detail,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
@@ -156,12 +187,31 @@ private fun VideoDetailsCard(video: InspectedVideo) {
                 overflow = TextOverflow.Ellipsis,
             )
             HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+
+            metadata.container?.let { MetadataRow("Container", it) }
+            metadata.codec?.let { MetadataRow("Codec", it) }
             MetadataRow("Resolution", "${metadata.width} × ${metadata.height}")
             MetadataRow("Duration", VideoMetadataFormatter.duration(metadata.durationUs))
-            MetadataRow("Estimated FPS", VideoMetadataFormatter.fps(metadata.estimatedFrameRate))
+            metadata.pixelFormat?.let { MetadataRow("Pixel format", it) }
+            metadata.videoStreamIndex?.let { MetadataRow("Selected stream", "#$it") }
+            metadata.videoStreamCount?.let { MetadataRow("Video streams", it.toString()) }
+            metadata.audioStreamCount?.let { MetadataRow("Audio streams", it.toString()) }
+            MetadataRow(
+                "Nominal / estimated FPS",
+                VideoMetadataFormatter.fps(metadata.estimatedFrameRate),
+            )
+            metadata.variableFrameRate?.let {
+                MetadataRow("Frame-rate mode", if (it) "Variable" else "Constant")
+            }
             if (metadata.rotationDegrees != 0) {
                 MetadataRow("Rotation", "${metadata.rotationDegrees}°")
             }
+
+            Text(
+                text = "Frame timing remains timestamp-driven; FPS is informational only.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
             Text(
                 text = "Inspected by ${video.engine}",
@@ -183,11 +233,52 @@ private fun MetadataRow(label: String, value: String) {
             text = label,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
         )
+        Spacer(Modifier.size(12.dp))
         Text(
             text = value,
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun BusyCard(message: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(22.dp),
+                strokeWidth = 2.dp,
+            )
+            Spacer(Modifier.size(12.dp))
+            Text(message, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable
+private fun StatusCard(message: String) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Text(
+            text = message,
+            modifier = Modifier.padding(18.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
