@@ -43,6 +43,18 @@ pub enum ObservedFrameRateMode {
     Variable,
 }
 
+/// One decoded presentation frame plus an owned, tightly-packed RGBA snapshot.
+///
+/// The pixel bytes are independent from FFmpeg's reusable `AVFrame` and remain valid after the
+/// decoder advances, seeks, or is dropped. This is source-decoded full-resolution data, not a
+/// lossy Phase 3 disk proxy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedRgbaFrame {
+    pub frame: DecodedFrame,
+    pub stride_bytes: usize,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Default)]
 struct TimestampCadence {
     last: Option<MediaTimestamp>,
@@ -254,6 +266,47 @@ impl VideoDecoder {
             self.cadence.record(timestamp);
         }
         Ok(Some(frame))
+    }
+
+    /// Decode the next display frame and copy its full-resolution pixels into owned RGBA storage.
+    ///
+    /// Unlike [`Self::next_frame`], this performs a pixel-format conversion and allocation, so
+    /// metadata-only indexing should continue to use `next_frame`. The returned pixels are owned and
+    /// can safely be retained by the Phase 3 RAM cache after the decoder advances.
+    pub fn next_frame_rgba(&mut self) -> Result<Option<DecodedRgbaFrame>, FrameScopeError> {
+        let Some(frame) = self.next_frame()? else {
+            return Ok(None);
+        };
+        let rgba = self
+            .session
+            .copy_current_frame_rgba()
+            .map_err(map_native_error)?;
+        if rgba.width != frame.width || rgba.height != frame.height {
+            return Err(FrameScopeError::DecoderFailure(format!(
+                "RGBA snapshot dimensions {}x{} do not match decoded frame {}x{}",
+                rgba.width, rgba.height, frame.width, frame.height
+            )));
+        }
+        let expected = rgba
+            .stride
+            .checked_mul(usize::try_from(frame.height).map_err(|_| {
+                FrameScopeError::DecoderFailure("decoded frame height exceeds memory size".into())
+            })?)
+            .ok_or_else(|| {
+                FrameScopeError::DecoderFailure("RGBA snapshot byte size overflows memory".into())
+            })?;
+        if rgba.pixels.len() != expected {
+            return Err(FrameScopeError::DecoderFailure(format!(
+                "RGBA snapshot has {} bytes, expected {expected}",
+                rgba.pixels.len()
+            )));
+        }
+
+        Ok(Some(DecodedRgbaFrame {
+            frame,
+            stride_bytes: rgba.stride,
+            pixels: rgba.pixels,
+        }))
     }
 
     /// Foundational timestamp seek. FFmpeg may land on an earlier keyframe.

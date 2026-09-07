@@ -1,5 +1,8 @@
 //! FFmpeg backend availability boundary.
 
+/// Owned full-resolution RGBA frame returned by [`crate::VideoDecoder::next_frame_rgba`].
+pub use crate::engine::DecodedRgbaFrame;
+
 /// Force a link-time reference to the configured FFmpeg libraries.
 pub fn link_probe() -> u32 {
     framescope_ffmpeg::link_probe()
