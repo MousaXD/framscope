@@ -5,8 +5,11 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+# Host-only integration-test feature. Android links Agent 1's pinned FFmpeg build automatically.
+system-ffmpeg = ["framescope-ffmpeg/system-ffmpeg"]
+
 [dependencies]
 framescope-core = { path = "../framescope-core" }
-
-[target.'cfg(target_os = "android")'.dependencies]
 framescope-ffmpeg = { path = "../framescope-ffmpeg" }
