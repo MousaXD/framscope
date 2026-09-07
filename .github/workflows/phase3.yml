@@ -1,0 +1,95 @@
+name: Phase 3 index/cache contracts
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase3-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_HOST_TOOLCHAIN: '1.85.1'
+  PHASE3_STRESS_SECONDS: '45'
+
+jobs:
+  phase3-index-cache:
+    name: phase3-index-cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install deterministic fixture tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg time
+          ffmpeg -version | head -n 1
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "$RUST_HOST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustup default "$RUST_HOST_TOOLCHAIN"
+
+      - name: Validate Phase 3 support crate
+        working-directory: rust
+        run: |
+          cargo clippy -p framescope-test-support --all-targets -- -D warnings
+          cargo test -p framescope-test-support
+
+      - name: Validate Python harnesses
+        run: |
+          python3 -m json.tool fixtures/video/phase3-manifest.json >/dev/null
+          python3 -m py_compile scripts/phase3-frame-truth.py scripts/phase3-benchmark-report.py
+          python3 scripts/phase3-benchmark-report.py --self-test
+
+      - name: Generate Phase 3 deterministic fixtures
+        run: bash ./scripts/generate-phase3-video-fixtures.sh
+
+      - name: Capture exact frame truth and report oracle cost
+        run: |
+          start_ns="$(date +%s%N)"
+          python3 ./scripts/phase3-frame-truth.py \
+            build/phase3-video-fixtures \
+            fixtures/video/phase3-manifest.json \
+            build/phase3-frame-truth.json \
+            --stress-seconds "$PHASE3_STRESS_SECONDS"
+          end_ns="$(date +%s%N)"
+          echo "phase3 oracle_capture_ms=$(((end_ns - start_ns) / 1000000))"
+
+      - name: Enforce generated storage budget and print stress report
+        run: |
+          bytes="$(du -sb build/phase3-video-fixtures | cut -f1)"
+          truth_bytes="$(stat -c %s build/phase3-frame-truth.json)"
+          echo "phase3 fixture_bytes=$bytes"
+          echo "phase3 truth_bytes=$truth_bytes"
+          test "$bytes" -le 262144
+          test "$truth_bytes" -le 131072
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          truth = json.loads(Path('build/phase3-frame-truth.json').read_text())
+          stress = truth['stress']
+          print(
+              'phase3 stress '
+              f"frames={stress['frame_count']} bytes={stress['file_bytes']} "
+              f"keyframes={stress['keyframe_count']}"
+          )
+          PY
+
+      - name: Preserve compact truth on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phase3-frame-truth-${{ github.sha }}
+          path: build/phase3-frame-truth.json
+          if-no-files-found: ignore
+          retention-days: 3
