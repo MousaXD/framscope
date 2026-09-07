@@ -12,9 +12,7 @@ use framescope_group_navigation::{
     SimilaritySourceError, open_or_build_group_navigation,
 };
 use framescope_perceptual::HybridSimilarityPolicy;
-use framescope_video::{
-    CancellationToken, OpenOptions, VideoDecoder, VideoStreamSelection,
-};
+use framescope_video::{CancellationToken, OpenOptions, VideoDecoder, VideoStreamSelection};
 use std::path::Path;
 
 #[cfg(unix)]
