@@ -47,5 +47,43 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
-      - name: Verify repository
-        run: ./scripts/verify.sh
+      - name: Rust format
+        working-directory: rust
+        run: cargo fmt --all --check
+
+      - name: Rust clippy
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust tests
+        working-directory: rust
+        run: cargo test --workspace
+
+      - name: Android unit tests
+        working-directory: android
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Android lint
+        working-directory: android
+        run: gradle --no-daemon lintDebug
+
+      - name: Android debug build
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - name: Verify packaged Rust JNI library
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          NATIVE_LIB="android/app/build/generated/jniLibs/arm64-v8a/libframescope_ffi.so"
+          test -f "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libframescope_ffi.so'
+          test -f "$NATIVE_LIB"
+          if command -v nm >/dev/null 2>&1; then
+            nm -D "$NATIVE_LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeVersion'
+            nm -D "$NATIVE_LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeInspectVideoFd'
+          fi
+
+      - name: Verify privacy permissions
+        run: |
+          ! grep -R --line-number --fixed-string 'android.permission.INTERNET' android/app/src/main
+          ! grep -R --line-number -E 'READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|MANAGE_EXTERNAL_STORAGE' android/app/src/main/AndroidManifest.xml
