@@ -11,7 +11,7 @@ use thiserror::Error;
 /// The persistent index entry in `target` remains the timeline authority. `pixels` are owned
 /// full-resolution RGBA produced from the source-quality navigation path. The compressed disk proxy
 /// tier cannot satisfy this type.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MicroscopeFramePresentation {
     pub target: MicroscopeTarget,
     pub pixels: OwnedRgbaFrame,
@@ -105,14 +105,12 @@ mod tests {
 
     #[test]
     fn presentation_keeps_exact_target_identity_and_owned_pixels() {
-        let target = MicroscopeTarget {
-            entry: entry(4),
-            frame_count: 8,
-        };
-        let pixels = OwnedRgbaFrame::new(2, 2, 8, vec![7; 16]).unwrap();
         let presentation = MicroscopeFramePresentation {
-            target: target.clone(),
-            pixels: pixels.clone(),
+            target: MicroscopeTarget {
+                entry: entry(4),
+                frame_count: 8,
+            },
+            pixels: OwnedRgbaFrame::new(2, 2, 8, vec![7; 16]).unwrap(),
             source: CachedFrameSource::Ram,
             decoded_frames: 0,
             used_keyframe_seek: false,
@@ -121,8 +119,8 @@ mod tests {
         };
 
         assert_eq!(presentation.frame_id(), FrameId(4));
-        assert_eq!(presentation.target, target);
-        assert_eq!(presentation.pixels, pixels);
+        assert_eq!(presentation.target.entry, entry(4));
+        assert_eq!(presentation.pixels.bytes(), &[7; 16]);
         assert_eq!(presentation.source, CachedFrameSource::Ram);
         assert_eq!(presentation.decoded_frames, 0);
     }
