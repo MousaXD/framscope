@@ -128,7 +128,7 @@ class MainViewModel(
     fun onVideoSelected(uri: String) {
         val generation = inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
-        invalidateMicroscopeWork(closeSession = false)
+        invalidateMicroscopeWork(closeSession = true)
 
         inspectJob = viewModelScope.launch {
             publishIfCurrent(generation, VideoInspectionState.Opening)
