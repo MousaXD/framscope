@@ -29,6 +29,11 @@ pub struct PreviewNavigationResult {
     pub source: PreviewSource,
     pub decoded_frames: u64,
     pub proxy_insert_result: Option<DiskInsertResult>,
+    /// Non-fatal disk-cache failure encountered while serving this preview.
+    ///
+    /// The source video remains authoritative, so read/write failures in the disposable proxy tier
+    /// degrade to source-quality navigation instead of making the frame unavailable.
+    pub cache_warning: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -65,7 +70,8 @@ where
 /// source decode. A disk hit returns immediately without opening or decoding the source. If only a
 /// full-quality RAM frame is available it is encoded directly, again without source decode. On a
 /// true miss the indexed full-quality path decodes safely from the nearest keyframe, then the encoder
-/// creates a disposable proxy which is inserted into disk storage.
+/// creates a disposable proxy which is inserted into disk storage. Disk-cache I/O is best-effort:
+/// failures are reported through `cache_warning` while the authoritative source path remains usable.
 pub fn navigate_to_frame_preview<D, F, E>(
     index: &FrameIndex,
     cache: &mut FrameCacheHierarchy,
@@ -85,8 +91,9 @@ where
     )
     .map_err(DiskCacheError::from)?;
 
-    match cache.lookup(&key)? {
-        CacheLookup::Proxy(proxy) => {
+    let mut cache_warning = None;
+    match cache.lookup(&key) {
+        Ok(CacheLookup::Proxy(proxy)) => {
             return Ok(PreviewNavigationResult {
                 frame_id,
                 format: proxy.format,
@@ -94,9 +101,10 @@ where
                 source: PreviewSource::Disk,
                 decoded_frames: 0,
                 proxy_insert_result: None,
+                cache_warning: None,
             });
         }
-        CacheLookup::Full(full) => {
+        Ok(CacheLookup::Full(full)) => {
             return encode_and_store(
                 cache,
                 &key,
@@ -105,9 +113,15 @@ where
                 PreviewSource::EncodedFromRam,
                 0,
                 encoder,
+                None,
             );
         }
-        CacheLookup::Miss => {}
+        Ok(CacheLookup::Miss) => {}
+        Err(error) => {
+            cache_warning = Some(format!(
+                "disk proxy lookup failed; falling back to authoritative source decode: {error}"
+            ));
+        }
     }
 
     let decoded = navigate_to_frame_cached(index, cache, &mut open_fresh_decoder, frame_id)?;
@@ -123,6 +137,7 @@ where
         source,
         decoded.decoded_frames,
         encoder,
+        cache_warning,
     )
 }
 
@@ -134,19 +149,37 @@ fn encode_and_store<E: PreviewEncoder>(
     source: PreviewSource,
     decoded_frames: u64,
     encoder: &mut E,
+    cache_warning: Option<String>,
 ) -> Result<PreviewNavigationResult, PreviewNavigationError> {
     let encoded = encoder
         .encode(pixels)
         .map_err(PreviewNavigationError::Encoding)?;
-    let insert_result = cache.insert_proxy(key, encoded.format, &encoded.bytes)?;
+    let (proxy_insert_result, cache_warning) = match cache.insert_proxy(key, encoded.format, &encoded.bytes) {
+        Ok(result) => (Some(result), cache_warning),
+        Err(error) => (
+            None,
+            Some(append_cache_warning(
+                cache_warning,
+                format!("disk proxy insert failed; preview remains usable: {error}"),
+            )),
+        ),
+    };
     Ok(PreviewNavigationResult {
         frame_id,
         format: encoded.format,
         bytes: encoded.bytes,
         source,
         decoded_frames,
-        proxy_insert_result: Some(insert_result),
+        proxy_insert_result,
+        cache_warning,
     })
+}
+
+fn append_cache_warning(existing: Option<String>, next: String) -> String {
+    match existing {
+        Some(existing) => format!("{existing}; {next}"),
+        None => next,
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +351,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.source, PreviewSource::EncodedFromDecode);
+        assert!(first.cache_warning.is_none());
         let decoded_after_first = decoded.load(Ordering::Relaxed);
         assert!(decoded_after_first > 0);
 
@@ -331,6 +365,7 @@ mod tests {
         .unwrap();
         assert_eq!(second.source, PreviewSource::Disk);
         assert_eq!(second.decoded_frames, 0);
+        assert!(second.cache_warning.is_none());
         assert_eq!(decoded.load(Ordering::Relaxed), decoded_after_first);
         assert_eq!(second.bytes, vec![0xff, 0xd8, 0xff, 0xd9]);
 
@@ -362,10 +397,49 @@ mod tests {
         .unwrap();
         assert_eq!(result.source, PreviewSource::EncodedFromRam);
         assert_eq!(result.decoded_frames, 0);
+        assert!(result.cache_warning.is_none());
         assert_eq!(decoded.load(Ordering::Relaxed), 0);
 
         drop(index);
         let _ = std::fs::remove_file(index_path);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn disk_io_failure_degrades_to_source_decode_and_keeps_preview_usable() {
+        let (index_path, index) = index();
+        let cache_root = temp_path("broken-disk-cache");
+        let decoded = Arc::new(AtomicU64::new(0));
+        let mut encoder = jpeg_encoder();
+        let mut cache = FrameCacheHierarchy::open(&cache_root, 0, 1024).unwrap();
+
+        // Replace the version directory with a regular file after open. Subsequent proxy reads and
+        // writes fail with a filesystem error, while the RAM/source-quality path remains available.
+        let version_root = cache_root.join("v1");
+        std::fs::remove_dir_all(&version_root).unwrap();
+        std::fs::write(&version_root, b"blocked").unwrap();
+
+        let result = navigate_to_frame_preview(
+            &index,
+            &mut cache,
+            || Ok(decoder(decoded.clone())),
+            FrameId(2),
+            &mut encoder,
+        )
+        .unwrap();
+
+        assert_eq!(result.source, PreviewSource::EncodedFromDecode);
+        assert!(result.decoded_frames > 0);
+        assert!(decoded.load(Ordering::Relaxed) > 0);
+        assert_eq!(result.bytes, vec![0xff, 0xd8, 0xff, 0xd9]);
+        assert!(result.proxy_insert_result.is_none());
+        let warning = result.cache_warning.expect("disk failure should be diagnostic");
+        assert!(warning.contains("disk proxy lookup failed"));
+        assert!(warning.contains("disk proxy insert failed"));
+
+        drop(index);
+        let _ = std::fs::remove_file(index_path);
+        let _ = std::fs::remove_file(version_root);
         let _ = std::fs::remove_dir_all(cache_root);
     }
 }
