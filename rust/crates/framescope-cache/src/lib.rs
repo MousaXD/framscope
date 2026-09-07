@@ -1,11 +1,16 @@
-//! Persistent media-index primitives for FrameScope.
+//! Persistent media-index and bounded frame-cache primitives for FrameScope.
 //!
-//! This crate owns source identity and the metadata-only frame index. It intentionally does not
-//! store decoded pixel payloads; RAM and disk frame caches remain separate layers.
+//! This crate owns source identity, the metadata-only frame index, and cache containers that own
+//! their decoded pixel payloads. Disk proxy storage remains a separate disposable layer.
 
+mod frame_cache;
 mod identity;
 mod index;
 
+pub use frame_cache::{
+    CachedFrame, FrameCacheError, FrameCacheKey, OwnedRgbaFrame, RamCacheStats, RamFrameCache,
+    RamInsertResult,
+};
 pub use identity::{
     CacheDirectoryLayout, CacheStore, NoopCacheStore, SourceIdentity, SourceVideoIdentity,
 };
