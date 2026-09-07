@@ -2,9 +2,7 @@ use framescope_core::{
     CodecInfo, ContainerInfo, DecodedFrame, FrameScopeError, MediaDuration, MediaKind,
     MediaTimestamp, Rational, StreamInfo, TimeBase, VideoInfo,
 };
-use framescope_ffmpeg::{
-    NativeError, NativeErrorKind, NativeFrame, NativeStreamInfo, Session,
-};
+use framescope_ffmpeg::{NativeError, NativeErrorKind, NativeFrame, NativeStreamInfo, Session};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -102,11 +100,7 @@ pub struct VideoDecoder {
 
 impl VideoDecoder {
     pub fn open_path(path: impl AsRef<Path>) -> Result<Self, FrameScopeError> {
-        Self::open_path_with_options(
-            path,
-            OpenOptions::default(),
-            CancellationToken::new(),
-        )
+        Self::open_path_with_options(path, OpenOptions::default(), CancellationToken::new())
     }
 
     /// Open a filesystem source using the selected stream policy and cancellation signal.
@@ -175,9 +169,10 @@ impl VideoDecoder {
                 container.stream_count
             )));
         }
-        let selected_video_stream = u32::try_from(container.selected_stream_index).map_err(|_| {
-            FrameScopeError::InvalidMetadata("selected video stream index is invalid".into())
-        })?;
+        let selected_video_stream =
+            u32::try_from(container.selected_stream_index).map_err(|_| {
+                FrameScopeError::InvalidMetadata("selected video stream index is invalid".into())
+            })?;
 
         let mut streams = Vec::with_capacity(container.stream_count as usize);
         for ordinal in 0..container.stream_count {
@@ -192,7 +187,9 @@ impl VideoDecoder {
             ));
         }
 
-        let duration_us = container.duration_us.and_then(|value| u64::try_from(value).ok());
+        let duration_us = container
+            .duration_us
+            .and_then(|value| u64::try_from(value).ok());
         let info = VideoInfo {
             container: ContainerInfo {
                 format_name: container.format_name,
