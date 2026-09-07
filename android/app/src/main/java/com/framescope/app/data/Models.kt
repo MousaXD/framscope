@@ -24,7 +24,6 @@ data class VideoMetadata(
             (videoStreamIndex == null || videoStreamIndex >= 0) &&
             (videoStreamCount == null || videoStreamCount > 0) &&
             (audioStreamCount == null || audioStreamCount >= 0) &&
-            (videoStreamIndex == null || videoStreamCount == null || videoStreamIndex < videoStreamCount) &&
             listOf(container, codec, pixelFormat).all { value -> value == null || value.length <= 256 }
 }
 
