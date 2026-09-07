@@ -13,6 +13,11 @@
 # Native dependency build/cache state
 /.native/
 
+# Generated CI/test outputs
+/build/
+**/__pycache__/
+*.pyc
+
 # Signing and secrets
 *.jks
 *.keystore
