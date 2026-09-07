@@ -62,7 +62,9 @@ impl OwnedRgbaFrame {
         let minimum_stride = usize::try_from(width)
             .ok()
             .and_then(|width| width.checked_mul(4))
-            .ok_or_else(|| FrameCacheError::InvalidFrame("frame width overflows byte size".into()))?;
+            .ok_or_else(|| {
+                FrameCacheError::InvalidFrame("frame width overflows byte size".into())
+            })?;
         if stride_bytes < minimum_stride {
             return Err(FrameCacheError::InvalidFrame(format!(
                 "RGBA stride {stride_bytes} is smaller than minimum {minimum_stride}"
@@ -126,7 +128,9 @@ pub enum RamInsertResult {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum FrameCacheError {
-    #[error("source identity lacks content-derived evidence and is unsafe for reusable frame cache keys")]
+    #[error(
+        "source identity lacks content-derived evidence and is unsafe for reusable frame cache keys"
+    )]
     UnsafeSourceIdentity,
     #[error("invalid decoded frame: {0}")]
     InvalidFrame(String),
@@ -204,7 +208,9 @@ impl RamFrameCache {
         self.access_clock = self.access_clock.wrapping_add(1);
         let now = self.access_clock;
         if let Some(previous) = self.entries.remove(&frame.key) {
-            self.resident_bytes = self.resident_bytes.saturating_sub(previous.frame.byte_len());
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(previous.frame.byte_len());
         }
 
         self.resident_bytes = self.resident_bytes.saturating_add(frame_bytes);
@@ -230,7 +236,9 @@ impl RamFrameCache {
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(entry) = self.entries.remove(&key) {
-                self.resident_bytes = self.resident_bytes.saturating_sub(entry.frame.byte_len());
+                self.resident_bytes = self
+                    .resident_bytes
+                    .saturating_sub(entry.frame.byte_len());
             }
         }
     }
@@ -259,7 +267,9 @@ impl RamFrameCache {
                 break;
             };
             if let Some(entry) = self.entries.remove(&key) {
-                self.resident_bytes = self.resident_bytes.saturating_sub(entry.frame.byte_len());
+                self.resident_bytes = self
+                    .resident_bytes
+                    .saturating_sub(entry.frame.byte_len());
                 self.stats.evictions = self.stats.evictions.saturating_add(1);
             }
         }
@@ -339,7 +349,10 @@ mod tests {
     fn oversized_frame_is_not_cached() {
         let source = source("video-a");
         let mut cache = RamFrameCache::new(8);
-        assert_eq!(cache.insert(frame(&source, 1, 2, 2)), RamInsertResult::TooLarge);
+        assert_eq!(
+            cache.insert(frame(&source, 1, 2, 2)),
+            RamInsertResult::TooLarge
+        );
         assert!(cache.is_empty());
     }
 
