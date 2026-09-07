@@ -116,7 +116,7 @@ pub(super) fn parse_tkhd<R: Read + Seek>(
         other => {
             return Err(FrameScopeError::MalformedContainer(format!(
                 "unsupported tkhd version {other}"
-            )))
+            )));
         }
     };
     ensure_payload_len(header, required)?;
