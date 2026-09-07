@@ -112,7 +112,7 @@ jobs:
           fi
 
       - name: Build and verify native arm64 library
-        run: ./scripts/verify-native-android.sh
+        run: bash ./scripts/verify-native-android.sh
 
   android:
     name: android
@@ -187,7 +187,7 @@ jobs:
         run: gradle --no-daemon assembleDebug
 
       - name: Verify APK native packaging
-        run: ./scripts/verify-debug-apk.sh
+        run: bash ./scripts/verify-debug-apk.sh
 
       - name: Upload debug APK for durable builds
         if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/tags/')
@@ -213,10 +213,10 @@ jobs:
           ffmpeg -version | head -n 1
 
       - name: Generate deterministic video fixtures
-        run: ./scripts/generate-video-fixtures.sh
+        run: bash ./scripts/generate-video-fixtures.sh
 
       - name: Verify fixture metadata contracts
-        run: ./scripts/verify-video-fixtures.py
+        run: python3 ./scripts/verify-video-fixtures.py
 
       - name: Enforce fixture size budget
         run: |
