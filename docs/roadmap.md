@@ -28,21 +28,19 @@ The phases are intentionally ordered. Later work should not be pulled into an ea
 
 ## Phase 5: Frame microscope UI
 
-**Implementation complete, final acceptance in progress.**
+**Complete.**
 
-Completed capabilities:
+Accepted capabilities:
 
 - Exact previous/next-frame navigation.
 - Timeline and timestamp navigation.
 - Zoom/pan microscope interaction.
-- Similarity/group navigation.
+- Similarity/group navigation backed by the accepted Phase 4 store and fresh source-quality video adapter.
 - Bounded frame presentation and lifecycle handling.
+- Stale-result suppression and explicit native session cleanup.
+- Android, Rust, FFmpeg fixture, Phase 3, and Phase 4 acceptance gates passing on the final integration path.
 
-Remaining acceptance:
-
-- PR #47 integration verification.
-- Final GitHub Actions validation.
-- Performance evidence collection.
+Performance acceptance is structural rather than a device-specific latency promise: frame presentation, preview conversion, caches, grouping, and navigation remain explicitly bounded. See `docs/phase5-performance.md`.
 
 ## Phase 6: Frame extraction
 
