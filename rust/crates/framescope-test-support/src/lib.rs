@@ -82,7 +82,9 @@ impl AccessCounters {
             decoded_frames: self.decoded_frames.saturating_sub(earlier.decoded_frames),
             cache_hits: self.cache_hits.saturating_sub(earlier.cache_hits),
             cache_misses: self.cache_misses.saturating_sub(earlier.cache_misses),
-            disk_proxy_reads: self.disk_proxy_reads.saturating_sub(earlier.disk_proxy_reads),
+            disk_proxy_reads: self
+                .disk_proxy_reads
+                .saturating_sub(earlier.disk_proxy_reads),
             evictions: self.evictions.saturating_sub(earlier.evictions),
             source_invalidations: self
                 .source_invalidations
@@ -241,7 +243,10 @@ mod tests {
             persisted_batches: 40,
             peak_buffered_metadata_entries: 256,
         };
-        assert_eq!(verify_bounded_streaming(counters, 10_000, 4, 256, 2), Ok(()));
+        assert_eq!(
+            verify_bounded_streaming(counters, 10_000, 4, 256, 2),
+            Ok(())
+        );
     }
 
     #[test]
