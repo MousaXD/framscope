@@ -31,13 +31,15 @@ class MicroscopeSessionController(
     ): NativeMicroscope {
         val requestRevision = nextRevision() ?: return revisionExhaustedFailure(currentEngine())
         val result = nativeBridge.openMicroscopeSession(fd, operationId, cacheRoot)
-
-        if (result !is NativeMicroscope.Success) {
-            return if (revision.get() == requestRevision) {
-                result
-            } else {
-                staleFailure(result.engine)
+        val success = when (result) {
+            is NativeMicroscope.Failure -> {
+                return if (revision.get() == requestRevision) {
+                    result
+                } else {
+                    staleFailure(result.engine)
+                }
             }
+            is NativeMicroscope.Success -> result
         }
 
         var previousSessionId: Long? = null
@@ -46,20 +48,20 @@ class MicroscopeSessionController(
                 false
             } else {
                 previousSessionId = snapshot?.sessionId
-                snapshot = result.session
-                engine = result.engine
+                snapshot = success.session
+                engine = success.engine
                 true
             }
         }
 
         if (!committed) {
-            nativeBridge.closeMicroscopeSession(result.session.sessionId)
-            return staleFailure(result.engine)
+            nativeBridge.closeMicroscopeSession(success.session.sessionId)
+            return staleFailure(success.engine)
         }
         previousSessionId
-            ?.takeIf { it != result.session.sessionId }
+            ?.takeIf { it != success.session.sessionId }
             ?.let(nativeBridge::closeMicroscopeSession)
-        return result
+        return success
     }
 
     fun step(delta: Int): NativeMicroscope = navigate { sessionId ->
@@ -167,19 +169,21 @@ class MicroscopeSessionController(
             ?: return noSessionFailure()
         val requestRevision = nextRevision() ?: return revisionExhaustedFailure(currentEngine())
         val result = call(target.sessionId)
-
-        if (result !is NativeMicroscope.Success) {
-            return if (isRequestCurrent(requestRevision, target.sessionId)) {
-                result
-            } else {
-                staleFailure(result.engine)
+        val success = when (result) {
+            is NativeMicroscope.Failure -> {
+                return if (isRequestCurrent(requestRevision, target.sessionId)) {
+                    result
+                } else {
+                    staleFailure(result.engine)
+                }
             }
+            is NativeMicroscope.Success -> result
         }
-        if (result.session.sessionId != target.sessionId) {
+        if (success.session.sessionId != target.sessionId) {
             return if (isRequestCurrent(requestRevision, target.sessionId)) {
-                sessionIdentityFailure(result.engine)
+                sessionIdentityFailure(success.engine)
             } else {
-                staleFailure(result.engine)
+                staleFailure(success.engine)
             }
         }
 
@@ -190,12 +194,12 @@ class MicroscopeSessionController(
             ) {
                 false
             } else {
-                snapshot = result.session
-                engine = result.engine
+                snapshot = success.session
+                engine = success.engine
                 true
             }
         }
-        return if (committed) result else staleFailure(result.engine)
+        return if (committed) success else staleFailure(success.engine)
     }
 
     private fun nextRevision(): Long? {
