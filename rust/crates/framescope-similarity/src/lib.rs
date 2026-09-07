@@ -114,7 +114,8 @@ impl SimilarityEngine {
             .ok()
             .and_then(|width| width.checked_mul(4))
             .ok_or(SimilarityError::FrameLayoutOverflow)?;
-        let height = usize::try_from(left.height).map_err(|_| SimilarityError::FrameLayoutOverflow)?;
+        let height =
+            usize::try_from(left.height).map_err(|_| SimilarityError::FrameLayoutOverflow)?;
 
         let visible_pixels_identical = (0..height).all(|y| {
             let left_start = y * left.stride_bytes;
@@ -363,10 +364,13 @@ mod tests {
     #[test]
     fn exact_mode_ignores_row_padding_bytes() {
         let left = OwnedRgbaFrame::new(1, 1, 8, vec![10, 20, 30, 255, 1, 2, 3, 4]).unwrap();
-        let right = OwnedRgbaFrame::new(1, 1, 12, vec![10, 20, 30, 255, 9, 9, 9, 9, 8, 8, 8, 8])
-            .unwrap();
+        let right =
+            OwnedRgbaFrame::new(1, 1, 12, vec![10, 20, 30, 255, 9, 9, 9, 9, 8, 8, 8, 8]).unwrap();
         let engine = SimilarityEngine::new(SimilarityMode::Exact).unwrap();
-        assert_eq!(engine.compare(&left, &right).unwrap(), SimilarityScore::IDENTICAL);
+        assert_eq!(
+            engine.compare(&left, &right).unwrap(),
+            SimilarityScore::IDENTICAL
+        );
     }
 
     #[test]
