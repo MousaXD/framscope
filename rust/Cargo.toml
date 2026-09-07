@@ -5,6 +5,7 @@ members = [
     "crates/framescope-cache",
     "crates/framescope-similarity",
     "crates/framescope-similarity-store",
+    "crates/framescope-perceptual",
     "crates/framescope-ffi",
     "crates/framescope-ffmpeg",
     "crates/framescope-test-support",
