@@ -164,6 +164,28 @@ class MicroscopeSessionController(
         return nativeBridge.closeMicroscopeSession(sessionId)
     }
 
+    /**
+     * Detach and close [sessionId] only when it is still the active session.
+     *
+     * Unlike [closeCurrent], this intentionally does not advance the global revision. It is used to
+     * clean up a successfully opened session whose coroutine was cancelled before publication. A
+     * newer open may already be in flight, and cancellation cleanup for the older request must not
+     * invalidate or close that replacement.
+     */
+    fun closeIfCurrent(sessionId: Long): Boolean {
+        if (sessionId <= 0L) return false
+        val detached = synchronized(stateLock) {
+            if (snapshot?.sessionId != sessionId) {
+                false
+            } else {
+                snapshot = null
+                engine = null
+                true
+            }
+        }
+        return if (detached) nativeBridge.closeMicroscopeSession(sessionId) else true
+    }
+
     private fun navigate(call: (Long) -> NativeMicroscope): NativeMicroscope {
         val target = synchronized(stateLock) { snapshot }
             ?: return noSessionFailure()
