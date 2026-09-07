@@ -134,7 +134,6 @@ where
         let mut batch = Vec::with_capacity(options.batch_size);
         let mut reused = 0_u64;
         let mut added = 0_u64;
-        let mut mismatch = false;
 
         loop {
             let decoded = match decoder.next_frame_for_index() {
@@ -156,7 +155,6 @@ where
 
             let Some(decoded) = decoded else {
                 if frame_id.0 < expected_existing {
-                    mismatch = true;
                     break;
                 }
                 flush_batch(index, &mut batch, &mut added)?;
@@ -178,10 +176,7 @@ where
                     Some(existing) if existing == entry => {
                         reused = reused.saturating_add(1);
                     }
-                    _ => {
-                        mismatch = true;
-                        break;
-                    }
+                    _ => break,
                 }
             } else {
                 batch.push(entry);
@@ -199,15 +194,13 @@ where
             );
         }
 
-        if mismatch {
-            if attempt != 0 {
-                let _ = index.mark_failed_recoverable("partial index reconciliation failed");
-                return Err(IndexingError::PartialIndexMismatch);
-            }
-            index.clear_for_rebuild()?;
-            expected_existing = 0;
-            restarted = true;
+        if attempt != 0 {
+            let _ = index.mark_failed_recoverable("partial index reconciliation failed");
+            return Err(IndexingError::PartialIndexMismatch);
         }
+        index.clear_for_rebuild()?;
+        expected_existing = 0;
+        restarted = true;
     }
 
     Err(IndexingError::PartialIndexMismatch)
