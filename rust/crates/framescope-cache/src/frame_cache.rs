@@ -236,9 +236,7 @@ impl RamFrameCache {
             .collect::<Vec<_>>();
         for key in keys {
             if let Some(entry) = self.entries.remove(&key) {
-                self.resident_bytes = self
-                    .resident_bytes
-                    .saturating_sub(entry.frame.byte_len());
+                self.resident_bytes = self.resident_bytes.saturating_sub(entry.frame.byte_len());
             }
         }
     }
@@ -267,9 +265,7 @@ impl RamFrameCache {
                 break;
             };
             if let Some(entry) = self.entries.remove(&key) {
-                self.resident_bytes = self
-                    .resident_bytes
-                    .saturating_sub(entry.frame.byte_len());
+                self.resident_bytes = self.resident_bytes.saturating_sub(entry.frame.byte_len());
                 self.stats.evictions = self.stats.evictions.saturating_add(1);
             }
         }
