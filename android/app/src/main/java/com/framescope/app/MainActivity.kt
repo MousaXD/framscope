@@ -47,6 +47,8 @@ class MainActivity : ComponentActivity() {
                     },
                     onCancelInspection = viewModel::cancelInspection,
                     onDismissError = viewModel::clearError,
+                    onPreviousFrame = { viewModel.stepMicroscope(-1) },
+                    onNextFrame = { viewModel.stepMicroscope(1) },
                 )
             }
         }
