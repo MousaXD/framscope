@@ -61,6 +61,24 @@ class MicroscopeTransformMathTest {
     }
 
     @Test
+    fun viewportResizeReclampsExistingTranslation() {
+        val next = MicroscopeTransformMath.applyGesture(
+            current = MicroscopeViewportTransform(scale = 2f, translationX = 100f, translationY = 50f),
+            zoomChange = 1f,
+            panX = 0f,
+            panY = 0f,
+            centroidX = 50f,
+            centroidY = 25f,
+            viewportWidth = 100f,
+            viewportHeight = 50f,
+        )
+
+        assertEquals(2f, next.scale)
+        assertEquals(50f, next.translationX)
+        assertEquals(25f, next.translationY)
+    }
+
+    @Test
     fun zoomLimitsStayInsideProductBounds() {
         val tooLarge = MicroscopeTransformMath.applyGesture(
             current = MicroscopeViewportTransform(scale = 4f),
