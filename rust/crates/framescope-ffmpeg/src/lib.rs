@@ -502,8 +502,7 @@ mod native {
                 average_rate_den: raw.average_rate_den,
                 nominal_rate_num: raw.nominal_rate_num,
                 nominal_rate_den: raw.nominal_rate_den,
-                rotation_degrees: (raw.has_rotation != 0)
-                    .then_some((360 - raw.rotation_degrees).rem_euclid(360)),
+                rotation_degrees: (raw.has_rotation != 0).then_some(raw.rotation_degrees),
             })
         }
 
