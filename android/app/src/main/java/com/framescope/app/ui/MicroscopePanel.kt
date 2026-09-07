@@ -1,12 +1,12 @@
 package com.framescope.app.ui
 
 import android.graphics.Bitmap
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -30,8 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -160,12 +158,12 @@ private fun MicroscopeFrameCard(
                                 }
                             }
                         }
-                        Image(
-                            bitmap = current.bitmap.asImageBitmap(),
+                        MicroscopeZoomableImage(
+                            bitmap = current.bitmap,
                             contentDescription =
                                 "Video frame ${descriptor.frameId + 1} of ${session.frameCount}",
-                            modifier = Modifier.fillMaxWidth(),
-                            contentScale = ContentScale.Fit,
+                            enabled = controlsEnabled,
+                            modifier = Modifier.fillMaxSize(),
                         )
                     }
                 }
@@ -177,9 +175,9 @@ private fun MicroscopeFrameCard(
                     Text(
                         text = if (plan.isDownscaled) {
                             "Display preview ${plan.targetWidth} × ${plan.targetHeight} from authoritative source frame " +
-                                "${plan.sourceWidth} × ${plan.sourceHeight}."
+                                "${plan.sourceWidth} × ${plan.sourceHeight}. Pinch to zoom; pan is enabled only above 1×."
                         } else {
-                            "Display preview uses the authoritative source-frame dimensions."
+                            "Display preview uses the authoritative source-frame dimensions. Pinch to zoom; pan is enabled only above 1×."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
