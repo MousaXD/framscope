@@ -14,7 +14,11 @@ fn fixture(name: &str) -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../build/video-fixtures")
         .join(name);
-    assert!(path.is_file(), "missing generated fixture {}", path.display());
+    assert!(
+        path.is_file(),
+        "missing generated fixture {}",
+        path.display()
+    );
     path
 }
 
@@ -47,7 +51,11 @@ fn decoder_timestamps(path: &Path) -> Vec<Option<i64>> {
     let mut decoder = VideoDecoder::open_path(path).unwrap();
     let mut timestamps = Vec::new();
     while let Some(frame) = decoder.next_frame().unwrap() {
-        timestamps.push(frame.presentation_timestamp.map(|timestamp| timestamp.ticks));
+        timestamps.push(
+            frame
+                .presentation_timestamp
+                .map(|timestamp| timestamp.ticks),
+        );
     }
     timestamps
 }
@@ -82,7 +90,11 @@ fn cfr_index_matches_independent_decoder_pts() {
     let mut persisted = Vec::new();
     index
         .visit_range(FrameId(0), FrameId(12), |entry| {
-            persisted.push(entry.presentation_timestamp.map(|timestamp| timestamp.ticks));
+            persisted.push(
+                entry
+                    .presentation_timestamp
+                    .map(|timestamp| timestamp.ticks),
+            );
             Ok(())
         })
         .unwrap();
@@ -101,12 +113,19 @@ fn vfr_index_preserves_actual_non_uniform_decoded_pts() {
     let mut persisted = Vec::new();
     index
         .visit_range(FrameId(0), FrameId(8), |entry| {
-            persisted.push(entry.presentation_timestamp.map(|timestamp| timestamp.ticks));
+            persisted.push(
+                entry
+                    .presentation_timestamp
+                    .map(|timestamp| timestamp.ticks),
+            );
             Ok(())
         })
         .unwrap();
     assert_eq!(persisted, truth);
-    let ticks = persisted.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+    let ticks = persisted
+        .into_iter()
+        .map(Option::unwrap)
+        .collect::<Vec<_>>();
     let deltas = ticks
         .windows(2)
         .map(|window| window[1] - window[0])
