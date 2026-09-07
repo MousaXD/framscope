@@ -57,14 +57,15 @@ data class MicroscopeSessionSnapshot(
     val canStepPrevious: Boolean,
     val canStepNext: Boolean,
 ) {
-    fun isSane(): Boolean =
-        sessionId > 0L &&
-            frameCount >= 0L &&
-            (currentFrame == null) == (frameCount == 0L) &&
-            (currentFrame == null ||
-                (currentFrame.isSane() && currentFrame.frameId < frameCount)) &&
-            (!canStepPrevious || currentFrame?.frameId?.let { it > 0L } == true) &&
-            (!canStepNext || currentFrame?.frameId?.let { it + 1L < frameCount } == true)
+    fun isSane(): Boolean {
+        if (sessionId <= 0L || frameCount < 0L) return false
+        if ((currentFrame == null) != (frameCount == 0L)) return false
+        val frame = currentFrame ?: return !canStepPrevious && !canStepNext
+        if (!frame.isSane() || frame.frameId >= frameCount) return false
+        val expectedPrevious = frame.frameId > 0L
+        val expectedNext = frame.frameId < frameCount - 1L
+        return canStepPrevious == expectedPrevious && canStepNext == expectedNext
+    }
 }
 
 enum class TimestampSelectionPolicy(
