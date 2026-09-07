@@ -12,14 +12,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtractionSelection {
     CurrentFrame(FrameId),
-    FrameRangeInclusive {
-        start: FrameId,
-        end: FrameId,
-    },
-    TimestampRangeUsInclusive {
-        start_us: i64,
-        end_us: i64,
-    },
+    FrameRangeInclusive { start: FrameId, end: FrameId },
+    TimestampRangeUsInclusive { start_us: i64, end_us: i64 },
     AllFrames,
 }
 
@@ -313,11 +307,7 @@ mod tests {
         let content_id = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed);
         FrameIndex::open_or_create(
             root.join("index.sqlite3"),
-            SourceIdentity::new(
-                123_456,
-                None,
-                Some(format!("extraction-test-{content_id}")),
-            ),
+            SourceIdentity::new(123_456, None, Some(format!("extraction-test-{content_id}"))),
             stream_identity(),
         )
         .unwrap()
@@ -394,7 +384,10 @@ mod tests {
 
         assert_eq!(plan.first_frame, FrameId(2));
         assert_eq!(plan.last_frame, FrameId(3));
-        assert_eq!(plan.frame_ids().collect::<Vec<_>>(), vec![FrameId(2), FrameId(3)]);
+        assert_eq!(
+            plan.frame_ids().collect::<Vec<_>>(),
+            vec![FrameId(2), FrameId(3)]
+        );
 
         drop(index);
         let _ = std::fs::remove_dir_all(root);
