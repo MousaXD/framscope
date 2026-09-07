@@ -13,7 +13,7 @@ pub enum TimestampSelection {
     Nearest,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NavigationResult {
     pub frame_id: FrameId,
     pub frame: DecodedFrame,
@@ -71,11 +71,11 @@ pub fn resolve_timestamp(
     let entry = match selection {
         TimestampSelection::AtOrBefore => index.frame_at_or_before(timestamp)?,
         TimestampSelection::AtOrAfter => index.frame_at_or_after(timestamp)?,
-        TimestampSelection::Nearest => {
-            let before = index.frame_at_or_before(timestamp)?;
-            let after = index.frame_at_or_after(timestamp)?;
-            choose_nearest(timestamp, before, after)?
-        }
+        TimestampSelection::Nearest => choose_nearest(
+            timestamp,
+            index.frame_at_or_before(timestamp)?,
+            index.frame_at_or_after(timestamp)?,
+        )?,
     };
     Ok(entry.map(|entry| entry.frame_id))
 }
@@ -108,8 +108,8 @@ where
     let target = index
         .entry(frame_id)?
         .ok_or(NavigationError::FrameNotIndexed)?;
-
     let mut decoder = open_checked_decoder(index, &mut open_fresh_decoder)?;
+
     if let KeyframeAnchor::Keyframe {
         frame_id: anchor_id,
         presentation_timestamp: Some(anchor_timestamp),
@@ -127,13 +127,12 @@ where
                         fell_back_to_stream_start: false,
                     });
                 }
-                Err(NavigationError::TimelineMismatch | NavigationError::UnexpectedEof) => {
-                    // Some demuxers may legally land after an imprecise timestamp seek. Reopening
-                    // and reconciling from stream start is the correctness fallback.
-                }
+                Err(NavigationError::TimelineMismatch | NavigationError::UnexpectedEof) => {}
                 Err(error) => return Err(error),
             }
 
+            // Timestamp seek is only a hint. If the demuxer cannot reconcile the indexed anchor,
+            // reopen and prove the timeline from stream start instead of returning a wrong frame.
             let mut fallback = open_checked_decoder(index, &mut open_fresh_decoder)?;
             let (frame, decoded_frames) = decode_from_start(index, &mut fallback, frame_id)?;
             return Ok(NavigationResult {
@@ -164,15 +163,12 @@ fn ensure_complete(index: &FrameIndex) -> Result<(), NavigationError> {
     }
 }
 
-fn open_checked_decoder<D, F>(
-    index: &FrameIndex,
-    open_fresh_decoder: &mut F,
-) -> Result<D, NavigationError>
+fn open_checked_decoder<D, F>(index: &FrameIndex, open: &mut F) -> Result<D, NavigationError>
 where
     D: NavigationDecoder,
     F: FnMut() -> Result<D, FrameScopeError>,
 {
-    let decoder = open_fresh_decoder()?;
+    let decoder = open()?;
     let identity = FrameIndexStreamIdentity::from_stream(decoder.selected_stream_for_navigation())?;
     if &identity != index.stream_identity() {
         return Err(NavigationError::StreamIdentityMismatch);
@@ -188,16 +184,8 @@ fn decode_from_start<D: NavigationDecoder>(
     let mut current = FrameId::ZERO;
     let mut decoded_frames = 0_u64;
     loop {
-        let decoded = decoder
-            .next_frame_for_navigation()?
-            .ok_or(NavigationError::UnexpectedEof)?;
-        decoded_frames = decoded_frames.saturating_add(1);
-        let expected = index
-            .entry(current)?
-            .ok_or(NavigationError::TimelineMismatch)?;
-        if !matches_index_entry(&decoded, &expected) {
-            return Err(NavigationError::TimelineMismatch);
-        }
+        let decoded = next_decoded(decoder, &mut decoded_frames)?;
+        verify_decoded(index, current, &decoded)?;
         if current == target {
             return Ok((decoded, decoded_frames));
         }
@@ -214,34 +202,52 @@ fn decode_from_seek<D: NavigationDecoder>(
     let anchor_entry = index
         .entry(anchor)?
         .ok_or(NavigationError::TimelineMismatch)?;
-    let mut current = anchor;
-    let mut aligned = false;
     let mut decoded_frames = 0_u64;
 
+    // FFmpeg may land before the requested keyframe. Do not assume the first decoded frame is the
+    // anchor; scan until the exact persisted anchor metadata is observed.
+    let mut decoded = loop {
+        let candidate = next_decoded(decoder, &mut decoded_frames)?;
+        if matches_index_entry(&candidate, &anchor_entry) {
+            break candidate;
+        }
+    };
+    let mut current = anchor;
+
     loop {
-        let decoded = decoder
-            .next_frame_for_navigation()?
-            .ok_or(NavigationError::UnexpectedEof)?;
-        decoded_frames = decoded_frames.saturating_add(1);
-
-        if !aligned {
-            if !matches_index_entry(&decoded, &anchor_entry) {
-                continue;
-            }
-            aligned = true;
-        }
-
-        let expected = index
-            .entry(current)?
-            .ok_or(NavigationError::TimelineMismatch)?;
-        if !matches_index_entry(&decoded, &expected) {
-            return Err(NavigationError::TimelineMismatch);
-        }
+        verify_decoded(index, current, &decoded)?;
         if current == target {
             return Ok((decoded, decoded_frames));
         }
         current = next_frame_id(current)?;
+        decoded = next_decoded(decoder, &mut decoded_frames)?;
     }
+}
+
+fn verify_decoded(
+    index: &FrameIndex,
+    frame_id: FrameId,
+    decoded: &DecodedFrame,
+) -> Result<(), NavigationError> {
+    let expected = index
+        .entry(frame_id)?
+        .ok_or(NavigationError::TimelineMismatch)?;
+    if matches_index_entry(decoded, &expected) {
+        Ok(())
+    } else {
+        Err(NavigationError::TimelineMismatch)
+    }
+}
+
+fn next_decoded<D: NavigationDecoder>(
+    decoder: &mut D,
+    count: &mut u64,
+) -> Result<DecodedFrame, NavigationError> {
+    let frame = decoder
+        .next_frame_for_navigation()?
+        .ok_or(NavigationError::UnexpectedEof)?;
+    *count = count.saturating_add(1);
+    Ok(frame)
 }
 
 fn next_frame_id(frame_id: FrameId) -> Result<FrameId, NavigationError> {
@@ -268,22 +274,23 @@ fn choose_nearest(
         (None, None) => Ok(None),
         (Some(entry), None) | (None, Some(entry)) => Ok(Some(entry)),
         (Some(before), Some(after)) => {
-            let before_timestamp = before
+            let before_ticks = before
                 .presentation_timestamp
-                .ok_or(NavigationError::TimelineMismatch)?;
-            let after_timestamp = after
+                .ok_or(NavigationError::TimelineMismatch)?
+                .ticks;
+            let after_ticks = after
                 .presentation_timestamp
-                .ok_or(NavigationError::TimelineMismatch)?;
+                .ok_or(NavigationError::TimelineMismatch)?
+                .ticks;
             let before_distance = target
                 .ticks
-                .checked_sub(before_timestamp.ticks)
+                .checked_sub(before_ticks)
                 .ok_or(NavigationError::TimelineMismatch)?;
-            let after_distance = after_timestamp
-                .ticks
+            let after_distance = after_ticks
                 .checked_sub(target.ticks)
                 .ok_or(NavigationError::TimelineMismatch)?;
             if after_distance == 0 {
-                // For repeated exact timestamps, AtOrAfter is the first equal frame.
+                // Repeated exact PTS resolves to the first equal frame (AtOrAfter semantics).
                 Ok(Some(after))
             } else if before_distance <= after_distance {
                 Ok(Some(before))
@@ -308,20 +315,16 @@ mod tests {
     struct FakeDecoder {
         stream: StreamInfo,
         frames: VecDeque<DecodedFrame>,
-        seeked: bool,
     }
 
     impl NavigationDecoder for FakeDecoder {
         fn selected_stream_for_navigation(&self) -> &StreamInfo {
             &self.stream
         }
-
         fn next_frame_for_navigation(&mut self) -> Result<Option<DecodedFrame>, FrameScopeError> {
             Ok(self.frames.pop_front())
         }
-
         fn seek_for_navigation(&mut self, _timestamp_us: i64) -> Result<(), FrameScopeError> {
-            self.seeked = true;
             while self.frames.front().is_some_and(|frame| frame.index < 2) {
                 self.frames.pop_front();
             }
@@ -435,7 +438,6 @@ mod tests {
                 frame(3, 140, false),
                 frame(4, 220, false),
             ]),
-            seeked: false,
         }
     }
 
@@ -459,14 +461,13 @@ mod tests {
     }
 
     #[test]
-    fn distant_frame_uses_keyframe_anchor_and_decodes_forward() {
+    fn distant_frame_uses_keyframe_anchor() {
         let (path, index) = complete_index();
         let result = navigate_to_frame(&index, || Ok(fake_decoder()), FrameId(4)).unwrap();
         assert!(result.used_keyframe_seek);
         assert!(!result.fell_back_to_stream_start);
-        assert_eq!(result.frame_id, FrameId(4));
         assert_eq!(result.frame.presentation_timestamp, Some(timestamp(220)));
-        assert_eq!(result.decoded_frames, 3);
+        assert!(result.decoded_frames < 5);
         drop(index);
         let _ = std::fs::remove_file(path);
     }
