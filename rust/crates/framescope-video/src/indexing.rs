@@ -251,7 +251,7 @@ mod tests {
     use framescope_cache::{FrameIndexOpenDisposition, SourceIdentity};
     use framescope_core::{CodecInfo, MediaDuration, MediaKind, MediaTimestamp, TimeBase};
     use std::collections::VecDeque;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -336,7 +336,7 @@ mod tests {
         ))
     }
 
-    fn open_index(path: &PathBuf) -> FrameIndex {
+    fn open_index(path: &Path) -> FrameIndex {
         let source = SourceIdentity::new(1_000, Some(5), Some("fixture".into()));
         let identity = FrameIndexStreamIdentity::from_stream(&stream()).unwrap();
         let (index, disposition) = FrameIndex::open_or_create(path, source, identity).unwrap();
