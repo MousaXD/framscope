@@ -4,14 +4,13 @@ use super::model::{
 };
 use crate::SourceIdentity;
 use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const META_ROW_ID: i64 = 1;
-const ENTRY_COLUMNS: &str =
-    "frame_index,
+const ENTRY_COLUMNS: &str = "frame_index,
      timestamp_ticks, time_base_num, time_base_den,
      duration_ticks, duration_time_base_num, duration_time_base_den,
      keyframe, corrupt,
@@ -46,7 +45,11 @@ impl FrameIndex {
             fs::create_dir_all(parent)?;
         }
         let existed = path.exists();
-        match Self::try_open(path.clone(), source_identity.clone(), stream_identity.clone()) {
+        match Self::try_open(
+            path.clone(),
+            source_identity.clone(),
+            stream_identity.clone(),
+        ) {
             Ok((index, disposition)) => Ok((
                 index,
                 if existed {
@@ -351,7 +354,9 @@ impl FrameIndex {
              ORDER BY timestamp_ticks {ordering}, frame_index {ordering} LIMIT 1"
         );
         let mut statement = self.connection.prepare_cached(&sql)?;
-        let entry = statement.query_row(params![ticks], decode_entry).optional()?;
+        let entry = statement
+            .query_row(params![ticks], decode_entry)
+            .optional()?;
         self.validate_loaded_entry(entry)
     }
 
@@ -618,12 +623,7 @@ fn decode_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<FrameIndexEntry> {
                     .ok_or(rusqlite::Error::InvalidQuery)?,
                 10,
             )?),
-            presentation_timestamp: decode_timestamp(
-                row.get(11)?,
-                row.get(12)?,
-                row.get(13)?,
-                11,
-            )?,
+            presentation_timestamp: decode_timestamp(row.get(11)?, row.get(12)?, row.get(13)?, 11)?,
         },
         _ => return Err(rusqlite::Error::IntegralValueOutOfRange(9, anchor_kind)),
     };
@@ -658,8 +658,17 @@ fn decode_timestamp(
 #[allow(clippy::type_complexity)]
 fn encode_anchor(
     anchor: &KeyframeAnchor,
-) -> Result<(i64, Option<i64>, Option<i64>, Option<i32>, Option<i32>, Option<i64>), FrameIndexError>
-{
+) -> Result<
+    (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i32>,
+        Option<i32>,
+        Option<i64>,
+    ),
+    FrameIndexError,
+> {
     match anchor {
         KeyframeAnchor::StreamStart => Ok((0, None, None, None, None, None)),
         KeyframeAnchor::Keyframe {
@@ -759,8 +768,7 @@ fn to_sql_u64(value: u64, label: &str) -> Result<i64, FrameIndexError> {
 }
 
 fn from_sql_u64(value: i64, label: &str) -> Result<u64, FrameIndexError> {
-    u64::try_from(value)
-        .map_err(|_| FrameIndexError::InvalidState(format!("{label} is negative")))
+    u64::try_from(value).map_err(|_| FrameIndexError::InvalidState(format!("{label} is negative")))
 }
 
 fn sql_i64_to_u64(value: i64, column: usize) -> rusqlite::Result<u64> {
