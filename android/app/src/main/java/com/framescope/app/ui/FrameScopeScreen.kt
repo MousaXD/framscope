@@ -39,6 +39,9 @@ fun FrameScopeScreen(
     onOpenVideo: () -> Unit,
     onCancelInspection: () -> Unit,
     onDismissError: () -> Unit,
+    onStepMicroscope: (Int) -> Unit,
+    onJumpMicroscopeFrame: (Long) -> Unit,
+    onJumpMicroscopeTimestampUs: (Long) -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -59,7 +62,7 @@ fun FrameScopeScreen(
                 color = MaterialTheme.colorScheme.onBackground,
             )
             Text(
-                text = "Open a video and inspect its real stream metadata and timing.",
+                text = "Open a video and inspect its authoritative presentation timeline frame by frame.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -79,6 +82,14 @@ fun FrameScopeScreen(
                 VideoInspectionState.Inspecting -> BusyCard("Inspecting video in Rust…")
                 VideoInspectionState.Idle -> Unit
             }
+
+            MicroscopePanel(
+                state = state.microscopeState,
+                onStep = onStepMicroscope,
+                onJumpFrame = onJumpMicroscopeFrame,
+                onJumpTimestampUs = onJumpMicroscopeTimestampUs,
+                onDismissError = onDismissError,
+            )
 
             val inspectionActive = state.videoState == VideoInspectionState.Opening ||
                 state.videoState == VideoInspectionState.Inspecting
