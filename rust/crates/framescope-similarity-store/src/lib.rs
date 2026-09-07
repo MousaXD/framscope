@@ -6,7 +6,7 @@
 use framescope_cache::{FrameId, FrameIndexStreamIdentity, SourceIdentity};
 use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
 use framescope_perceptual::{HybridSimilarityEngine, HybridSimilarityPolicy};
-use framescope_similarity::{FrameGroup, SimilarityMode, SIMILARITY_SCALE};
+use framescope_similarity::{FrameGroup, SIMILARITY_SCALE, SimilarityMode};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -330,7 +330,11 @@ impl SimilarityStoreWriter {
         let count = self.next_ordinal;
         self.connection.execute(
             "UPDATE similarity_meta SET state = ?1, group_count = ?2 WHERE id = ?3",
-            params![STATE_COMPLETE, to_sql_u64(count, "group count")?, META_ROW_ID],
+            params![
+                STATE_COMPLETE,
+                to_sql_u64(count, "group count")?,
+                META_ROW_ID
+            ],
         )?;
         self.connection.execute_batch("PRAGMA optimize;")?;
         drop(self.connection);
@@ -393,10 +397,7 @@ impl SimilarityStoreWriter {
         }
         transaction.execute(
             "UPDATE similarity_meta SET group_count = ?1 WHERE id = ?2",
-            params![
-                to_sql_u64(self.next_ordinal, "group count")?,
-                META_ROW_ID
-            ],
+            params![to_sql_u64(self.next_ordinal, "group count")?, META_ROW_ID],
         )?;
         transaction.commit()?;
         self.pending.clear();
@@ -494,8 +495,8 @@ fn decode_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<FrameGroup> {
     let start_duration = decode_duration(row.get(10)?, row.get(11)?, row.get(12)?, 10)?;
     let end_duration = decode_duration(row.get(13)?, row.get(14)?, row.get(15)?, 13)?;
     let floor: i64 = row.get(16)?;
-    let representative_similarity_floor = u16::try_from(floor)
-        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(16, floor))?;
+    let representative_similarity_floor =
+        u16::try_from(floor).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(16, floor))?;
     Ok(FrameGroup {
         representative_frame: FrameId(sql_i64_to_u64(row.get(0)?, 0)?),
         first_frame: FrameId(sql_i64_to_u64(row.get(1)?, 1)?),
@@ -516,8 +517,10 @@ fn decode_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<FrameGroup> {
 }
 
 fn decode_time_base(numerator: i32, denominator: i32, column: usize) -> rusqlite::Result<TimeBase> {
-    TimeBase::new(numerator, denominator)
-        .ok_or(rusqlite::Error::IntegralValueOutOfRange(column, i64::from(numerator)))
+    TimeBase::new(numerator, denominator).ok_or(rusqlite::Error::IntegralValueOutOfRange(
+        column,
+        i64::from(numerator),
+    ))
 }
 
 fn decode_duration(
@@ -558,9 +561,7 @@ fn invalid_group(group: &FrameGroup) -> bool {
         .and_then(|delta| delta.checked_add(1));
     let invalid_duration = |duration: Option<MediaDuration>| {
         duration.is_some_and(|value| {
-            value.ticks <= 0
-                || value.time_base.numerator <= 0
-                || value.time_base.denominator <= 0
+            value.ticks <= 0 || value.time_base.numerator <= 0 || value.time_base.denominator <= 0
         })
     };
     group.first_frame.0 > group.last_frame.0
@@ -616,9 +617,9 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
 }
 
 fn sync_parent(path: &Path) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "store path has no parent")
-    })?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "store path has no parent"))?;
     File::open(parent)?.sync_all()
 }
 
@@ -721,7 +722,9 @@ mod tests {
 
         let mut loaded = None;
         assert_eq!(
-            store.visit_groups(&key, |value| loaded = Some(value)).unwrap(),
+            store
+                .visit_groups(&key, |value| loaded = Some(value))
+                .unwrap(),
             SimilarityStoreLoad::Reused { group_count: 1 }
         );
         assert_eq!(loaded, Some(expected));
@@ -744,7 +747,9 @@ mod tests {
 
         let mut loaded = None;
         assert_eq!(
-            store.visit_groups(&key, |value| loaded = Some(value)).unwrap(),
+            store
+                .visit_groups(&key, |value| loaded = Some(value))
+                .unwrap(),
             SimilarityStoreLoad::Reused { group_count: 1 }
         );
         assert_eq!(loaded, Some(original));
@@ -758,7 +763,9 @@ mod tests {
         let key = SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
         let mut writer = store.begin(&key).unwrap();
         for id in 0..20_000_u64 {
-            writer.append(&group(id, id, i64::try_from(id).unwrap())).unwrap();
+            writer
+                .append(&group(id, id, i64::try_from(id).unwrap()))
+                .unwrap();
         }
         assert_eq!(writer.finish().unwrap(), 20_000);
 
