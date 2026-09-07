@@ -50,15 +50,9 @@ impl SimilarityScore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimilarityError {
     InvalidThreshold(u16),
-    DimensionMismatch {
-        left: (u32, u32),
-        right: (u32, u32),
-    },
+    DimensionMismatch { left: (u32, u32), right: (u32, u32) },
     MissingTimestamp(FrameId),
-    NonContiguousFrameIds {
-        previous: FrameId,
-        current: FrameId,
-    },
+    NonContiguousFrameIds { previous: FrameId, current: FrameId },
 }
 
 impl std::fmt::Display for SimilarityError {
@@ -129,10 +123,10 @@ impl SimilarityEngine {
                 let pixel_count = u128::from(left.width) * u128::from(left.height);
 
                 for y in 0..height {
-                    let left_row = &left.pixels()
-                        [y * left.stride_bytes..y * left.stride_bytes + width * 4];
-                    let right_row = &right.pixels()
-                        [y * right.stride_bytes..y * right.stride_bytes + width * 4];
+                    let left_row =
+                        &left.pixels()[y * left.stride_bytes..y * left.stride_bytes + width * 4];
+                    let right_row =
+                        &right.pixels()[y * right.stride_bytes..y * right.stride_bytes + width * 4];
                     for (left_px, right_px) in
                         left_row.chunks_exact(4).zip(right_row.chunks_exact(4))
                     {
@@ -289,8 +283,13 @@ mod tests {
     use framescope_core::{MediaTimestamp, TimeBase};
 
     fn rgba(value: u8) -> OwnedRgbaFrame {
-        OwnedRgbaFrame::new(2, 1, 8, vec![value, value, value, 255, value, value, value, 255])
-            .unwrap()
+        OwnedRgbaFrame::new(
+            2,
+            1,
+            8,
+            vec![value, value, value, 255, value, value, value, 255],
+        )
+        .unwrap()
     }
 
     fn entry(id: u64, ticks: i64) -> FrameIndexEntry {
