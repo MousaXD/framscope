@@ -153,6 +153,48 @@ class MicroscopeSessionController(
         }
     }
 
+    fun exportCurrentFrame(
+        outputFd: Int,
+        operationId: Long,
+        format: FrameExportFormat,
+        jpegQuality: Int,
+    ): NativeFrameExport {
+        val target = synchronized(stateLock) { snapshot }
+            ?: return noSessionExportFailure()
+        val requestRevision = revision.get()
+        val expectedFrameId = target.currentFrame?.frameId
+            ?: return NativeFrameExport.Failure(
+                code = "no_frames",
+                message = "The current microscope session contains no indexed frames.",
+                engine = currentEngine(),
+            )
+
+        val result = nativeBridge.exportCurrentMicroscopeFrame(
+            sessionId = target.sessionId,
+            outputFd = outputFd,
+            operationId = operationId,
+            format = format,
+            jpegQuality = jpegQuality,
+        )
+        if (!isStillCurrent(requestRevision, target.sessionId, expectedFrameId)) {
+            return staleExportFailure(result.engineOrNull())
+        }
+        return when (result) {
+            is NativeFrameExport.Failure -> result
+            is NativeFrameExport.Success -> {
+                if (
+                    result.export.sessionId != target.sessionId ||
+                    result.export.frameId != expectedFrameId ||
+                    result.export.format != format
+                ) {
+                    exportIdentityFailure(result.engine)
+                } else {
+                    result
+                }
+            }
+        }
+    }
+
     fun closeCurrent(): Boolean {
         invalidateRevision()
         val sessionId = synchronized(stateLock) {
@@ -303,6 +345,29 @@ class MicroscopeSessionController(
         code = "presentation_identity_mismatch",
         message = "Prepared or copied RGBA metadata does not match the authoritative microscope target.",
     )
+
+    private fun noSessionExportFailure(): NativeFrameExport.Failure = NativeFrameExport.Failure(
+        code = "session_not_found",
+        message = "No microscope session is currently open.",
+        engine = currentEngine(),
+    )
+
+    private fun staleExportFailure(engine: String?): NativeFrameExport.Failure = NativeFrameExport.Failure(
+        code = "stale_result",
+        message = "A newer microscope request superseded this frame export result.",
+        engine = engine,
+    )
+
+    private fun exportIdentityFailure(engine: String?): NativeFrameExport.Failure = NativeFrameExport.Failure(
+        code = "export_identity_mismatch",
+        message = "Native export metadata does not match the authoritative microscope target.",
+        engine = engine,
+    )
+
+    private fun NativeFrameExport.engineOrNull(): String? = when (this) {
+        is NativeFrameExport.Success -> engine
+        is NativeFrameExport.Failure -> engine
+    }
 
     private companion object {
         const val TERMINAL_REVISION = Long.MIN_VALUE
