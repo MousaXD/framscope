@@ -142,8 +142,8 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
-            r#"\"message\":\"failed to serialize microscope response\"}"#,
+            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
+            r#""message":"failed to serialize microscope response"}"#,
         )
         .into()
     })
