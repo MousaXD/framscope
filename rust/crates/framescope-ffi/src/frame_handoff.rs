@@ -4,9 +4,9 @@ use jni::JNIEnv;
 use jni::objects::{JByteBuffer, JClass};
 use jni::sys::{jint, jlong, jstring};
 use serde::{Deserialize, Serialize};
-use std::io;
 #[cfg(unix)]
 use std::fs::File;
+use std::io;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -295,13 +295,8 @@ fn export_current_frame(
         return Err(cancelled_export());
     }
 
-    let frame = OwnedRgbaFrame::new(
-        prepared.width,
-        prepared.height,
-        prepared.stride_bytes,
-        rgba,
-    )
-    .map_err(|error| ExportFailure::new("frame_error", error.to_string()))?;
+    let frame = OwnedRgbaFrame::new(prepared.width, prepared.height, prepared.stride_bytes, rgba)
+        .map_err(|error| ExportFailure::new("frame_error", error.to_string()))?;
     let report = encode_to_output_fd(output_fd, &frame, format)?;
     Ok(ExportedFrameDetails {
         session_id,
@@ -379,7 +374,10 @@ fn export_format_name(format: ExtractionImageFormat) -> &'static str {
 }
 
 fn cancelled_export() -> ExportFailure {
-    ExportFailure::new("cancelled", "frame export was cancelled before output delivery")
+    ExportFailure::new(
+        "cancelled",
+        "frame export was cancelled before output delivery",
+    )
 }
 
 fn copy_export_failure(error: microscope::MicroscopeFailure) -> ExportFailure {
@@ -528,8 +526,14 @@ mod tests {
             parse_export_format(EXPORT_FORMAT_WEBP_LOSSLESS, 0).unwrap(),
             ExtractionImageFormat::WebPLossless
         );
-        assert_eq!(parse_export_format(EXPORT_FORMAT_JPEG, 0).unwrap_err().code, "invalid_request");
-        assert_eq!(parse_export_format(99, 92).unwrap_err().code, "invalid_request");
+        assert_eq!(
+            parse_export_format(EXPORT_FORMAT_JPEG, 0).unwrap_err().code,
+            "invalid_request"
+        );
+        assert_eq!(
+            parse_export_format(99, 92).unwrap_err().code,
+            "invalid_request"
+        );
     }
 
     #[test]
@@ -559,8 +563,8 @@ mod tests {
             .unwrap();
         let frame = presentation().pixels;
 
-        let report = encode_to_output_fd(file.as_raw_fd(), &frame, ExtractionImageFormat::Png)
-            .unwrap();
+        let report =
+            encode_to_output_fd(file.as_raw_fd(), &frame, ExtractionImageFormat::Png).unwrap();
         assert!(report.byte_len > 8);
 
         // The JNI layer owns only a duplicate. The caller's descriptor must remain valid.
