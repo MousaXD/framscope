@@ -3,12 +3,23 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=FRAMESCOPE_FFMPEG_ROOT");
+    println!("cargo:rerun-if-changed=native/framescope_ffmpeg_shim.c");
+    println!("cargo:rustc-check-cfg=cfg(framescope_ffmpeg_native)");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS is set by Cargo");
-    if target_os != "android" {
+    let use_system_ffmpeg = env::var_os("CARGO_FEATURE_SYSTEM_FFMPEG").is_some();
+
+    if target_os == "android" {
+        build_android();
         return;
     }
 
+    if use_system_ffmpeg {
+        build_system();
+    }
+}
+
+fn build_android() {
     let target_arch =
         env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH is set by Cargo");
     if target_arch != "aarch64" {
@@ -32,6 +43,8 @@ fn main() {
     require(&root, "lib/libavutil.a");
     require(&root, "lib/libswscale.a");
 
+    compile_shim(Some(&root.join("include")));
+
     println!(
         "cargo:rustc-link-search=native={}",
         root.join("lib").display()
@@ -43,6 +56,31 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=m");
     println!("cargo:rustc-link-lib=dylib=dl");
     println!("cargo:rustc-link-lib=dylib=log");
+    println!("cargo:rustc-cfg=framescope_ffmpeg_native");
+}
+
+fn build_system() {
+    compile_shim(None);
+    println!("cargo:rustc-link-lib=dylib=avformat");
+    println!("cargo:rustc-link-lib=dylib=avcodec");
+    println!("cargo:rustc-link-lib=dylib=swscale");
+    println!("cargo:rustc-link-lib=dylib=avutil");
+    println!("cargo:rustc-link-lib=dylib=m");
+    println!("cargo:rustc-link-lib=dylib=dl");
+    println!("cargo:rustc-cfg=framescope_ffmpeg_native");
+}
+
+fn compile_shim(include: Option<&Path>) {
+    let mut build = cc::Build::new();
+    build
+        .file("native/framescope_ffmpeg_shim.c")
+        .warnings(true)
+        .flag_if_supported("-Werror=implicit-function-declaration")
+        .flag_if_supported("-Werror=incompatible-pointer-types");
+    if let Some(include) = include {
+        build.include(include);
+    }
+    build.compile("framescope_ffmpeg_shim");
 }
 
 fn require(root: &Path, relative: &str) {
