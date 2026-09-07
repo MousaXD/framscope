@@ -105,8 +105,8 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeInspectVide
     _class: JClass,
     fd: jint,
 ) -> jstring {
-    let json = catch_unwind(AssertUnwindSafe(|| response_json(fd)))
-        .unwrap_or_else(|_| panic_json());
+    let json =
+        catch_unwind(AssertUnwindSafe(|| response_json(fd))).unwrap_or_else(|_| panic_json());
     to_jstring(&mut env, &json)
 }
 
