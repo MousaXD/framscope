@@ -33,6 +33,48 @@ data class InspectedVideo(
     val engine: String,
 )
 
+data class FrameDetails(
+    val frameId: Long,
+    val timestampTicks: Long?,
+    val timestampUs: Long?,
+    val timeBaseNumerator: Int,
+    val timeBaseDenominator: Int,
+    val durationTicks: Long?,
+    val keyframe: Boolean,
+    val corrupt: Boolean,
+) {
+    fun isSane(): Boolean =
+        frameId >= 0L &&
+            timeBaseNumerator > 0 &&
+            timeBaseDenominator > 0 &&
+            (durationTicks == null || durationTicks > 0L)
+}
+
+data class MicroscopeSessionSnapshot(
+    val sessionId: Long,
+    val frameCount: Long,
+    val currentFrame: FrameDetails?,
+    val canStepPrevious: Boolean,
+    val canStepNext: Boolean,
+) {
+    fun isSane(): Boolean =
+        sessionId > 0L &&
+            frameCount >= 0L &&
+            (currentFrame == null) == (frameCount == 0L) &&
+            (currentFrame == null ||
+                (currentFrame.isSane() && currentFrame.frameId < frameCount)) &&
+            (!canStepPrevious || currentFrame?.frameId?.let { it > 0L } == true) &&
+            (!canStepNext || currentFrame?.frameId?.let { it + 1L < frameCount } == true)
+}
+
+enum class TimestampSelectionPolicy(
+    val nativeValue: Int,
+) {
+    AtOrBefore(0),
+    AtOrAfter(1),
+    Nearest(2),
+}
+
 sealed interface NativeInspection {
     data class Success(
         val metadata: VideoMetadata,
@@ -44,6 +86,19 @@ sealed interface NativeInspection {
         val message: String,
         val engine: String?,
     ) : NativeInspection
+}
+
+sealed interface NativeMicroscope {
+    data class Success(
+        val session: MicroscopeSessionSnapshot,
+        val engine: String,
+    ) : NativeMicroscope
+
+    data class Failure(
+        val code: String,
+        val message: String,
+        val engine: String?,
+    ) : NativeMicroscope
 }
 
 enum class InspectionProgress {
