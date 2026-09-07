@@ -1,46 +1,46 @@
 # FrameScope
 
-FrameScope is an open-source Android application for precise video-frame inspection. It is intentionally local-first: videos stay on the device, the app has no backend, and the normal application path makes no network requests.
+FrameScope is an open-source Android application for precise, local-first video-frame inspection. Videos stay on the device. The normal app path has no backend, telemetry, analytics, ads, accounts, or network requirement.
 
-This repository has completed the **Phase 2 video-engine foundation**. Android can select a local video through the Storage Access Framework, pass its file descriptor through JNI, and inspect/decode it with a Rust-owned FFmpeg backend without copying the whole source into RAM.
+The repository has completed the Phase 2 video engine and implemented the Phase 3 frame-index/navigation/cache stack. Phase 3 is currently undergoing its final integration acceptance review before Phase 4 begins.
 
-## Implemented through Phase 2
+## Implemented
 
-- Kotlin + Jetpack Compose Android application.
-- `Compose -> ViewModel -> repository -> JNI -> Rust video engine -> FFmpeg` dependency flow.
-- Android `OpenDocument` picker restricted to local `video/*` content.
+- Kotlin + Jetpack Compose Android foundation.
+- `Compose -> ViewModel -> repository -> JNI -> Rust -> FFmpeg` dependency flow.
+- Local video selection through Android Storage Access Framework.
 - No broad storage permission and no `INTERNET` permission.
-- Application-scoped `ContentResolver`; blocking descriptor/native work runs on `Dispatchers.IO`.
-- Stale-result suppression and operation-scoped native cancellation.
-- Borrowed Android `ParcelFileDescriptor` ownership with an immediate native `dup`; Android closes the original and FFmpeg closes only its duplicate.
-- Rust workspace with `framescope-core`, `framescope-video`, `framescope-cache`, `framescope-ffi`, and `framescope-ffmpeg`.
+- Blocking descriptor/native work kept off the Android main thread.
+- Borrowed Android `ParcelFileDescriptor` with immediate native `dup`; Android and Rust/FFmpeg close only what they own.
 - Pinned source-built FFmpeg 9.0.1 for Android API 26+ / `arm64-v8a`.
-- Built-in software decoders for H.264, HEVC/H.265, VP9, and AV1.
-- MP4/MOV, Matroska/WebM, and AVI demuxer support in the Android FFmpeg build.
-- Deterministic video-stream selection with explicit override support.
-- Sequential frame decoding with exact FFmpeg presentation timestamps and stream time bases.
+- H.264, HEVC/H.265, VP9, and AV1 software video decoding.
+- MP4/MOV, Matroska/WebM, and AVI demuxing in the Android FFmpeg build.
+- Deterministic video-stream selection.
+- Sequential decoding with FFmpeg presentation timestamps and exact stream time bases.
 - Variable-frame-rate-safe timing. Frame time is never derived from `frame_index / fps`.
-- Foundational timestamp/keyframe seeking with decoder flush and decode epochs.
-- Rotation, dimensions, duration, codec/container, stream counts, and pixel-format metadata.
-- Typed malformed/corrupt/unsupported/cancellation errors instead of media-triggered panics crossing JNI.
-- Deterministic generated video fixtures plus real decoder integration tests in CI.
-- Android APK verification for the Rust JNI library, ABI, and storage/network permission invariants.
+- Cancellation, stable EOF, malformed-media errors, seek/decoder flush foundations, and explicit FFmpeg ownership.
+- Persistent SQLite frame index with schema versioning and explicit incomplete/complete lifecycle.
+- Persistent global `FrameId` separate from decoder-local frame counters and presentation time.
+- Path-independent source identity with bounded BLAKE3 sampled content fingerprinting for reusable derived state.
+- Exact frame/timestamp lookup and persisted safe earlier keyframe anchors.
+- Indexed random navigation using seek -> reconcile -> decode-forward semantics.
+- Rust-owned full-resolution RGBA frame boundary; reusable FFmpeg `AVFrame` memory never escapes native lifetime.
+- Byte-bounded RAM hot-frame cache weighted by actual pixel bytes.
+- Byte-bounded compressed JPEG/WebP disk proxy cache.
+- Typed separation between full source-quality RGBA and lossy preview proxies.
+- Preview hierarchy: RAM full frame -> disk proxy -> authoritative indexed source decode.
+- Source invalidation, corrupt-cache recovery, atomic proxy writes, and cache-deletion/I/O fallback behavior.
+- Deterministic generated media fixtures, real FFmpeg decoder tests, Phase 3 stress contracts, Android lint/tests, native linking checks, and APK verification in GitHub Actions.
 
 ## Not implemented yet
 
-These belong to later phases and are intentionally absent from Phase 2:
+These are intentionally deferred to later phases:
 
-- full persistent frame/timestamp indexing;
-- RAM hot-frame cache and compressed disk-frame cache;
-- perceptual hashing, SSIM, or duplicate grouping;
-- microscope timeline/frame-navigation UI;
-- frame extraction/export;
+- perceptual similarity / SSIM and duplicate or near-duplicate grouping;
+- frame-microscope navigation UI and timeline experience;
+- PNG/JPEG/WebP frame extraction/export workflows;
 - hardware MediaCodec acceleration;
-- production signing/store release automation.
-
-FrameScope follows one product rule:
-
-> A feature belongs in FrameScope when it improves inspecting, navigating, comparing, or extracting video frames.
+- production signing and public GitHub Release automation.
 
 ## Architecture
 
@@ -55,163 +55,136 @@ NativeBridge / JNI
         ↓
 framescope-ffi
         ↓
-framescope-video + framescope-core
-        ↓
-framescope-ffmpeg
-        ↓
+framescope-video ───────── framescope-cache
+        ↓                         ↑
+framescope-ffmpeg                 │
+        ↓                 index + bounded caches
 FFmpeg
 ```
 
-`framescope-cache` currently contains source/cache identity contracts only. Frame payload caching remains Phase 3 work.
+Android owns UI/lifecycle/SAF and the original descriptor. Rust owns timing semantics, stream selection, persistent frame identity, index/navigation/cache policy, and FFmpeg resources.
 
-Android owns lifecycle, UI, Storage Access Framework access, and the original descriptor. Rust owns video-engine metadata/timing semantics and FFmpeg resources. Kotlin validates and presents Rust metadata but does not independently parse media timing/container metadata.
+See [`docs/architecture.md`](docs/architecture.md), [`docs/video-engine.md`](docs/video-engine.md), [`docs/frame-index.md`](docs/frame-index.md), and [`docs/ffmpeg-android.md`](docs/ffmpeg-android.md).
 
-See [`docs/architecture.md`](docs/architecture.md), [`docs/video-engine.md`](docs/video-engine.md), and [`docs/android-video-bridge.md`](docs/android-video-bridge.md).
+## Timing model
 
-## Timestamp model
+Presentation timestamps are the media clock.
 
-Presentation timestamps are the authority.
+Each decoded frame can carry:
 
-Each decoded frame may expose:
+- FFmpeg `best_effort_timestamp` with PTS fallback;
+- exact selected-stream rational time base;
+- checked integer microsecond conversion;
+- optional frame duration;
+- decoder-local index scoped to a decode epoch.
 
-- FFmpeg best-effort PTS;
-- the exact selected-stream time base;
-- a checked integer microsecond convenience conversion;
-- frame duration when FFmpeg exposes it;
-- a sequential frame `index` scoped to a `decode_epoch`.
+Phase 3 separately assigns persistent `FrameId`s in presentation order. Neither identity is used to derive time. Average/nominal FPS values are informational only.
 
-The frame index is identity/navigation data, not a clock. Average/nominal FPS values are informational only.
+## Phase 3 navigation and caching
 
-The Android inspection bridge examines only a bounded prefix of decoded frames. If differing PTS intervals are observed it can report VFR. A constant prefix does not prove a whole file is CFR, so the bridge leaves whole-source CFR status unknown rather than making a false claim.
+Random access uses persisted keyframe anchors:
+
+```text
+FrameId
+  ↓
+index lookup
+  ↓
+safe earlier keyframe
+  ↓
+FFmpeg seek + decoder flush
+  ↓
+reconcile actual presentation metadata
+  ↓
+decode forward
+  ↓
+requested frame
+```
+
+The first decoded frame after seek is never assumed to be the requested frame. If a seek cannot be reconciled precisely, FrameScope falls back to a fresh verified decode path rather than returning the wrong frame.
+
+Full-quality requests use only RAM or authoritative source decode. Lossy disk proxies can never satisfy extraction/source-quality APIs.
+
+## Large-video invariant
+
+FrameScope is designed so video duration does not imply unbounded memory usage:
+
+- the source is streamed rather than read in full;
+- indexing persists bounded metadata batches;
+- full-resolution cache is bounded by bytes;
+- disk proxy cache is bounded by bytes;
+- caches are disposable and the source remains authoritative;
+- random access uses keyframe anchors instead of routinely decoding from frame zero.
 
 ## Android / native baseline
 
 - **minSdk:** 26
 - **compileSdk / targetSdk:** 36
-- **ABI:** `arm64-v8a` only
-- **NDK:** r27d (`27.3.13750724`)
-- **JVM:** Java 17 bytecode
-- **Android Rust build toolchain:** Rust 1.86.0 + cargo-ndk 4.1.2
-- **Workspace host MSRV:** Rust 1.85
+- **ABI:** `arm64-v8a`
+- **NDK:** `27.3.13750724`
+- **Java:** 17
+- **Android Rust:** 1.86.0
+- **Host Rust MSRV:** 1.85
 - **FFmpeg:** 9.0.1, official source archive pinned by SHA-256
 
-The Android FFmpeg build is static and source-built. The APK contains `lib/arm64-v8a/libframescope_ffi.so`; it does not ship separate dynamic `libav*.so` files.
+## Build
 
-See [`docs/ffmpeg-android.md`](docs/ffmpeg-android.md) for source provenance, configure scope, licensing, and reproduction details.
-
-## Local requirements
-
-- JDK 17+
-- Gradle 8.13
-- Android SDK Platform 36 / Build Tools 36.x
-- Android NDK `27.3.13750724`
-- Rust with `aarch64-linux-android`
-- `cargo-ndk`
-- `curl`, `sha256sum`, `tar`, and `make` for the FFmpeg source build
-
-Typical Rust setup:
-
-```bash
-rustup toolchain install 1.86.0 --target aarch64-linux-android
-cargo +1.86.0 install cargo-ndk --locked --version 4.1.2
-```
-
-Set `ANDROID_HOME`/`ANDROID_SDK_ROOT` normally and expose the pinned NDK through `ANDROID_NDK_HOME` or its standard SDK path.
-
-## Build the Android native library
-
-From the repository root:
+Native Android library:
 
 ```bash
 ./scripts/build-rust.sh
 ```
 
-This creates or reuses a verified source-built FFmpeg prefix and builds the Rust JNI library with cargo-ndk.
-
-## Build Android
+Android tests/lint/debug APK:
 
 ```bash
 cd android
 gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
 ```
 
-The debug APK is produced at:
+Debug APK output:
 
 ```text
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The APK must contain:
-
-```text
-lib/arm64-v8a/libframescope_ffi.so
-```
-
-## Complete local verification
+Complete local verification:
 
 ```bash
 ./scripts/verify.sh
 ```
 
-For the real host decoder fixture suite, install FFmpeg development libraries and run:
-
-```bash
-./scripts/generate-video-fixtures.sh
-./scripts/verify-video-fixtures.py
-cd rust
-cargo clippy -p framescope-video --features system-ffmpeg --all-targets -- -D warnings
-cargo test -p framescope-video --features system-ffmpeg
-```
-
-GitHub CI runs the host Rust gate, real video fixtures/decoder tests, the pinned Android FFmpeg/Rust native build, Android unit tests/lint/APK assembly, and native packaging/privacy verification. See [`docs/ci.md`](docs/ci.md).
-
-## Supported Phase 2 media surface
-
-Android software video decoders:
-
-- H.264
-- HEVC/H.265
-- VP9
-- AV1
-
-Android demuxers:
-
-- MP4/MOV family
-- Matroska/WebM family
-- AVI
-
-Audio streams are discoverable but audio decoding/playback is not a Phase 2 feature.
+GitHub Actions is the canonical heavy verifier and additionally runs deterministic real-media FFmpeg/Phase 3 contracts.
 
 ## Privacy and security
 
 FrameScope:
 
-- processes selected videos locally;
-- has no backend, accounts, analytics, ads, telemetry, or remote API;
-- declares no Android network permission;
+- processes selected media locally;
 - requests no broad filesystem permission;
-- accepts selected content through Android SAF rather than filesystem-path conversion;
-- does not load an entire source video into RAM;
+- declares no Android network permission;
+- never converts `content://` URIs into fake filesystem paths;
+- does not load an entire selected video into RAM;
+- treats media, indexes, and cache files as untrusted/rebuildable input;
 - catches panics at the JNI boundary and maps ordinary media failures to typed errors;
-- keeps generated FFmpeg/native build state out of version control.
+- keeps FFmpeg/native generated build state out of version control.
 
-See [`SECURITY.md`](SECURITY.md) for reporting guidance.
+See [`SECURITY.md`](SECURITY.md).
 
 ## Roadmap
 
 1. Phase 1: Foundation. **Complete.**
-2. Phase 2: Video engine. **Complete / integration acceptance.**
-3. Phase 3: Frame indexing and caching.
+2. Phase 2: Video engine. **Complete.**
+3. Phase 3: Frame indexing and caching. **Implemented, final acceptance in progress.**
 4. Phase 4: Visual similarity and duplicate grouping.
 5. Phase 5: Frame microscope UI.
 6. Phase 6: Frame extraction.
-7. Phase 7: Production hardening and releases.
+7. Phase 7: Production hardening and GitHub releases.
 
 See [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Contributing
 
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) before contributing. Phase boundaries are intentional: avoid adding later-phase features before their architecture is ready.
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Phase boundaries are intentional: later-phase features should consume the accepted timing/index/navigation contracts rather than replacing them.
 
 ## License
 
