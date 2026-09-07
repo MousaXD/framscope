@@ -163,6 +163,14 @@ private fun MicroscopeFrameCard(
                             contentDescription =
                                 "Video frame ${descriptor.frameId + 1} of ${session.frameCount}",
                             enabled = controlsEnabled,
+                            swipeEnabled = controlsEnabled &&
+                                (session.canStepPrevious || session.canStepNext),
+                            onSwipe = { direction ->
+                                when {
+                                    direction < 0 && session.canStepPrevious -> onStep(-1)
+                                    direction > 0 && session.canStepNext -> onStep(1)
+                                }
+                            },
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -175,9 +183,9 @@ private fun MicroscopeFrameCard(
                     Text(
                         text = if (plan.isDownscaled) {
                             "Display preview ${plan.targetWidth} × ${plan.targetHeight} from authoritative source frame " +
-                                "${plan.sourceWidth} × ${plan.sourceHeight}. Pinch to zoom; pan is enabled only above 1×."
+                                "${plan.sourceWidth} × ${plan.sourceHeight}. Pinch to zoom; pan is enabled only above 1×. Swipe at 1× to step one frame."
                         } else {
-                            "Display preview uses the authoritative source-frame dimensions. Pinch to zoom; pan is enabled only above 1×."
+                            "Display preview uses the authoritative source-frame dimensions. Pinch to zoom; pan is enabled only above 1×. Swipe at 1× to step one frame."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
