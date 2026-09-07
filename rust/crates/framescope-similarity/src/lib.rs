@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn representative_check_prevents_transitive_chain_drift() {
         let mut grouper = FrameGrouper::new(SimilarityMode::LumaMeanAbsolute {
-            minimum_similarity: 9_600,
+            minimum_similarity: 9_700,
         })
         .unwrap();
 
