@@ -1,4 +1,6 @@
-use framescope_cache::{FrameId, FrameIndex, FrameIndexEntry, FrameIndexError, FrameIndexLifecycle};
+use framescope_cache::{
+    FrameId, FrameIndex, FrameIndexEntry, FrameIndexError, FrameIndexLifecycle,
+};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +129,9 @@ fn complete_frame_count(index: &FrameIndex) -> Result<u64, MicroscopeNavigationE
     if status.lifecycle != FrameIndexLifecycle::Complete {
         return Err(MicroscopeNavigationError::IncompleteIndex);
     }
-    let count = status.frame_count.ok_or(MicroscopeNavigationError::EmptyIndex)?;
+    let count = status
+        .frame_count
+        .ok_or(MicroscopeNavigationError::EmptyIndex)?;
     if count == 0 {
         return Err(MicroscopeNavigationError::EmptyIndex);
     }
@@ -199,7 +203,10 @@ mod tests {
 
     fn temp_path(label: &str) -> PathBuf {
         let id = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("framescope-microscope-{label}-{}-{id}.sqlite3", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "framescope-microscope-{label}-{}-{id}.sqlite3",
+            std::process::id()
+        ))
     }
 
     fn entry(id: u64, ticks: i64, duration: i64) -> FrameIndexEntry {
