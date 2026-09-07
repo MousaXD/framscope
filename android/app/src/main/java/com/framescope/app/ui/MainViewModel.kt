@@ -170,7 +170,7 @@ class MainViewModel(
     }
 
     fun stepMicroscope(delta: Int) {
-        if (delta == 0) return
+        if (delta !in setOf(-1, 1)) return
         navigateMicroscope { repository.stepMicroscope(delta) }
     }
 
@@ -211,19 +211,28 @@ class MainViewModel(
     }
 
     fun clearError() {
+        var closeMicroscopeSession = false
         _uiState.update { state ->
+            val microscopeState = when (val microscope = state.microscopeState) {
+                is MicroscopeUiState.Error -> {
+                    if (microscope.session != null) {
+                        closeMicroscopeSession = true
+                    }
+                    MicroscopeUiState.Idle
+                }
+                else -> microscope
+            }
             state.copy(
                 videoState = if (state.videoState is VideoInspectionState.Error) {
                     VideoInspectionState.Idle
                 } else {
                     state.videoState
                 },
-                microscopeState = if (state.microscopeState is MicroscopeUiState.Error) {
-                    MicroscopeUiState.Idle
-                } else {
-                    state.microscopeState
-                },
+                microscopeState = microscopeState,
             )
+        }
+        if (closeMicroscopeSession) {
+            invalidateMicroscopeWork(closeSession = true)
         }
     }
 
