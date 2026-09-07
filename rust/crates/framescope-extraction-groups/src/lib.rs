@@ -58,7 +58,9 @@ impl<'a> GroupRepresentativeCursor<'a> {
 
         let target = match self.previous_representative {
             None => self.navigator.group_containing(FrameId::ZERO)?,
-            Some(previous) => self.navigator.adjacent_group(previous, GroupDirection::Next)?,
+            Some(previous) => self
+                .navigator
+                .adjacent_group(previous, GroupDirection::Next)?,
         };
         validate_target(&target, self.emitted, self.group_count)?;
         if let Some(previous) = self.previous_representative {
@@ -71,10 +73,9 @@ impl<'a> GroupRepresentativeCursor<'a> {
         }
 
         self.previous_representative = Some(target.representative_frame);
-        self.emitted = self
-            .emitted
-            .checked_add(1)
-            .ok_or_else(|| GroupRepresentativeError::InvalidNavigation("group ordinal overflow".into()))?;
+        self.emitted = self.emitted.checked_add(1).ok_or_else(|| {
+            GroupRepresentativeError::InvalidNavigation("group ordinal overflow".into())
+        })?;
         Ok(Some(target))
     }
 
@@ -238,12 +239,9 @@ mod tests {
                 NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
             )),
         );
-        let (mut index, _) = FrameIndex::open_or_create(
-            root.join("index.sqlite3"),
-            source,
-            stream_identity(),
-        )
-        .unwrap();
+        let (mut index, _) =
+            FrameIndex::open_or_create(root.join("index.sqlite3"), source, stream_identity())
+                .unwrap();
         let entries: Vec<_> = (0..frame_count).map(entry).collect();
         index.append_batch(&entries).unwrap();
         index.mark_complete().unwrap();
