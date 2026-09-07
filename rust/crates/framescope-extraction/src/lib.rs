@@ -81,7 +81,7 @@ impl ExtractionPlan {
         if frame_id.0 < self.first_frame.0 || frame_id.0 > self.last_frame.0 {
             return false;
         }
-        (frame_id.0 - self.first_frame.0).is_multiple_of(self.stride_frames.get())
+        (frame_id.0 - self.first_frame.0) % self.stride_frames.get() == 0
     }
 
     /// Visit planned frame identities without allocating a video-wide selection vector.
