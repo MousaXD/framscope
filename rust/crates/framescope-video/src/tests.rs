@@ -32,7 +32,7 @@ fn hdlr_video() -> Vec<u8> {
 
 fn tkhd(width: u32, height: u32, rotation: i32) -> Vec<u8> {
     let mut p = vec![0u8; 84];
-    let (a, b, c, d) = match rotation {
+    let (a, b, c, d): (i32, i32, i32, i32) = match rotation {
         90 => (0i32, 0x10000, -0x10000, 0),
         180 => (-0x10000, 0, 0, -0x10000),
         270 => (0, -0x10000, 0x10000, 0),
