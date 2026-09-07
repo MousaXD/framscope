@@ -21,7 +21,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -111,12 +113,13 @@ private fun MicroscopeFrameCard(
     onJumpTimestampUs: (Long) -> Unit,
 ) {
     val descriptor = frame.descriptor
-    val preview by produceState<MicroscopePreviewState>(
-        initialValue = MicroscopePreviewState.Loading,
-        key1 = frame,
-    ) {
-        value = withContext(Dispatchers.Default) {
-            frame.toBoundedPreview()
+    val preview by key(frame) {
+        produceState<MicroscopePreviewState>(
+            initialValue = MicroscopePreviewState.Loading,
+        ) {
+            value = withContext(Dispatchers.Default) {
+                frame.toBoundedPreview()
+            }
         }
     }
 
@@ -149,13 +152,22 @@ private fun MicroscopeFrameCard(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error,
                     )
-                    is MicroscopePreviewState.Ready -> Image(
-                        bitmap = current.bitmap.asImageBitmap(),
-                        contentDescription =
-                            "Video frame ${descriptor.frameId + 1} of ${session.frameCount}",
-                        modifier = Modifier.fillMaxWidth(),
-                        contentScale = ContentScale.Fit,
-                    )
+                    is MicroscopePreviewState.Ready -> {
+                        DisposableEffect(current.bitmap) {
+                            onDispose {
+                                if (!current.bitmap.isRecycled) {
+                                    current.bitmap.recycle()
+                                }
+                            }
+                        }
+                        Image(
+                            bitmap = current.bitmap.asImageBitmap(),
+                            contentDescription =
+                                "Video frame ${descriptor.frameId + 1} of ${session.frameCount}",
+                            modifier = Modifier.fillMaxWidth(),
+                            contentScale = ContentScale.Fit,
+                        )
+                    }
                 }
             }
 
