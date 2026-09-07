@@ -1,8 +1,8 @@
 use crate::{VideoDecoder, ffmpeg::DecodedRgbaFrame};
 use framescope_cache::{
     CachedFrame, FrameCacheError, FrameCacheHierarchy, FrameCacheKey, FrameId, FrameIndex,
-    FrameIndexEntry, FrameIndexError, FrameIndexLifecycle, FrameIndexStreamIdentity, KeyframeAnchor,
-    OwnedRgbaFrame, RamInsertResult,
+    FrameIndexEntry, FrameIndexError, FrameIndexLifecycle, FrameIndexStreamIdentity,
+    KeyframeAnchor, OwnedRgbaFrame, RamInsertResult,
 };
 use framescope_core::{DecodedFrame, FrameScopeError, StreamInfo};
 use thiserror::Error;
@@ -176,8 +176,7 @@ where
                     });
                 }
                 Err(
-                    CachedNavigationError::TimelineMismatch
-                    | CachedNavigationError::UnexpectedEof,
+                    CachedNavigationError::TimelineMismatch | CachedNavigationError::UnexpectedEof,
                 ) => {}
                 Err(error) => return Err(error),
             }
@@ -210,10 +209,7 @@ fn ensure_complete(index: &FrameIndex) -> Result<(), CachedNavigationError> {
     }
 }
 
-fn open_checked_decoder<D, F>(
-    index: &FrameIndex,
-    open: &mut F,
-) -> Result<D, CachedNavigationError>
+fn open_checked_decoder<D, F>(index: &FrameIndex, open: &mut F) -> Result<D, CachedNavigationError>
 where
     D: RgbaNavigationDecoder,
     F: FnMut() -> Result<D, FrameScopeError>,
