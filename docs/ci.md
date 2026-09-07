@@ -39,7 +39,7 @@ Runs after `native-android` succeeds. It installs Java 17, Gradle 8.13, Android 
 - `gradle --no-daemon testDebugUnitTest`
 - `gradle --no-daemon lintDebug`
 - `gradle --no-daemon assembleDebug`
-- `scripts/verify-debug-apk.sh`
+- `bash scripts/verify-debug-apk.sh`
 
 The packaging verifier checks that `lib/arm64-v8a/libframescope_ffi.so` is actually in the APK and preserves the existing privacy-permission invariants.
 
@@ -87,7 +87,7 @@ Native Android verification after installing the documented NDK/Rust target/carg
 rustup toolchain install 1.86.0 --target aarch64-linux-android
 cargo +1.86.0 install cargo-ndk --locked --version 4.1.2
 rustup default 1.86.0
-./scripts/verify-native-android.sh
+bash ./scripts/verify-native-android.sh
 ```
 
 Android checks:
@@ -98,12 +98,12 @@ gradle --no-daemon testDebugUnitTest
 gradle --no-daemon lintDebug
 gradle --no-daemon assembleDebug
 cd ..
-./scripts/verify-debug-apk.sh
+bash ./scripts/verify-debug-apk.sh
 ```
 
 Fixture checks:
 
 ```bash
-./scripts/generate-video-fixtures.sh
-./scripts/verify-video-fixtures.py
+bash ./scripts/generate-video-fixtures.sh
+python3 ./scripts/verify-video-fixtures.py
 ```
