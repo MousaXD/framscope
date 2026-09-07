@@ -1,5 +1,6 @@
 package com.framescope.app.ui
 
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.sqrt
@@ -80,9 +81,17 @@ internal object MicroscopePreviewMath {
         val seconds = wholeSeconds % 60L
         val prefix = if (negative) "-" else ""
         return if (hours > 0L) {
-            "%s%d:%02d:%02d.%06d".format(prefix, hours, minutes, seconds, micros)
+            String.format(
+                Locale.US,
+                "%s%02d:%02d:%02d.%06d",
+                prefix,
+                hours,
+                minutes,
+                seconds,
+                micros,
+            )
         } else {
-            "%s%02d:%02d.%06d".format(prefix, minutes, seconds, micros)
+            String.format(Locale.US, "%s%02d:%02d.%06d", prefix, minutes, seconds, micros)
         }
     }
 
