@@ -219,8 +219,8 @@ fn open_session(
     // Local variables drop in reverse declaration order. Declaring the cleanup guard before the
     // SQLite index ensures any error after opening the index first closes the connection, then
     // removes the operation-scoped database and sidecars.
-    let ephemeral_index_cleanup = (!reusable_index)
-        .then(|| EphemeralIndexCleanup::new(index_path.clone()));
+    let ephemeral_index_cleanup =
+        (!reusable_index).then(|| EphemeralIndexCleanup::new(index_path.clone()));
     let (mut index, _) = FrameIndex::open_or_create(index_path, source_identity, stream_identity)
         .map_err(from_index)?;
 
