@@ -1,0 +1,15 @@
+[package]
+name = "framescope-extraction-groups"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+framescope-cache = { path = "../framescope-cache" }
+framescope-group-navigation = { path = "../framescope-group-navigation" }
+thiserror.workspace = true
+
+[dev-dependencies]
+framescope-core = { path = "../framescope-core" }
+framescope-perceptual = { path = "../framescope-perceptual" }
