@@ -7,6 +7,10 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
+pub use cached_navigation::{
+    CachedFrameSource, CachedNavigationError, CachedNavigationResult, RgbaNavigationDecoder,
+    navigate_to_frame_cached,
+};
 pub use engine::{
     CancellationToken, ObservedFrameRateMode, OpenOptions, VideoDecoder, VideoStreamSelection,
 };
@@ -204,6 +208,7 @@ fn parse_mdia<R: Read + Seek>(
     Ok(())
 }
 
+mod cached_navigation;
 mod engine;
 pub mod ffmpeg;
 mod indexing;
