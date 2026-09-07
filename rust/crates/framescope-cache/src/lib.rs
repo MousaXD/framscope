@@ -6,6 +6,7 @@
 
 mod disk_cache;
 mod frame_cache;
+mod hierarchy;
 mod identity;
 mod index;
 
@@ -16,6 +17,7 @@ pub use frame_cache::{
     CachedFrame, FrameCacheError, FrameCacheKey, OwnedRgbaFrame, RamCacheStats, RamFrameCache,
     RamInsertResult,
 };
+pub use hierarchy::{CacheHierarchyStats, CacheLookup, FrameCacheHierarchy};
 pub use identity::{
     CacheDirectoryLayout, CacheStore, NoopCacheStore, SourceIdentity, SourceVideoIdentity,
 };
