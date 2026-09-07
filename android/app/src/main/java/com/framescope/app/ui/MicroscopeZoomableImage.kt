@@ -2,6 +2,7 @@ package com.framescope.app.ui
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Box
@@ -20,8 +21,10 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 
@@ -30,9 +33,12 @@ internal fun MicroscopeZoomableImage(
     bitmap: Bitmap,
     contentDescription: String,
     enabled: Boolean,
+    swipeEnabled: Boolean = false,
+    onSwipe: (Int) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val imageBitmap = remember(bitmap) { bitmap.asImageBitmap() }
+    val minimumSwipeDistancePx = with(LocalDensity.current) { 64.dp.toPx() }
     var viewportSize by remember(bitmap) { mutableStateOf(IntSize.Zero) }
     var transform by remember(bitmap) { mutableStateOf(MicroscopeViewportTransform()) }
     val transformableState = rememberTransformableState { centroid, zoomChange, panChange, _ ->
@@ -62,6 +68,25 @@ internal fun MicroscopeZoomableImage(
                     centroidY = size.height / 2f,
                     viewportWidth = size.width.toFloat(),
                     viewportHeight = size.height.toFloat(),
+                )
+            }
+            .pointerInput(bitmap, enabled, swipeEnabled, transform.scale, viewportSize) {
+                if (!enabled || !swipeEnabled || transform.scale > MicroscopeTransformMath.MIN_SCALE) {
+                    return@pointerInput
+                }
+                var totalHorizontalDrag = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { totalHorizontalDrag = 0f },
+                    onHorizontalDrag = { _, dragAmount -> totalHorizontalDrag += dragAmount },
+                    onDragCancel = { totalHorizontalDrag = 0f },
+                    onDragEnd = {
+                        MicroscopeSwipeMath.direction(
+                            horizontalDragPx = totalHorizontalDrag,
+                            viewportWidthPx = viewportSize.width.toFloat(),
+                            minimumDistancePx = minimumSwipeDistancePx,
+                        )?.let(onSwipe)
+                        totalHorizontalDrag = 0f
+                    },
                 )
             }
             .transformable(
