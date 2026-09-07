@@ -129,4 +129,24 @@ class MicroscopeTransformMathTest {
         assertEquals(0f, next.translationX)
         assertEquals(0f, next.translationY)
     }
+
+    @Test
+    fun nonFiniteViewportCannotProduceNanTranslation() {
+        val next = MicroscopeTransformMath.applyGesture(
+            current = MicroscopeViewportTransform(scale = 2f, translationX = 20f, translationY = 30f),
+            zoomChange = 1f,
+            panX = 50f,
+            panY = 50f,
+            centroidX = 0f,
+            centroidY = 0f,
+            viewportWidth = Float.NaN,
+            viewportHeight = Float.POSITIVE_INFINITY,
+        )
+
+        assertEquals(2f, next.scale)
+        assertTrue(next.translationX.isFinite())
+        assertTrue(next.translationY.isFinite())
+        assertEquals(0f, next.translationX)
+        assertEquals(0f, next.translationY)
+    }
 }
