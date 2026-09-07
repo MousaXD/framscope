@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -21,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -29,15 +31,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.framescope.app.data.FrameDetails
 import com.framescope.app.data.MicroscopeFrame
 import com.framescope.app.data.MicroscopeSessionSnapshot
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 @Composable
 internal fun MicroscopePanel(
@@ -268,17 +272,19 @@ private fun JumpControls(
     }
 }
 
-private fun MicroscopeFrame.toArgbBitmapOrNull(): Bitmap? {
+private suspend fun MicroscopeFrame.toArgbBitmapOrNull(): Bitmap? {
     val metadata = descriptor
     if (!metadata.isSane()) return null
 
-    return runCatching {
-        val bitmap = Bitmap.createBitmap(metadata.width, metadata.height, Bitmap.Config.ARGB_8888)
+    var bitmap: Bitmap? = null
+    try {
+        bitmap = Bitmap.createBitmap(metadata.width, metadata.height, Bitmap.Config.ARGB_8888)
         val source = rgba.duplicate()
         val row = IntArray(metadata.width)
         val stride = metadata.strideBytes
 
         for (y in 0 until metadata.height) {
+            currentCoroutineContext().ensureActive()
             val rowStart = Math.multiplyExact(y.toLong(), stride)
             for (x in 0 until metadata.width) {
                 val offsetLong = Math.addExact(rowStart, x.toLong() * 4L)
@@ -291,8 +297,20 @@ private fun MicroscopeFrame.toArgbBitmapOrNull(): Bitmap? {
             }
             bitmap.setPixels(row, 0, metadata.width, 0, y, metadata.width, 1)
         }
-        bitmap
-    }.getOrNull()
+        return bitmap
+    } catch (cancelled: CancellationException) {
+        bitmap?.recycle()
+        throw cancelled
+    } catch (_: RuntimeException) {
+        bitmap?.recycle()
+        return null
+    } catch (_: ArithmeticException) {
+        bitmap?.recycle()
+        return null
+    } catch (_: OutOfMemoryError) {
+        bitmap?.recycle()
+        return null
+    }
 }
 
 private fun formatMicros(timestampUs: Long): String {
