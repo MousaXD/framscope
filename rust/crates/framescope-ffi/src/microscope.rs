@@ -102,7 +102,11 @@ pub(crate) fn jump_frame_response(session_id: i64, frame_id: i64) -> String {
     serialize_response(jump_to_frame(session_id, frame_id))
 }
 
-pub(crate) fn jump_timestamp_response(session_id: i64, timestamp_us: i64, selection: i32) -> String {
+pub(crate) fn jump_timestamp_response(
+    session_id: i64,
+    timestamp_us: i64,
+    selection: i32,
+) -> String {
     serialize_response(jump_to_timestamp(session_id, timestamp_us, selection))
 }
 
@@ -169,13 +173,13 @@ fn open_session(
     let source_identity = source_identity(source_fd.as_raw_fd());
 
     let probe = open_decoder(source_fd.as_fd(), cancellation.clone()).map_err(from_frame_scope)?;
-    let stream_identity = FrameIndexStreamIdentity::from_stream(probe.selected_stream())
-        .map_err(from_index)?;
+    let stream_identity =
+        FrameIndexStreamIdentity::from_stream(probe.selected_stream()).map_err(from_index)?;
     drop(probe);
 
     let index_path = frame_index_path(Path::new(cache_root), &source_identity, &stream_identity);
-    let (mut index, _) =
-        FrameIndex::open_or_create(index_path, source_identity, stream_identity).map_err(from_index)?;
+    let (mut index, _) = FrameIndex::open_or_create(index_path, source_identity, stream_identity)
+        .map_err(from_index)?;
 
     build_or_resume_frame_index(
         &mut index,
@@ -593,10 +597,9 @@ impl Read for FdLogicalReader {
         }
         let read = usize::try_from(read)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative read length"))?;
-        self.position = self
-            .position
-            .checked_add(read as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "source position overflow"))?;
+        self.position = self.position.checked_add(read as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "source position overflow")
+        })?;
         Ok(read)
     }
 }
