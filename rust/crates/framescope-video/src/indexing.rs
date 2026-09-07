@@ -256,9 +256,7 @@ fn entry_from_decoded(
 mod tests {
     use super::*;
     use framescope_cache::{FrameIndexOpenDisposition, SourceIdentity};
-    use framescope_core::{
-        CodecInfo, MediaDuration, MediaKind, MediaTimestamp, TimeBase,
-    };
+    use framescope_core::{CodecInfo, MediaDuration, MediaKind, MediaTimestamp, TimeBase};
     use std::collections::VecDeque;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -361,7 +359,13 @@ mod tests {
     fn vfr_pts_are_persisted_exactly_and_batches_stay_bounded() {
         let path = temp_db("vfr");
         let mut index = open_index(&path);
-        let sequence = [(0, true), (40, false), (100, false), (140, false), (260, true)];
+        let sequence = [
+            (0, true),
+            (40, false),
+            (100, false),
+            (140, false),
+            (260, true),
+        ];
         let report = build_or_resume_frame_index(
             &mut index,
             || Ok(decoder(&sequence)),
@@ -408,10 +412,19 @@ mod tests {
             first,
             Err(IndexingError::Decoder(FrameScopeError::Cancelled))
         ));
-        assert_eq!(index.status().unwrap().lifecycle, FrameIndexLifecycle::Incomplete);
+        assert_eq!(
+            index.status().unwrap().lifecycle,
+            FrameIndexLifecycle::Incomplete
+        );
         assert_eq!(index.status().unwrap().indexed_frames, 3);
 
-        let full = [(0, true), (40, false), (100, false), (180, false), (260, true)];
+        let full = [
+            (0, true),
+            (40, false),
+            (100, false),
+            (180, false),
+            (260, true),
+        ];
         let report = build_or_resume_frame_index(
             &mut index,
             || Ok(decoder(&full)),
