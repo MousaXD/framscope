@@ -5,6 +5,7 @@
 //! timestamps; no frame is deleted or renumbered.
 
 use framescope_cache::{FrameId, FrameIndexEntry, OwnedRgbaFrame};
+use framescope_core::MediaTimestamp;
 use framescope_perceptual::{
     HybridDecision, HybridSimilarityEngine, HybridSimilarityError, HybridSimilarityPolicy,
 };
@@ -59,11 +60,7 @@ impl HybridFrameGrouper {
             .ok_or(SimilarityError::MissingTimestamp(entry.frame_id))?;
 
         let Some(active) = self.active.as_mut() else {
-            self.active = Some(ActiveGroup {
-                metadata: singleton_group(entry, timestamp),
-                representative: pixels.clone(),
-                previous: pixels,
-            });
+            self.active = Some(active_group(entry, timestamp, pixels));
             return Ok(None);
         };
 
@@ -77,13 +74,17 @@ impl HybridFrameGrouper {
         }
 
         let previous = self.engine.compare(&active.previous, &pixels)?;
-        let Some(_) = accepted_luma(previous) else {
-            return Ok(Some(restart_group(&mut self.active, entry, timestamp, pixels)));
-        };
+        if accepted_luma(previous).is_none() {
+            let completed = active.metadata.clone();
+            self.active = Some(active_group(entry, timestamp, pixels));
+            return Ok(Some(completed));
+        }
 
         let representative = self.engine.compare(&active.representative, &pixels)?;
         let Some(representative_luma) = accepted_luma(representative) else {
-            return Ok(Some(restart_group(&mut self.active, entry, timestamp, pixels)));
+            let completed = active.metadata.clone();
+            self.active = Some(active_group(entry, timestamp, pixels));
+            return Ok(Some(completed));
         };
 
         active.metadata.last_frame = entry.frame_id;
@@ -110,46 +111,33 @@ fn accepted_luma(decision: HybridDecision) -> Option<SimilarityScore> {
     }
 }
 
-fn singleton_group(
+fn active_group(
     entry: &FrameIndexEntry,
-    timestamp: framescope_core::MediaTimestamp,
-) -> FrameGroup {
-    FrameGroup {
-        representative_frame: entry.frame_id,
-        first_frame: entry.frame_id,
-        last_frame: entry.frame_id,
-        frame_count: 1,
-        start_timestamp: timestamp,
-        end_timestamp: timestamp,
-        start_duration: entry.duration,
-        end_duration: entry.duration,
-        representative_similarity_floor: SIMILARITY_SCALE,
-    }
-}
-
-fn restart_group(
-    active: &mut Option<ActiveGroup>,
-    entry: &FrameIndexEntry,
-    timestamp: framescope_core::MediaTimestamp,
+    timestamp: MediaTimestamp,
     pixels: OwnedRgbaFrame,
-) -> FrameGroup {
-    let completed = active
-        .take()
-        .expect("restart_group is called only with an active group")
-        .metadata;
-    *active = Some(ActiveGroup {
-        metadata: singleton_group(entry, timestamp),
+) -> ActiveGroup {
+    ActiveGroup {
+        metadata: FrameGroup {
+            representative_frame: entry.frame_id,
+            first_frame: entry.frame_id,
+            last_frame: entry.frame_id,
+            frame_count: 1,
+            start_timestamp: timestamp,
+            end_timestamp: timestamp,
+            start_duration: entry.duration,
+            end_duration: entry.duration,
+            representative_similarity_floor: SIMILARITY_SCALE,
+        },
         representative: pixels.clone(),
         previous: pixels,
-    });
-    completed
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use framescope_cache::KeyframeAnchor;
-    use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
+    use framescope_core::{MediaDuration, TimeBase};
 
     fn time_base() -> TimeBase {
         TimeBase::new(1, 1000).unwrap()
