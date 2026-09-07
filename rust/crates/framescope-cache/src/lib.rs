@@ -1,12 +1,17 @@
 //! Persistent media-index and bounded frame-cache primitives for FrameScope.
 //!
-//! This crate owns source identity, the metadata-only frame index, and cache containers that own
-//! their decoded pixel payloads. Disk proxy storage remains a separate disposable layer.
+//! This crate owns source identity, the metadata-only frame index, the byte-bounded RAM hot cache,
+//! and disposable compressed disk proxy storage. Original-quality extraction must still decode from
+//! the authoritative source rather than consuming proxy bytes.
 
+mod disk_cache;
 mod frame_cache;
 mod identity;
 mod index;
 
+pub use disk_cache::{
+    DiskCacheError, DiskCacheStats, DiskInsertResult, DiskProxyCache, ProxyFormat, ProxyFrame,
+};
 pub use frame_cache::{
     CachedFrame, FrameCacheError, FrameCacheKey, OwnedRgbaFrame, RamCacheStats, RamFrameCache,
     RamInsertResult,
