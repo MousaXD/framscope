@@ -94,6 +94,41 @@ enum class TimestampSelectionPolicy(
     Nearest(2),
 }
 
+enum class FrameExportFormat(
+    val nativeValue: Int,
+    val wireName: String,
+    val mimeType: String,
+    val extension: String,
+) {
+    Png(0, "png", "image/png", "png"),
+    Jpeg(1, "jpeg", "image/jpeg", "jpg"),
+    WebPLossless(2, "webp_lossless", "image/webp", "webp"),
+    ;
+
+    companion object {
+        fun fromWireName(value: String): FrameExportFormat? =
+            values().firstOrNull { format -> format.wireName == value }
+    }
+}
+
+data class FrameExportResult(
+    val sessionId: Long,
+    val frameId: Long,
+    val width: Int,
+    val height: Int,
+    val format: FrameExportFormat,
+    val mimeType: String,
+    val byteLength: Long,
+) {
+    fun isSane(): Boolean =
+        sessionId > 0L &&
+            frameId >= 0L &&
+            width in 1..65_535 &&
+            height in 1..65_535 &&
+            mimeType == format.mimeType &&
+            byteLength > 0L
+}
+
 sealed interface NativeInspection {
     data class Success(
         val metadata: VideoMetadata,
@@ -118,6 +153,19 @@ sealed interface NativeMicroscope {
         val message: String,
         val engine: String?,
     ) : NativeMicroscope
+}
+
+sealed interface NativeFrameExport {
+    data class Success(
+        val export: FrameExportResult,
+        val engine: String,
+    ) : NativeFrameExport
+
+    data class Failure(
+        val code: String,
+        val message: String,
+        val engine: String?,
+    ) : NativeFrameExport
 }
 
 enum class InspectionProgress {
