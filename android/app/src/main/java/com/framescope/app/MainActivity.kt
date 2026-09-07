@@ -17,7 +17,10 @@ import com.framescope.app.ui.theme.FrameScopeTheme
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
         MainViewModelFactory(
-            AndroidFrameScopeRepository(applicationContext.contentResolver),
+            AndroidFrameScopeRepository(
+                contentResolver = applicationContext.contentResolver,
+                cacheRoot = applicationContext.cacheDir.resolve("framescope").absolutePath,
+            ),
         )
     }
 

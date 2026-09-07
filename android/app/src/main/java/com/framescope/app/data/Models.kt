@@ -1,5 +1,7 @@
 package com.framescope.app.data
 
+import java.nio.ByteBuffer
+
 data class VideoMetadata(
     val durationUs: Long?,
     val width: Int,
@@ -67,6 +69,22 @@ data class MicroscopeSessionSnapshot(
         return canStepPrevious == expectedPrevious && canStepNext == expectedNext
     }
 }
+
+/**
+ * One caller-owned, source-quality RGBA microscope frame.
+ *
+ * This deliberately is not a data class: ByteBuffer equality may compare remaining pixel content,
+ * which would turn ordinary UI state comparisons into O(frame-size) work for large frames.
+ */
+class MicroscopeFrame(
+    val descriptor: PreparedMicroscopeFrame,
+    val rgba: ByteBuffer,
+)
+
+class MicroscopeOperationException(
+    val code: String,
+    message: String,
+) : IllegalStateException(message)
 
 enum class TimestampSelectionPolicy(
     val nativeValue: Int,
