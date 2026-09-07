@@ -263,7 +263,6 @@ mod tests {
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
-    #[derive(Clone)]
     struct FakeDecoder {
         stream: StreamInfo,
         frames: VecDeque<Result<DecodedFrame, FrameScopeError>>,
