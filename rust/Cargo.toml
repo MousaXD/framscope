@@ -11,6 +11,7 @@ members = [
     "crates/framescope-group-navigation",
     "crates/framescope-group-navigation-video",
     "crates/framescope-extraction",
+    "crates/framescope-extraction-video",
     "crates/framescope-ffi",
     "crates/framescope-ffmpeg",
     "crates/framescope-test-support",
