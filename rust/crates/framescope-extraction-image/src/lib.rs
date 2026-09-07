@@ -122,9 +122,7 @@ pub fn frame_file_name(frame_id: FrameId, format: ExtractionImageFormat) -> Stri
 fn tight_rgba(frame: &OwnedRgbaFrame) -> Result<Cow<'_, [u8]>, ImageExportError> {
     let width = usize::try_from(frame.width).map_err(|_| ImageExportError::NumericRange)?;
     let height = usize::try_from(frame.height).map_err(|_| ImageExportError::NumericRange)?;
-    let row_bytes = width
-        .checked_mul(4)
-        .ok_or(ImageExportError::NumericRange)?;
+    let row_bytes = width.checked_mul(4).ok_or(ImageExportError::NumericRange)?;
     let tight_len = row_bytes
         .checked_mul(height)
         .ok_or(ImageExportError::NumericRange)?;
@@ -181,7 +179,9 @@ impl<W: Write> Write for CountingWriter<W> {
         let written = self.inner.write(buffer)?;
         self.bytes_written = self
             .bytes_written
-            .checked_add(u64::try_from(written).map_err(|_| io::Error::other("write size overflow"))?)
+            .checked_add(
+                u64::try_from(written).map_err(|_| io::Error::other("write size overflow"))?,
+            )
             .ok_or_else(|| io::Error::other("encoded image byte count overflow"))?;
         Ok(written)
     }
@@ -234,7 +234,10 @@ mod tests {
             &mut encoded,
         );
 
-        assert!(matches!(result, Err(ImageExportError::InvalidJpegQuality(0))));
+        assert!(matches!(
+            result,
+            Err(ImageExportError::InvalidJpegQuality(0))
+        ));
         assert!(encoded.is_empty());
     }
 
@@ -259,12 +262,8 @@ mod tests {
     fn webp_lossless_preserves_rgba() {
         let frame = padded_rgba();
         let mut encoded = Vec::new();
-        let report = encode_frame(
-            &frame,
-            ExtractionImageFormat::WebPLossless,
-            &mut encoded,
-        )
-        .unwrap();
+        let report =
+            encode_frame(&frame, ExtractionImageFormat::WebPLossless, &mut encoded).unwrap();
 
         assert_eq!(report.byte_len, encoded.len() as u64);
         assert_eq!(&encoded[..4], b"RIFF");
@@ -282,10 +281,7 @@ mod tests {
             "frame_00000000000000000042.png"
         );
         assert_eq!(
-            frame_file_name(
-                FrameId(42),
-                ExtractionImageFormat::Jpeg { quality: 92 }
-            ),
+            frame_file_name(FrameId(42), ExtractionImageFormat::Jpeg { quality: 92 }),
             "frame_00000000000000000042.jpg"
         );
         assert_eq!(
