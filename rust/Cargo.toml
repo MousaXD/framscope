@@ -12,6 +12,7 @@ members = [
     "crates/framescope-group-navigation-video",
     "crates/framescope-extraction",
     "crates/framescope-extraction-video",
+    "crates/framescope-extraction-image",
     "crates/framescope-ffi",
     "crates/framescope-ffmpeg",
     "crates/framescope-test-support",
@@ -25,6 +26,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 blake3 = "=1.8.2"
+image = { version = "=0.25.5", default-features = false, features = ["jpeg", "png", "webp"] }
 jni = "=0.21.1"
 libc = "=0.2.175"
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
