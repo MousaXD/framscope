@@ -10,11 +10,13 @@ FrameScope uses semantic Android versions and a fail-closed signed GitHub Releas
 
 ## Main snapshot releases
 
-Every push to `main` starts a dedicated snapshot build. The workflow publishes an installable testing pre-release only after that exact commit successfully builds and verifies the native arm64 library, passes Android unit tests and lint, builds the debug APK, and verifies APK native packaging.
+Every push to `main` starts the snapshot publisher. The publisher waits for canonical CI to finish for the exact same commit SHA and refuses to publish unless that CI run succeeds.
 
-Snapshot tags use `main-<12-char-commit-sha>`. Each snapshot contains that workflow's verified arm64 debug APK plus a SHA-256 checksum. Failed snapshot builds publish nothing.
+After successful canonical CI, the publisher downloads the exact durable arm64 debug APK artifact produced and native-packaging-verified by that run. It verifies and stages the APK with a SHA-256 checksum, then creates an immutable testing pre-release.
 
-These snapshots are for testing and rapid access to the latest `main` build. They are not signed production releases and do not replace the physical-device acceptance or signing requirements below.
+Snapshot tags use `main-<12-char-commit-sha>`. Each snapshot contains the installable arm64 debug APK plus its SHA-256 checksum. Failed or missing canonical CI publishes nothing.
+
+These snapshots are for testing and rapid access to the latest accepted `main` build. They are not signed production releases and do not replace the physical-device acceptance or signing requirements below.
 
 ## Physical-device release evidence
 
