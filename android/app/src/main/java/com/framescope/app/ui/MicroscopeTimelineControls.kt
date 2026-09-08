@@ -148,12 +148,8 @@ internal fun MicroscopeTimelineControls(
                 }
                 scrubbing = false
                 when {
-                    targetTimestampUs != null && targetTimestampUs != currentFrame.timestampUs -> {
-                        onFinishScrubTimestampUs(targetTimestampUs)
-                    }
-                    targetFrameId != null && targetFrameId != currentFrame.frameId -> {
-                        onFinishScrubFrame(targetFrameId)
-                    }
+                    targetTimestampUs != null -> onFinishScrubTimestampUs(targetTimestampUs)
+                    targetFrameId != null -> onFinishScrubFrame(targetFrameId)
                 }
             },
             enabled = enabled && session.frameCount > 1L,
