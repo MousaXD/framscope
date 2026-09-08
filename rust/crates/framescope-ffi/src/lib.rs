@@ -398,8 +398,10 @@ pub extern "system" fn Java_com_framescope_app_data_RustMicroscopeIndexingProgre
     _class: JClass,
     operation_id: jlong,
 ) -> jstring {
-    let json = catch_unwind(AssertUnwindSafe(|| index_progress::response_json(operation_id)))
-        .unwrap_or_else(|_| r#"{"status":"idle"}"#.into());
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        index_progress::response_json(operation_id)
+    }))
+    .unwrap_or_else(|_| r#"{"status":"idle"}"#.into());
     to_jstring(&mut env, &json)
 }
 
