@@ -1,8 +1,8 @@
 # FrameScope
 
-FrameScope is an open-source Android application for precise, local-first video-frame inspection. Videos stay on the device. The normal app path has no backend, telemetry, analytics, ads, accounts, or network requirement.
+FrameScope is an open-source Android application for precise, local-first video-frame inspection and source-quality frame extraction. Videos stay on the device. The normal app path has no backend, telemetry, analytics, ads, accounts, or network requirement.
 
-The repository has completed the Phase 2 video engine, Phase 3 frame-index/navigation/cache stack, Phase 4 similarity/grouping foundation, and Phase 5 frame microscope UI/integration. Phase 6 frame extraction is next.
+The repository has completed the Phase 2 video engine, Phase 3 frame-index/navigation/cache stack, Phase 4 similarity/grouping foundation, Phase 5 frame microscope UI/integration, and Phase 6 frame extraction/export pipeline. Phase 7 production hardening and releases is next.
 
 ## Phase status
 
@@ -11,7 +11,23 @@ The repository has completed the Phase 2 video engine, Phase 3 frame-index/navig
 - Phase 3: Frame indexing and caching. **Complete.**
 - Phase 4: Visual similarity and duplicate grouping. **Complete.**
 - Phase 5: Frame microscope UI and integration. **Complete.**
-- Phase 6: Frame extraction. **Next.**
+- Phase 6: Frame extraction and export. **Complete.**
+- Phase 7: Production hardening and releases. **Next.**
+
+## Extraction/export
+
+Phase 6 supports:
+
+- current-frame export;
+- inclusive frame and timestamp ranges;
+- all-frame export;
+- exact every-N sampling;
+- one representative per validated similarity group;
+- PNG, JPEG, and lossless WebP;
+- Android Storage Access Framework destinations;
+- streaming JSONL manifests, progress, cancellation, and rollback-safe partial-failure handling.
+
+Exports use authoritative persistent `FrameId`/PTS metadata and source-quality RGBA. Lossy navigation proxies are never accepted as extraction source pixels.
 
 ## Acceptance policy
 
@@ -23,6 +39,7 @@ Existing architecture contracts remain fixed:
 - Presentation timestamps remain the media clock.
 - FPS is never used to reconstruct frame timing.
 - Similarity groups are derived data and never replace the source frame index.
+- Source-quality extraction never consumes lossy disk proxies.
 - Memory usage must remain bounded for large videos.
 
 ## Architecture
@@ -30,24 +47,22 @@ Existing architecture contracts remain fixed:
 ```text
 Jetpack Compose UI
         ↓
-MainViewModel
+MainViewModel / export ViewModels
         ↓
 FrameScopeRepository
         ↓
-NativeBridge / JNI
+JNI + SAF output callbacks
         ↓
 framescope-ffi
         ↓
-framescope-video ───────── framescope-cache
-        ↓                         ↑
-framescope-ffmpeg                 │
-        ↓                 index + bounded caches
-FFmpeg
+video/index/similarity/extraction crates
+        ↓
+FFmpeg + bounded caches + streaming encoders/manifests
 ```
 
-Android owns UI/lifecycle/SAF and the original descriptor. Rust owns timing semantics, stream selection, persistent frame identity, index/navigation/cache policy, and FFmpeg resources.
+Android owns UI/lifecycle/SAF and the original source/output descriptors. Rust owns timing semantics, stream selection, persistent frame identity, index/navigation/cache policy, similarity validation, source-quality extraction orchestration, encoding, manifests, and FFmpeg resources.
 
-See `docs/architecture.md`, `docs/video-engine.md`, `docs/frame-index.md`, and `docs/roadmap.md`.
+See `docs/architecture.md`, `docs/video-engine.md`, `docs/frame-index.md`, `docs/phase6-acceptance.md`, and `docs/roadmap.md`.
 
 ## Timing model
 
@@ -71,13 +86,15 @@ FrameScope is designed so video duration does not imply unbounded memory usage:
 - indexes persist bounded metadata;
 - full-resolution cache is byte bounded;
 - disk proxies are disposable and bounded;
-- random access uses indexed seeking.
+- random access uses indexed seeking;
+- extraction selections and similarity representatives are streamed rather than collected video-wide;
+- batch output owns one selected frame/document at a time and writes manifests incrementally.
 
 ## GitHub Actions
 
-GitHub Actions is the canonical heavy verifier for Rust, Android, FFmpeg, and media fixture validation.
+GitHub Actions is the canonical heavy verifier for Rust, Android, FFmpeg, media fixtures, native JNI exports, APK packaging, and the Phase 3/4 regression contracts.
 
-See `docs/phase5-acceptance.md` and `docs/phase5-performance.md`.
+See `docs/phase5-acceptance.md`, `docs/phase5-performance.md`, and `docs/phase6-acceptance.md`.
 
 ## License
 
