@@ -110,7 +110,7 @@ struct JniFrameSink<'env, 'local> {
     callback: JObject<'local>,
 }
 
-impl<'env, 'local> JniFrameSink<'env, 'local> {
+impl JniFrameSink<'_, '_> {
     fn open_frame(&mut self, output: &FrameOutput<'_>) -> Result<RawFd, JniFrameSinkError> {
         let frame_id = jlong::try_from(output.progress.frame_id.0)
             .map_err(|_| JniFrameSinkError::NumericRange)?;
