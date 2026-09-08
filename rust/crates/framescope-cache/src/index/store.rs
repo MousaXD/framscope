@@ -140,7 +140,9 @@ impl FrameIndex {
     pub fn timestamp_seek_safety(&self) -> Result<TimestampSeekSafety, FrameIndexError> {
         self.load_meta()?
             .map(|meta| meta.timestamp_seek_safety)
-            .ok_or_else(|| FrameIndexError::InvalidState("frame-index metadata row is missing".into()))
+            .ok_or_else(|| {
+                FrameIndexError::InvalidState("frame-index metadata row is missing".into())
+            })
     }
 
     pub fn status(&self) -> Result<FrameIndexStatus, FrameIndexError> {
@@ -187,7 +189,8 @@ impl FrameIndex {
     }
 
     pub fn clear_for_rebuild(&mut self) -> Result<(), FrameIndexError> {
-        let source_key = source_binding_key(&self.source_identity, TimestampSeekSafety::Unambiguous);
+        let source_key =
+            source_binding_key(&self.source_identity, TimestampSeekSafety::Unambiguous);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -276,7 +279,8 @@ impl FrameIndex {
                     seek_safety = TimestampSeekSafety::Ambiguous;
                     break;
                 };
-                if previous_clean_keyframe_ticks.is_some_and(|previous| timestamp.ticks <= previous) {
+                if previous_clean_keyframe_ticks.is_some_and(|previous| timestamp.ticks <= previous)
+                {
                     seek_safety = TimestampSeekSafety::Ambiguous;
                     break;
                 }
@@ -488,7 +492,8 @@ impl FrameIndex {
     fn reset_and_rebind(&mut self) -> Result<(), FrameIndexError> {
         let source_json = serde_json::to_string(&self.source_identity)?;
         let stream_json = serde_json::to_string(&self.stream_identity)?;
-        let source_key = source_binding_key(&self.source_identity, TimestampSeekSafety::Unambiguous);
+        let source_key =
+            source_binding_key(&self.source_identity, TimestampSeekSafety::Unambiguous);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
