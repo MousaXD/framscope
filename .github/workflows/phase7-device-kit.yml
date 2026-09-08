@@ -8,11 +8,28 @@ on:
       - 'acceptance/phase7/**'
       - 'scripts/verify-phase7-device-report.py'
       - 'docs/phase7-device-provider-acceptance.md'
+  push:
+    branches:
+      - main
+    paths:
+      - 'android/**'
+      - 'rust/**'
+      - 'version.properties'
+      - 'scripts/build-rust.sh'
+      - 'scripts/build-ffmpeg-android.sh'
+      - 'scripts/verify-ffmpeg-android.sh'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/phase7-device-kit.yml'
+      - 'acceptance/phase7/device-report.template.json'
+      - 'scripts/verify-phase7-device-report.py'
+      - 'scripts/generate-video-fixtures.sh'
+      - 'scripts/verify-video-fixtures.py'
+      - '.github/workflows/phase7-device-report.yml'
 
 permissions:
   contents: read
 
-# This validates kit generation only. Real device evidence remains manual.
+# Kit generation is automated for accepted main changes, but real device evidence remains manual.
 
 env:
   ANDROID_NDK_VERSION: '27.3.13750724'
