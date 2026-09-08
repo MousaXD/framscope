@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.framescope.app.data.RecentVideoHistory
+import com.framescope.app.data.RecentVideoRecord
 import com.framescope.app.data.VideoUriPermissionStatus
 
 data class RecentVideoOpenTarget(
@@ -14,6 +15,25 @@ data class RecentVideoOpenTarget(
     val permissionStatus: VideoUriPermissionStatus,
     val resumeTimestampUs: Long? = null,
     val replacesRecordId: String? = null,
+)
+
+fun RecentVideoRecord.toOpenTarget(): RecentVideoOpenTarget? =
+    takeIf(RecentVideoRecord::canOpen)?.let { record ->
+        RecentVideoOpenTarget(
+            contentUri = record.contentUri,
+            permissionStatus = record.permissionStatus,
+            resumeTimestampUs = record.lastViewedTimestampUs,
+        )
+    }
+
+fun RecentVideoRecord.toReselectTarget(
+    newContentUri: String,
+    permissionStatus: VideoUriPermissionStatus,
+): RecentVideoOpenTarget = RecentVideoOpenTarget(
+    contentUri = newContentUri,
+    permissionStatus = permissionStatus,
+    resumeTimestampUs = lastViewedTimestampUs,
+    replacesRecordId = id,
 )
 
 @Composable
@@ -53,6 +73,16 @@ fun RecentVideoSessionEffects(
         val source = target ?: return@LaunchedEffect
         val ready = microscopeState as? MicroscopeUiState.Ready ?: return@LaunchedEffect
         val frame = ready.session.currentFrame ?: return@LaunchedEffect
+        val resumeTimestampUs = source.resumeTimestampUs
+
+        if (resumeTimestampUs != null && resumedSessionId != ready.session.sessionId) {
+            // Preserve the saved resume point until the existing generation-safe microscope path has
+            // completed its authoritative VFR-aware timestamp jump. Persisting FrameId 0 here would
+            // destroy the useful resume point if the process stopped between open and the jump result.
+            resumedSessionId = ready.session.sessionId
+            onResumeTimestampUs(resumeTimestampUs)
+            return@LaunchedEffect
+        }
 
         runCatching {
             history.updatePosition(
@@ -61,13 +91,6 @@ fun RecentVideoSessionEffects(
                 timestampUs = frame.timestampUs,
             )
         }
-
-        val resumeTimestampUs = source.resumeTimestampUs ?: return@LaunchedEffect
-        if (resumedSessionId == ready.session.sessionId) return@LaunchedEffect
-
-        // Mark before requesting navigation so recomposition cannot issue the same resume twice.
-        resumedSessionId = ready.session.sessionId
-        onResumeTimestampUs(resumeTimestampUs)
     }
 
     LaunchedEffect(microscopeState, target?.contentUri) {
