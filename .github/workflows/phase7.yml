@@ -19,9 +19,46 @@ env:
   ANDROID_NDK_VERSION: '27.3.13750724'
   CARGO_NDK_VERSION: '4.1.2'
   GRADLE_VERSION: '8.13'
+  RUST_HOST_TOOLCHAIN: '1.85.1'
   RUST_ANDROID_TOOLCHAIN: '1.86.0'
 
 jobs:
+  supply-chain:
+    name: supply-chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_AUDIT_VERSION: '0.22.2'
+      CARGO_AUDIT_SHA256: 'ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pinned Rust host toolchain
+        run: |
+          rustup toolchain install "$RUST_HOST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_HOST_TOOLCHAIN"
+
+      - name: Verify dependency sources licenses and lockfile checksums
+        run: python3 ./scripts/verify-rust-supply-chain.py
+
+      - name: Install checksum-verified cargo-audit
+        run: |
+          archive="$RUNNER_TEMP/cargo-audit.tgz"
+          extract_dir="$RUNNER_TEMP/cargo-audit"
+          url="https://github.com/rustsec/rustsec/releases/download/cargo-audit/v${CARGO_AUDIT_VERSION}/cargo-audit-x86_64-unknown-linux-gnu-v${CARGO_AUDIT_VERSION}.tgz"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 "$url" -o "$archive"
+          echo "$CARGO_AUDIT_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$extract_dir"
+          tar -xzf "$archive" -C "$extract_dir"
+          audit_bin="$(find "$extract_dir" -type f -name cargo-audit -print -quit)"
+          test -n "$audit_bin"
+          install -m 0755 "$audit_bin" "$HOME/.cargo/bin/cargo-audit"
+          cargo audit --version
+
+      - name: Reject known RustSec vulnerabilities
+        run: cargo audit --file rust/Cargo.lock
+
   release-package:
     name: release-package
     runs-on: ubuntu-latest
