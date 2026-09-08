@@ -20,13 +20,17 @@ class VideoUriPermissionManager(
             )
         }
 
-        return if (
+        val persisted = runCatching {
             contentResolver.persistedUriPermissions.any { permission ->
                 permission.uri == uri && permission.isReadPermission
             }
-        ) {
+        }.getOrDefault(false)
+
+        return if (persisted) {
             VideoUriPermissionStatus.Persisted
         } else {
+            // The current Activity grant may still be usable for this session. History records this
+            // honestly as transient and revalidates access before offering a future Resume action.
             VideoUriPermissionStatus.Transient
         }
     }
