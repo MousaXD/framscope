@@ -12,6 +12,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.framescope.app.data.AndroidFrameScopeRepository
 import com.framescope.app.platform.LocalExportTree
 import com.framescope.app.platform.LocalVideoOpenDocument
+import com.framescope.app.ui.BatchExportOverlay
+import com.framescope.app.ui.BatchExportViewModel
+import com.framescope.app.ui.BatchExportViewModelFactory
 import com.framescope.app.ui.CurrentFrameExportOverlay
 import com.framescope.app.ui.FrameExportViewModel
 import com.framescope.app.ui.FrameExportViewModelFactory
@@ -37,12 +40,17 @@ class MainActivity : ComponentActivity() {
         FrameExportViewModelFactory(repository)
     }
 
+    private val batchExportViewModel: BatchExportViewModel by viewModels {
+        BatchExportViewModelFactory(repository)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             FrameScopeTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
                 val exportState by exportViewModel.state.collectAsStateWithLifecycle()
+                val batchExportState by batchExportViewModel.state.collectAsStateWithLifecycle()
                 val videoPicker = rememberLauncherForActivityResult(
                     contract = LocalVideoOpenDocument(),
                 ) { uri ->
@@ -73,30 +81,56 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                 }
+                val batchExportTreePicker = rememberLauncherForActivityResult(
+                    contract = LocalExportTree(),
+                ) { uri ->
+                    if (uri == null) {
+                        batchExportViewModel.onDestinationPickerCancelled()
+                    } else {
+                        runCatching {
+                            contentResolver.takePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                            )
+                        }
+                        val ready = state.microscopeState as? MicroscopeUiState.Ready
+                        batchExportViewModel.onDestinationSelected(
+                            treeUri = uri.toString(),
+                            currentSessionId = ready?.session?.sessionId,
+                            currentFrameId = ready?.session?.currentFrame?.frameId,
+                        )
+                    }
+                }
 
                 Box {
                     FrameScopeScreen(
                         state = state,
                         onOpenVideo = {
                             exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.cancelForMicroscopeChange()
                             viewModel.onPickerStarted()
                             videoPicker.launch(arrayOf("video/*"))
                         },
                         onCancelInspection = {
                             exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.cancelForMicroscopeChange()
                             viewModel.cancelInspection()
                         },
                         onDismissError = viewModel::clearError,
                         onStepMicroscope = { delta ->
                             exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.cancelForMicroscopeChange()
                             viewModel.stepMicroscope(delta)
                         },
                         onJumpMicroscopeFrame = { frameId ->
                             exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.cancelForMicroscopeChange()
                             viewModel.jumpMicroscopeFrame(frameId)
                         },
                         onJumpMicroscopeTimestampUs = { timestampUs ->
                             exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.cancelForMicroscopeChange()
                             viewModel.jumpMicroscopeTimestampUs(timestampUs)
                         },
                     )
@@ -109,6 +143,7 @@ class MainActivity : ComponentActivity() {
                                 ?: return@CurrentFrameExportOverlay
                             val frameId = ready.session.currentFrame?.frameId
                                 ?: return@CurrentFrameExportOverlay
+                            batchExportViewModel.cancelForMicroscopeChange()
                             exportViewModel.beginCurrentFrameExport(
                                 sessionId = ready.session.sessionId,
                                 frameId = frameId,
@@ -118,6 +153,24 @@ class MainActivity : ComponentActivity() {
                         },
                         onCancelExport = exportViewModel::cancelForMicroscopeChange,
                         onDismissStatus = exportViewModel::dismissStatus,
+                    )
+
+                    BatchExportOverlay(
+                        microscopeState = state.microscopeState,
+                        exportState = batchExportState,
+                        onRequestExport = { request ->
+                            val ready = state.microscopeState as? MicroscopeUiState.Ready
+                                ?: return@BatchExportOverlay
+                            exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.beginBatchExport(
+                                sessionId = ready.session.sessionId,
+                                currentFrameId = ready.session.currentFrame?.frameId,
+                                request = request,
+                            )
+                            batchExportTreePicker.launch(null)
+                        },
+                        onCancelExport = batchExportViewModel::cancelForMicroscopeChange,
+                        onDismissStatus = batchExportViewModel::dismissStatus,
                     )
                 }
             }
