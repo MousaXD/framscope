@@ -136,15 +136,17 @@ fn begin_preview_operation(
     session_id: i64,
 ) -> Result<(CancellationToken, PreviewOperationGuard), PreviewFailure> {
     let mut registry = preview_cancellation_registry().lock().map_err(|_| {
-        PreviewFailure::new("bridge_error", "Live preview cancellation state is poisoned.")
+        PreviewFailure::new(
+            "bridge_error",
+            "Live preview cancellation state is poisoned.",
+        )
     })?;
     if let Some(previous) = registry.active.remove(&session_id) {
         previous.cancellation.cancel();
     }
-    registry.next_generation = registry
-        .next_generation
-        .checked_add(1)
-        .ok_or_else(|| PreviewFailure::new("bridge_error", "Preview generation space exhausted."))?;
+    registry.next_generation = registry.next_generation.checked_add(1).ok_or_else(|| {
+        PreviewFailure::new("bridge_error", "Preview generation space exhausted.")
+    })?;
     let generation = registry.next_generation;
     let cancellation = CancellationToken::new();
     registry.active.insert(
@@ -388,32 +390,33 @@ fn render_preview(
         })?;
         ensure_not_cancelled(&cancellation)?;
 
-        let (preview, source, decoded_frames) =
-            if let Some(preview) = state.preview_cache.get(frame_id, max_edge) {
-                (preview, "preview_ram", 0)
-            } else {
-                let decoder_cancellation = cancellation.clone();
-                let navigated = navigate_to_frame_cached(
-                    index,
-                    &mut state.source_cache,
-                    || open_decoder(source_fd, decoder_cancellation),
-                    frame_id,
-                )
-                .map_err(from_navigation)?;
-                ensure_not_cancelled(&cancellation)?;
-                let source = match navigated.source {
-                    CachedFrameSource::Ram => "source_ram",
-                    CachedFrameSource::Decoded => "decoded",
-                };
-                let decoded_frames = navigated.decoded_frames;
-                let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
-                    .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
-                ensure_not_cancelled(&cancellation)?;
-                state
-                    .preview_cache
-                    .insert(frame_id, max_edge, preview.clone());
-                (preview, source, decoded_frames)
+        let (preview, source, decoded_frames) = if let Some(preview) =
+            state.preview_cache.get(frame_id, max_edge)
+        {
+            (preview, "preview_ram", 0)
+        } else {
+            let decoder_cancellation = cancellation.clone();
+            let navigated = navigate_to_frame_cached(
+                index,
+                &mut state.source_cache,
+                || open_decoder(source_fd, decoder_cancellation.clone()),
+                frame_id,
+            )
+            .map_err(from_navigation)?;
+            ensure_not_cancelled(&cancellation)?;
+            let source = match navigated.source {
+                CachedFrameSource::Ram => "source_ram",
+                CachedFrameSource::Decoded => "decoded",
             };
+            let decoded_frames = navigated.decoded_frames;
+            let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
+                .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
+            ensure_not_cancelled(&cancellation)?;
+            state
+                .preview_cache
+                .insert(frame_id, max_edge, preview.clone());
+            (preview, source, decoded_frames)
+        };
 
         ensure_not_cancelled(&cancellation)?;
         if destination.len() < preview.byte_len() {
@@ -466,11 +469,7 @@ fn open_decoder(
     // SAFETY: `with_extraction_context` keeps the owned microscope descriptor alive for this call.
     // VideoDecoder duplicates the descriptor immediately and owns only that duplicate.
     let borrowed = unsafe { BorrowedFd::borrow_raw(source_fd) };
-    VideoDecoder::open_file_descriptor_with_options(
-        borrowed,
-        OpenOptions::default(),
-        cancellation,
-    )
+    VideoDecoder::open_file_descriptor_with_options(borrowed, OpenOptions::default(), cancellation)
 }
 
 fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), PreviewFailure> {
