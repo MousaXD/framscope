@@ -52,11 +52,13 @@ class IndexingProgressEstimator(
             firstRateElapsedMs = null
         }
 
-        val fraction = if (isFreshIndexing || progress.stage == MicroscopeIndexingStage.Finalizing) {
-            estimatedFraction(progress)
-        } else {
-            null
-        }
+        // A cached complete index can jump straight from "reusing" to "finalizing" without
+        // traversing the timeline. Only carry percentage/rate into finalizing if fresh indexing
+        // actually produced throughput samples.
+        val hasFreshThroughput = smoothedFramesPerSecond != null
+        val mayEstimateTimeline = isFreshIndexing ||
+            (progress.stage == MicroscopeIndexingStage.Finalizing && hasFreshThroughput)
+        val fraction = if (mayEstimateTimeline) estimatedFraction(progress) else null
         val eta = if (isFreshIndexing) estimatedEtaSeconds(progress, fraction) else null
 
         return IndexingProgressUi(
@@ -66,11 +68,7 @@ class IndexingProgressEstimator(
             expectedReuseFrames = progress.expectedReuseFrames,
             currentTimestampUs = progress.currentTimestampUs,
             elapsedMs = progress.elapsedMs,
-            framesPerSecond = if (isFreshIndexing || progress.stage == MicroscopeIndexingStage.Finalizing) {
-                smoothedFramesPerSecond
-            } else {
-                null
-            },
+            framesPerSecond = if (mayEstimateTimeline) smoothedFramesPerSecond else null,
             estimatedFraction = fraction,
             estimatedRemainingSeconds = eta,
         )
