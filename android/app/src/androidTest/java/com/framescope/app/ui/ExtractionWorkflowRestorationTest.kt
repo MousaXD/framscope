@@ -1,6 +1,7 @@
 package com.framescope.app.ui
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.StateRestorationTester
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.onNodeWithTag
@@ -13,6 +14,7 @@ import com.framescope.app.data.PreparedMicroscopeFrame
 import java.nio.ByteBuffer
 import org.junit.Test
 
+@OptIn(ExperimentalTestApi::class)
 class ExtractionWorkflowRestorationTest {
     @Test
     fun openSheetAndSelectedModeRestoreAcrossSavedInstanceState() = runComposeUiTest {
@@ -38,7 +40,7 @@ class ExtractionWorkflowRestorationTest {
         onNodeWithTag("extract_mode_FrameRange").performClick()
         onNodeWithTag("extract_mode_FrameRange").assertIsSelected()
 
-        restorationTester.emulateSavedInstanceStateRestore()
+        restorationTester.emulateSaveAndRestore()
 
         onNodeWithTag("extraction_sheet").assertExists()
         onNodeWithTag("extract_mode_FrameRange").assertIsSelected()
