@@ -98,10 +98,7 @@ impl StorageAdmin {
         self.with_lock(|| self.stats_unlocked())
     }
 
-    pub fn clear(
-        &self,
-        scope: StorageClearScope,
-    ) -> Result<StorageClearReport, StorageAdminError> {
+    pub fn clear(&self, scope: StorageClearScope) -> Result<StorageClearReport, StorageAdminError> {
         self.with_lock(|| {
             self.ensure_root_safe()?;
             match scope {
@@ -150,10 +147,8 @@ impl StorageAdmin {
                     if source_entry.file_name().to_string_lossy() != source_key {
                         continue;
                     }
-                    report = checked_report_add(
-                        report,
-                        self.clear_owned_path(&source_entry.path())?,
-                    )?;
+                    report =
+                        checked_report_add(report, self.clear_owned_path(&source_entry.path())?)?;
                 }
             }
             Ok(report)
@@ -293,9 +288,9 @@ fn count_indexed_sources(index_root: &Path) -> Result<u64, StorageAdminError> {
 fn is_safe_source_key(source_key: &str) -> bool {
     !source_key.is_empty()
         && source_key.len() <= 256
-        && source_key.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
-        })
+        && source_key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn stats_for_path(path: &Path) -> Result<StorageCategoryStats, StorageAdminError> {
@@ -458,10 +453,7 @@ mod tests {
     fn per_source_clear_is_confined_to_exact_valid_namespace() {
         let root = test_root("source");
         for source_key in ["source_A", "source_B"] {
-            let source = root
-                .join(FRAME_INDEX_NAMESPACE)
-                .join("v3")
-                .join(source_key);
+            let source = root.join(FRAME_INDEX_NAMESPACE).join("v3").join(source_key);
             fs::create_dir_all(&source).unwrap();
             fs::write(source.join("stream-0.sqlite3"), source_key).unwrap();
             fs::write(source.join("stream-0.sqlite3-wal"), b"wal").unwrap();
@@ -470,8 +462,17 @@ mod tests {
 
         let report = admin.clear_source_indexes("source_A").unwrap();
         assert!(report.cleared_bytes > 0);
-        assert!(!root.join(FRAME_INDEX_NAMESPACE).join("v3/source_A").exists());
-        assert!(root.join(FRAME_INDEX_NAMESPACE).join("v3/source_B").exists());
+        assert!(
+            !root
+                .join(FRAME_INDEX_NAMESPACE)
+                .join("v3/source_A")
+                .exists()
+        );
+        assert!(
+            root.join(FRAME_INDEX_NAMESPACE)
+                .join("v3/source_B")
+                .exists()
+        );
         for invalid in ["", "../source_B", "source/B", "source\\B", "."] {
             assert!(matches!(
                 admin.clear_source_indexes(invalid),
