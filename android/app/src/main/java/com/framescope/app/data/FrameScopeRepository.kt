@@ -76,6 +76,7 @@ class AndroidFrameScopeRepository(
         AndroidFrameExportDestinationFactory(contentResolver),
     private val batchDocumentFactory: ExportDocumentFactory =
         AndroidExportDocumentFactory(contentResolver),
+    private val nativeUniqueExportBridge: NativeUniqueExportBridge = RustUniqueExportBridge,
 ) : FrameScopeRepository {
     private val nextOperationId = AtomicLong(1L)
     private val activeNativeOperationId = AtomicLong(NO_OPERATION)
@@ -381,13 +382,24 @@ class AndroidFrameScopeRepository(
                             onProgress = onProgress,
                         ).use { sink ->
                             currentCoroutineContext().ensureActive()
-                            val nativeResult = nativeBridge.exportMicroscopeBatch(
-                                sessionId = snapshot.sessionId,
-                                manifestFd = manifestOutput.fd,
-                                operationId = operationId,
-                                request = request,
-                                sink = sink,
-                            )
+                            val nativeResult = if (request.selection == BatchExportSelection.UniqueGroups) {
+                                nativeUniqueExportBridge.exportMicroscopeUniqueGroups(
+                                    sessionId = snapshot.sessionId,
+                                    manifestFd = manifestOutput.fd,
+                                    operationId = operationId,
+                                    cacheRoot = cacheRoot,
+                                    request = request,
+                                    sink = sink,
+                                )
+                            } else {
+                                nativeBridge.exportMicroscopeBatch(
+                                    sessionId = snapshot.sessionId,
+                                    manifestFd = manifestOutput.fd,
+                                    operationId = operationId,
+                                    request = request,
+                                    sink = sink,
+                                )
+                            }
 
                             when (nativeResult) {
                                 is NativeBatchExport.Success -> {
@@ -410,7 +422,7 @@ class AndroidFrameScopeRepository(
                                 }
 
                                 is NativeBatchExport.Failure -> {
-                                    if (shouldPreserveFailureManifest(nativeResult.code)) {
+                                    if (shouldPreserveFailureManifest(nativeResult.code, request.selection)) {
                                         manifestOutput.commit()
                                     }
                                     if (nativeResult.code in CANCELLATION_CODES) {
@@ -513,12 +525,22 @@ class AndroidFrameScopeRepository(
             }
 
             is BatchExportSelection.TimestampRangeUsInclusive -> Unit
-            BatchExportSelection.AllFrames -> Unit
+            BatchExportSelection.AllFrames, BatchExportSelection.UniqueGroups -> Unit
         }
     }
 
-    private fun shouldPreserveFailureManifest(code: String): Boolean =
-        code !in NON_PERSISTABLE_MANIFEST_FAILURE_CODES
+    private fun shouldPreserveFailureManifest(
+        code: String,
+        selection: BatchExportSelection,
+    ): Boolean {
+        if (
+            selection == BatchExportSelection.UniqueGroups &&
+            code in UNIQUE_PRE_MANIFEST_FAILURE_CODES
+        ) {
+            return false
+        }
+        return code !in NON_PERSISTABLE_MANIFEST_FAILURE_CODES
+    }
 
     private fun stableManifestFileName(sessionId: Long, operationId: Long): String {
         if (sessionId <= 0L || operationId <= 0L) {
@@ -619,7 +641,14 @@ class AndroidFrameScopeRepository(
         const val NO_OPERATION = 0L
         const val FRAME_ID_WIDTH = 20
         const val MANIFEST_MIME_TYPE = "application/json"
-        val CANCELLATION_CODES = setOf("cancelled", "cancellation")
+        val CANCELLATION_CODES = setOf("cancelled", "cancellation", "cancelled_preflight")
+        val UNIQUE_PRE_MANIFEST_FAILURE_CODES = setOf(
+            "cancelled_preflight",
+            "group_preflight_error",
+            "unsafe_source_identity",
+            "invalid_destination_preflight",
+            "bridge_error",
+        )
         val NON_PERSISTABLE_MANIFEST_FAILURE_CODES = setOf(
             "invalid_request",
             "session_not_found",
