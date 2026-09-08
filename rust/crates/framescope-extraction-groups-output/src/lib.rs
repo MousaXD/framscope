@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(sink.committed[0].0, FrameId(7));
         assert_eq!(sink.committed[0].1, "frame_00000000000000000007.png");
         manifest.finish_complete().unwrap();
-        drop(manifest);
+        let _ = manifest.into_inner();
 
         let jsonl = String::from_utf8(bytes).unwrap();
         assert!(jsonl.contains("\"kind\":\"unique_group_representatives\""));
