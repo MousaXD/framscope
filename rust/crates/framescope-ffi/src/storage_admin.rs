@@ -57,7 +57,10 @@ enum StorageResponse {
 }
 
 fn validate_cache_root(cache_root: &str) -> Result<(), StorageResponse> {
-    if cache_root.is_empty() || cache_root.len() > MAX_CACHE_ROOT_LENGTH || cache_root.contains('\0') {
+    if cache_root.is_empty()
+        || cache_root.len() > MAX_CACHE_ROOT_LENGTH
+        || cache_root.contains('\0')
+    {
         return Err(StorageResponse::Error {
             engine: ENGINE_VERSION,
             code: "invalid_cache_root",
@@ -178,7 +181,9 @@ fn panic_response() -> String {
 }
 
 fn jstring_value(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, ()> {
-    env.get_string(&value).map(|value| value.into()).map_err(|_| ())
+    env.get_string(&value)
+        .map(|value| value.into())
+        .map_err(|_| ())
 }
 
 #[unsafe(no_mangle)]
