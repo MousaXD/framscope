@@ -1,3 +1,6 @@
+#[path = "scrub_handoff.rs"]
+mod scrub_handoff;
+
 use framescope_cache::{
     FrameScopeStorageStats, StorageAdmin, StorageAdminError, StorageClearReport, StorageClearScope,
 };
@@ -305,5 +308,12 @@ mod tests {
         crate::ACTIVE_MICROSCOPE_SESSIONS.fetch_sub(1, Ordering::AcqRel);
         let json = serialize_response(response);
         assert!(json.contains("active_session"));
+    }
+
+    #[test]
+    fn wave1_storage_and_live_scrub_exports_are_linked_together() {
+        let _storage_stats = Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats;
+        let _preview_frame = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewFrame;
+        let _preview_timestamp = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewTimestampUs;
     }
 }
