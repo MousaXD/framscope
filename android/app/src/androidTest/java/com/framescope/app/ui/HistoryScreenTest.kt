@@ -36,7 +36,7 @@ class HistoryScreenTest {
         }
 
         composeRule.onNodeWithText("clip.mp4").assertIsDisplayed()
-        composeRule.onNodeWithText("0:05").assertIsDisplayed()
+        composeRule.onNodeWithText("Resume at 0:05").assertIsDisplayed()
         composeRule.onNodeWithText("Resume").assertIsDisplayed().performClick()
 
         composeRule.runOnIdle {
