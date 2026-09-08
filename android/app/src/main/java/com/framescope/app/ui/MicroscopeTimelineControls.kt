@@ -35,9 +35,12 @@ internal fun MicroscopeTimelineControls(
     enabled: Boolean,
     onJumpFrame: (Long) -> Unit,
     onJumpTimestampUs: (Long) -> Unit,
+    onPreviewFrame: (Long) -> Unit,
+    onPreviewTimestampUs: (Long) -> Unit,
+    onFinishScrubFrame: (Long) -> Unit,
+    onFinishScrubTimestampUs: (Long) -> Unit,
     onCommitRange: (Long, Long) -> Unit,
     onClearRange: () -> Unit,
-    showImplementationGuidance: Boolean = true,
 ) {
     val currentFrame = session.currentFrame ?: return
     val bounds = timelineBounds?.takeIf {
@@ -100,7 +103,7 @@ internal fun MicroscopeTimelineControls(
         )
         Text(
             text = previewTimestampUs?.let { timestamp ->
-                "Seek preview ${MicroscopePreviewMath.formatTimestampUs(timestamp)}"
+                "Preview ${MicroscopePreviewMath.formatTimestampUs(timestamp)}"
             } ?: previewFrameId?.let { frameId ->
                 MicroscopeTimelineMath.framePositionLabel(frameId, session.frameCount)
             } ?: "Indexed position unavailable",
@@ -112,6 +115,19 @@ internal fun MicroscopeTimelineControls(
             onValueChange = { fraction ->
                 scrubbing = true
                 scrubFraction = fraction.coerceIn(0f, 1f)
+                val indexedBounds = bounds
+                if (indexedBounds != null) {
+                    MicroscopeTimelineMath.timestampForFraction(
+                        fraction = scrubFraction,
+                        startUs = indexedBounds.startUs,
+                        endUs = indexedBounds.endUs,
+                    )?.let(onPreviewTimestampUs)
+                } else {
+                    MicroscopeTimelineMath.frameForFraction(
+                        fraction = scrubFraction,
+                        frameCount = session.frameCount,
+                    )?.let(onPreviewFrame)
+                }
             },
             onValueChangeFinished = {
                 val indexedBounds = bounds
@@ -132,12 +148,8 @@ internal fun MicroscopeTimelineControls(
                 }
                 scrubbing = false
                 when {
-                    targetTimestampUs != null && targetTimestampUs != currentFrame.timestampUs -> {
-                        onJumpTimestampUs(targetTimestampUs)
-                    }
-                    targetFrameId != null && targetFrameId != currentFrame.frameId -> {
-                        onJumpFrame(targetFrameId)
-                    }
+                    targetTimestampUs != null -> onFinishScrubTimestampUs(targetTimestampUs)
+                    targetFrameId != null -> onFinishScrubFrame(targetFrameId)
                 }
             },
             enabled = enabled && session.frameCount > 1L,
@@ -170,13 +182,11 @@ internal fun MicroscopeTimelineControls(
                     style = MaterialTheme.typography.labelMedium,
                 )
             }
-            if (showImplementationGuidance) {
-                Text(
-                    text = "Dragging updates only local UI state. Releasing requests one indexed timestamp seek; Rust resolves the final authoritative VFR-safe frame.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            Text(
+                text = "Drag to preview indexed frames. Release to settle on the exact frame.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             TimelineRangeControls(
                 sessionId = session.sessionId,
                 bounds = bounds,
@@ -185,9 +195,9 @@ internal fun MicroscopeTimelineControls(
                 onCommitRange = onCommitRange,
                 onClearRange = onClearRange,
             )
-        } else if (showImplementationGuidance) {
+        } else {
             Text(
-                text = "Indexed timestamps are unavailable for the timeline endpoints, so dragging stays presentation-order based and release performs one exact FrameId jump.",
+                text = "Drag to preview by presentation order. Release to settle on the exact indexed frame.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
