@@ -73,7 +73,7 @@ fn admin(cache_root: &str) -> Result<StorageAdmin, StorageResponse> {
 }
 
 fn from_admin_error(error: StorageAdminError) -> StorageResponse {
-    let code = match error {
+    let code = match &error {
         StorageAdminError::InvalidSourceKey => "invalid_source_key",
         StorageAdminError::RootIsSymlink(_) => "unsafe_cache_root",
         StorageAdminError::LockPoisoned => "storage_busy",
