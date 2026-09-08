@@ -4,24 +4,34 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/main-snapshot-release.yml'
 
 permissions:
-  contents: read
+  actions: read
+  contents: write
 
 concurrency:
-  group: main-snapshot-release-${{ github.sha }}
+  group: main-snapshot-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  validate-workflow:
+    name: validate-workflow
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Confirm publisher workflow parsed on pull request
+        run: echo 'main snapshot publisher workflow parsed successfully'
+
   publish-main-snapshot:
     name: publish-main-snapshot
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions:
-      actions: read
-      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       HEAD_SHA: ${{ github.sha }}
