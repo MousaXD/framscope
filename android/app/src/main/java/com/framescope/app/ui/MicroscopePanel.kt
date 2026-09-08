@@ -66,13 +66,20 @@ internal fun MicroscopePanel(
     onCommitRange: (Long, Long) -> Unit,
     onClearRange: () -> Unit,
     onDismissError: () -> Unit,
+    compactWorkspace: Boolean = false,
 ) {
     when (state) {
         MicroscopeUiState.Idle -> Unit
         MicroscopeUiState.Opening -> MicroscopeBusyCard(
-            "Indexing presentation timestamps in Rust… Exact timeline navigation unlocks when the complete index is ready.",
+            if (compactWorkspace) {
+                "Indexing video timeline…"
+            } else {
+                "Indexing presentation timestamps in Rust… Exact timeline navigation unlocks when the complete index is ready."
+            },
         )
-        is MicroscopeUiState.LoadingFrame -> MicroscopeBusyCard("Decoding source-quality frame…")
+        is MicroscopeUiState.LoadingFrame -> MicroscopeBusyCard(
+            if (compactWorkspace) "Loading frame…" else "Decoding source-quality frame…",
+        )
         is MicroscopeUiState.Navigating -> {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 state.previousFrame?.let { frame ->
@@ -87,9 +94,12 @@ internal fun MicroscopePanel(
                         onJumpTimestampUs = onJumpTimestampUs,
                         onCommitRange = onCommitRange,
                         onClearRange = onClearRange,
+                        compactWorkspace = compactWorkspace,
                     )
                 }
-                MicroscopeBusyCard("Resolving the requested indexed frame…")
+                MicroscopeBusyCard(
+                    if (compactWorkspace) "Moving to frame…" else "Resolving the requested indexed frame…",
+                )
             }
         }
         is MicroscopeUiState.Ready -> MicroscopeFrameCard(
@@ -103,6 +113,7 @@ internal fun MicroscopePanel(
             onJumpTimestampUs = onJumpTimestampUs,
             onCommitRange = onCommitRange,
             onClearRange = onClearRange,
+            compactWorkspace = compactWorkspace,
         )
         is MicroscopeUiState.Empty -> MicroscopeStatusCard(
             "The selected video has no indexed presentation frames.",
@@ -112,6 +123,99 @@ internal fun MicroscopePanel(
             code = state.code,
             onDismiss = onDismissError,
         )
+    }
+}
+
+@Composable
+internal fun MicroscopeInspectorPanel(
+    state: MicroscopeUiState,
+    onStep: (Int) -> Unit,
+    onJumpFrame: (Long) -> Unit,
+    onJumpTimestampUs: (Long) -> Unit,
+) {
+    when (state) {
+        MicroscopeUiState.Idle -> MicroscopeStatusCard("No microscope session is open.")
+        MicroscopeUiState.Opening -> MicroscopeStatusCard("Frame index is still being prepared.")
+        is MicroscopeUiState.LoadingFrame -> InspectorFrameTools(
+            session = state.session,
+            enabled = false,
+            onStep = onStep,
+            onJumpFrame = onJumpFrame,
+            onJumpTimestampUs = onJumpTimestampUs,
+        )
+        is MicroscopeUiState.Navigating -> InspectorFrameTools(
+            session = state.session,
+            enabled = false,
+            onStep = onStep,
+            onJumpFrame = onJumpFrame,
+            onJumpTimestampUs = onJumpTimestampUs,
+        )
+        is MicroscopeUiState.Ready -> InspectorFrameTools(
+            session = state.session,
+            enabled = true,
+            onStep = onStep,
+            onJumpFrame = onJumpFrame,
+            onJumpTimestampUs = onJumpTimestampUs,
+        )
+        is MicroscopeUiState.Empty -> MicroscopeStatusCard("The video has no indexed presentation frames.")
+        is MicroscopeUiState.Error -> MicroscopeStatusCard(
+            buildString {
+                append(state.message)
+                state.code?.let { append(" ($it)") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun InspectorFrameTools(
+    session: MicroscopeSessionSnapshot,
+    enabled: Boolean,
+    onStep: (Int) -> Unit,
+    onJumpFrame: (Long) -> Unit,
+    onJumpTimestampUs: (Long) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(
+                text = "Frame timing & navigation",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            FrameIdentity(frame = session.currentFrame, frameCount = session.frameCount)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedButton(
+                    onClick = { onStep(-1) },
+                    enabled = enabled && session.canStepPrevious,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Previous")
+                }
+                Button(
+                    onClick = { onStep(1) },
+                    enabled = enabled && session.canStepNext,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Next")
+                }
+            }
+            JumpControls(
+                session = session,
+                enabled = enabled,
+                onJumpFrame = onJumpFrame,
+                onJumpTimestampUs = onJumpTimestampUs,
+            )
+        }
     }
 }
 
@@ -127,6 +231,7 @@ private fun MicroscopeFrameCard(
     onJumpTimestampUs: (Long) -> Unit,
     onCommitRange: (Long, Long) -> Unit,
     onClearRange: () -> Unit,
+    compactWorkspace: Boolean,
 ) {
     val descriptor = frame.descriptor
     val preview by key(frame) {
@@ -145,19 +250,21 @@ private fun MicroscopeFrameCard(
         shape = RoundedCornerShape(18.dp),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.padding(if (compactWorkspace) 12.dp else 16.dp),
+            verticalArrangement = Arrangement.spacedBy(if (compactWorkspace) 10.dp else 14.dp),
         ) {
-            Text(
-                text = "Frame microscope",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
+            if (!compactWorkspace) {
+                Text(
+                    text = "Frame microscope",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
 
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 180.dp, max = 520.dp)
+                    .heightIn(min = if (compactWorkspace) 220.dp else 180.dp, max = 560.dp)
                     .aspectRatio(descriptor.width.toFloat() / descriptor.height.toFloat()),
                 contentAlignment = Alignment.Center,
             ) {
@@ -195,24 +302,30 @@ private fun MicroscopeFrameCard(
                 }
             }
 
-            when (val current = preview) {
-                is MicroscopePreviewState.Ready -> {
-                    val plan = current.plan
-                    Text(
-                        text = if (plan.isDownscaled) {
-                            "Display preview ${plan.targetWidth} × ${plan.targetHeight} from authoritative source frame " +
-                                "${plan.sourceWidth} × ${plan.sourceHeight}. Pinch to zoom; pan is enabled only above 1×. Swipe at 1× to step one frame."
-                        } else {
-                            "Display preview uses the authoritative source-frame dimensions. Pinch to zoom; pan is enabled only above 1×. Swipe at 1× to step one frame."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            if (!compactWorkspace) {
+                when (val current = preview) {
+                    is MicroscopePreviewState.Ready -> {
+                        val plan = current.plan
+                        Text(
+                            text = if (plan.isDownscaled) {
+                                "Display preview ${plan.targetWidth} × ${plan.targetHeight} from authoritative source frame " +
+                                    "${plan.sourceWidth} × ${plan.sourceHeight}. Pinch to zoom; pan is enabled only above 1×. Swipe at 1× to step one frame."
+                            } else {
+                                "Display preview uses the authoritative source-frame dimensions. Pinch to zoom; pan is enabled only above 1×. Swipe at 1× to step one frame."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    else -> Unit
                 }
-                else -> Unit
             }
 
-            FrameIdentity(frame = session.currentFrame, frameCount = session.frameCount)
+            if (compactWorkspace) {
+                WorkspaceFrameIdentity(frame = session.currentFrame, frameCount = session.frameCount)
+            } else {
+                FrameIdentity(frame = session.currentFrame, frameCount = session.frameCount)
+            }
 
             MicroscopeTimelineControls(
                 session = session,
@@ -223,6 +336,7 @@ private fun MicroscopeFrameCard(
                 onJumpTimestampUs = onJumpTimestampUs,
                 onCommitRange = onCommitRange,
                 onClearRange = onClearRange,
+                showImplementationGuidance = !compactWorkspace,
             )
 
             Row(
@@ -234,31 +348,55 @@ private fun MicroscopeFrameCard(
                     enabled = controlsEnabled && session.canStepPrevious,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Previous frame")
+                    Text(if (compactWorkspace) "Previous" else "Previous frame")
                 }
                 Button(
                     onClick = { onStep(1) },
                     enabled = controlsEnabled && session.canStepNext,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Next frame")
+                    Text(if (compactWorkspace) "Next" else "Next frame")
                 }
             }
 
-            JumpControls(
-                session = session,
-                enabled = controlsEnabled,
-                onJumpFrame = onJumpFrame,
-                onJumpTimestampUs = onJumpTimestampUs,
-            )
+            if (!compactWorkspace) {
+                JumpControls(
+                    session = session,
+                    enabled = controlsEnabled,
+                    onJumpFrame = onJumpFrame,
+                    onJumpTimestampUs = onJumpTimestampUs,
+                )
 
-            Text(
-                text = "Preview pixels are sampled directly from the caller-owned authoritative RGBA frame; " +
-                    "disk proxies are never used for microscope identity, navigation, or extraction.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+                Text(
+                    text = "Preview pixels are sampled directly from the caller-owned authoritative RGBA frame; " +
+                        "disk proxies are never used for microscope identity, navigation, or extraction.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun WorkspaceFrameIdentity(frame: FrameDetails?, frameCount: Long) {
+    if (frame == null) return
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Frame ${frame.frameId + 1} / $frameCount",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = frame.timestampUs?.let(MicroscopePreviewMath::formatTimestampUs)
+                ?: "Timestamp unavailable",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

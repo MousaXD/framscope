@@ -6,7 +6,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.framescope.app.data.AndroidFrameScopeRepository
@@ -103,79 +102,78 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                Box {
-                    FrameScopeScreen(
-                        state = state,
-                        onOpenVideo = {
-                            exportViewModel.cancelForMicroscopeChange()
-                            batchExportViewModel.cancelForMicroscopeChange()
-                            viewModel.onPickerStarted()
-                            videoPicker.launch(arrayOf("video/*"))
-                        },
-                        onCancelInspection = {
-                            exportViewModel.cancelForMicroscopeChange()
-                            batchExportViewModel.cancelForMicroscopeChange()
-                            viewModel.cancelInspection()
-                        },
-                        onDismissError = viewModel::clearError,
-                        onStepMicroscope = { delta ->
-                            exportViewModel.cancelForMicroscopeChange()
-                            batchExportViewModel.cancelForMicroscopeChange()
-                            viewModel.stepMicroscope(delta)
-                        },
-                        onJumpMicroscopeFrame = { frameId ->
-                            exportViewModel.cancelForMicroscopeChange()
-                            batchExportViewModel.cancelForMicroscopeChange()
-                            viewModel.jumpMicroscopeFrame(frameId)
-                        },
-                        onJumpMicroscopeTimestampUs = { timestampUs ->
-                            exportViewModel.cancelForMicroscopeChange()
-                            batchExportViewModel.cancelForMicroscopeChange()
-                            viewModel.jumpMicroscopeTimestampUs(timestampUs)
-                        },
-                        onCommitMicroscopeRange = viewModel::commitTimelineRange,
-                        onClearMicroscopeRange = viewModel::clearTimelineRange,
-                    )
+                FrameScopeScreen(
+                    state = state,
+                    onOpenVideo = {
+                        exportViewModel.cancelForMicroscopeChange()
+                        batchExportViewModel.cancelForMicroscopeChange()
+                        viewModel.onPickerStarted()
+                        videoPicker.launch(arrayOf("video/*"))
+                    },
+                    onCancelInspection = {
+                        exportViewModel.cancelForMicroscopeChange()
+                        batchExportViewModel.cancelForMicroscopeChange()
+                        viewModel.cancelInspection()
+                    },
+                    onDismissError = viewModel::clearError,
+                    onStepMicroscope = { delta ->
+                        exportViewModel.cancelForMicroscopeChange()
+                        batchExportViewModel.cancelForMicroscopeChange()
+                        viewModel.stepMicroscope(delta)
+                    },
+                    onJumpMicroscopeFrame = { frameId ->
+                        exportViewModel.cancelForMicroscopeChange()
+                        batchExportViewModel.cancelForMicroscopeChange()
+                        viewModel.jumpMicroscopeFrame(frameId)
+                    },
+                    onJumpMicroscopeTimestampUs = { timestampUs ->
+                        exportViewModel.cancelForMicroscopeChange()
+                        batchExportViewModel.cancelForMicroscopeChange()
+                        viewModel.jumpMicroscopeTimestampUs(timestampUs)
+                    },
+                    onCommitMicroscopeRange = viewModel::commitTimelineRange,
+                    onClearMicroscopeRange = viewModel::clearTimelineRange,
+                    workspaceOverlay = {
+                        CurrentFrameExportOverlay(
+                            microscopeState = state.microscopeState,
+                            exportState = exportState,
+                            onRequestExport = { format ->
+                                val ready = state.microscopeState as? MicroscopeUiState.Ready
+                                    ?: return@CurrentFrameExportOverlay
+                                val frameId = ready.session.currentFrame?.frameId
+                                    ?: return@CurrentFrameExportOverlay
+                                batchExportViewModel.cancelForMicroscopeChange()
+                                exportViewModel.beginCurrentFrameExport(
+                                    sessionId = ready.session.sessionId,
+                                    frameId = frameId,
+                                    format = format,
+                                )
+                                exportTreePicker.launch(null)
+                            },
+                            onCancelExport = exportViewModel::cancelForMicroscopeChange,
+                            onDismissStatus = exportViewModel::dismissStatus,
+                        )
 
-                    CurrentFrameExportOverlay(
-                        microscopeState = state.microscopeState,
-                        exportState = exportState,
-                        onRequestExport = { format ->
-                            val ready = state.microscopeState as? MicroscopeUiState.Ready
-                                ?: return@CurrentFrameExportOverlay
-                            val frameId = ready.session.currentFrame?.frameId
-                                ?: return@CurrentFrameExportOverlay
-                            batchExportViewModel.cancelForMicroscopeChange()
-                            exportViewModel.beginCurrentFrameExport(
-                                sessionId = ready.session.sessionId,
-                                frameId = frameId,
-                                format = format,
-                            )
-                            exportTreePicker.launch(null)
-                        },
-                        onCancelExport = exportViewModel::cancelForMicroscopeChange,
-                        onDismissStatus = exportViewModel::dismissStatus,
-                    )
-
-                    BatchExportOverlay(
-                        microscopeState = state.microscopeState,
-                        selectedTimelineRange = state.timelineRange,
-                        exportState = batchExportState,
-                        onRequestExport = { request ->
-                            val ready = state.microscopeState as? MicroscopeUiState.Ready
-                                ?: return@BatchExportOverlay
-                            exportViewModel.cancelForMicroscopeChange()
-                            batchExportViewModel.beginBatchExport(
-                                sessionId = ready.session.sessionId,
-                                currentFrameId = ready.session.currentFrame?.frameId,
-                                request = request,
-                            )
-                            batchExportTreePicker.launch(null)
-                        },
-                        onCancelExport = batchExportViewModel::cancelForMicroscopeChange,
-                        onDismissStatus = batchExportViewModel::dismissStatus,
-                    )
-                }
+                        BatchExportOverlay(
+                            microscopeState = state.microscopeState,
+                            selectedTimelineRange = state.timelineRange,
+                            exportState = batchExportState,
+                            onRequestExport = { request ->
+                                val ready = state.microscopeState as? MicroscopeUiState.Ready
+                                    ?: return@BatchExportOverlay
+                                exportViewModel.cancelForMicroscopeChange()
+                                batchExportViewModel.beginBatchExport(
+                                    sessionId = ready.session.sessionId,
+                                    currentFrameId = ready.session.currentFrame?.frameId,
+                                    request = request,
+                                )
+                                batchExportTreePicker.launch(null)
+                            },
+                            onCancelExport = batchExportViewModel::cancelForMicroscopeChange,
+                            onDismissStatus = batchExportViewModel::dismissStatus,
+                        )
+                    },
+                )
             }
         }
     }
