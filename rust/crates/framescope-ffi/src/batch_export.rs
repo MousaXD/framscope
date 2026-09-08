@@ -39,8 +39,7 @@ const ABORT_FRAME_SIGNATURE: &str = "(Ljava/lang/String;)V";
 const FAILURE_CODE_METHOD: &str = "failureCode";
 const FAILURE_CODE_SIGNATURE: &str = "()Ljava/lang/String;";
 const STORAGE_FULL_CODE: &str = "storage_full";
-const STORAGE_FULL_MESSAGE: &str =
-    "The export destination is out of space or has reached its storage quota. Free space or choose another folder and try again.";
+const STORAGE_FULL_MESSAGE: &str = "The export destination is out of space or has reached its storage quota. Free space or choose another folder and try again.";
 
 #[derive(Debug, Serialize)]
 struct BatchExportDetails {
@@ -687,6 +686,9 @@ mod tests {
     #[test]
     fn storage_full_error_code_is_stable() {
         assert_eq!(JniFrameSinkError::StorageFull.code(), STORAGE_FULL_CODE);
-        assert_eq!(JniFrameSinkError::StorageFull.to_string(), STORAGE_FULL_MESSAGE);
+        assert_eq!(
+            JniFrameSinkError::StorageFull.to_string(),
+            STORAGE_FULL_MESSAGE
+        );
     }
 }
