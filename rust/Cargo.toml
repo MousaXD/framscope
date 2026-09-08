@@ -15,6 +15,7 @@ members = [
     "crates/framescope-extraction-image",
     "crates/framescope-extraction-groups",
     "crates/framescope-extraction-groups-video",
+    "crates/framescope-extraction-groups-output",
     "crates/framescope-extraction-manifest",
     "crates/framescope-extraction-output",
     "crates/framescope-ffi",
