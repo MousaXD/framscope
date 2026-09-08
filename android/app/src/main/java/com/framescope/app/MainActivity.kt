@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.framescope.app.data.AndroidFrameScopeRepository
+import com.framescope.app.data.AndroidMicroscopeScrubPreviewSource
 import com.framescope.app.platform.LocalExportTree
 import com.framescope.app.platform.LocalVideoOpenDocument
 import com.framescope.app.ui.BatchExportOverlay
@@ -25,15 +26,23 @@ import com.framescope.app.ui.MicroscopeUiState
 import com.framescope.app.ui.theme.FrameScopeTheme
 
 class MainActivity : ComponentActivity() {
+    private val frameScopeCacheRoot by lazy {
+        applicationContext.cacheDir.resolve("framescope").absolutePath
+    }
+
     private val repository by lazy {
         AndroidFrameScopeRepository(
             contentResolver = applicationContext.contentResolver,
-            cacheRoot = applicationContext.cacheDir.resolve("framescope").absolutePath,
+            cacheRoot = frameScopeCacheRoot,
         )
     }
 
+    private val scrubPreviewSource by lazy {
+        AndroidMicroscopeScrubPreviewSource(cacheRoot = frameScopeCacheRoot)
+    }
+
     private val viewModel: MainViewModel by viewModels {
-        MainViewModelFactory(repository)
+        MainViewModelFactory(repository, scrubPreviewSource)
     }
 
     private val exportViewModel: FrameExportViewModel by viewModels {
@@ -132,6 +141,18 @@ class MainActivity : ComponentActivity() {
                             exportViewModel.cancelForMicroscopeChange()
                             batchExportViewModel.cancelForMicroscopeChange()
                             viewModel.jumpMicroscopeTimestampUs(timestampUs)
+                        },
+                        onPreviewMicroscopeFrame = viewModel::previewMicroscopeFrame,
+                        onPreviewMicroscopeTimestampUs = viewModel::previewMicroscopeTimestampUs,
+                        onFinishMicroscopeScrubFrame = { frameId ->
+                            exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.cancelForMicroscopeChange()
+                            viewModel.finishMicroscopeScrubFrame(frameId)
+                        },
+                        onFinishMicroscopeScrubTimestampUs = { timestampUs ->
+                            exportViewModel.cancelForMicroscopeChange()
+                            batchExportViewModel.cancelForMicroscopeChange()
+                            viewModel.finishMicroscopeScrubTimestampUs(timestampUs)
                         },
                         onCommitMicroscopeRange = viewModel::commitTimelineRange,
                         onClearMicroscopeRange = viewModel::clearTimelineRange,
