@@ -47,8 +47,9 @@ fun CurrentFrameExportOverlay(
         when (exportState) {
             FrameExportUiState.Idle -> ExtendedFloatingActionButton(
                 onClick = { showFormatDialog = true },
-                text = { Text("Export frame ${ready.session.currentFrame?.frameId ?: ""}") },
-            )
+            ) {
+                Text("Export frame ${ready.session.currentFrame?.frameId ?: ""}")
+            }
 
             is FrameExportUiState.AwaitingDestination -> ExportStatusCard(
                 title = "Choose export folder",
