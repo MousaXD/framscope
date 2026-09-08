@@ -61,7 +61,7 @@ enum StorageResponse {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy,PartialEq, Eq)]
 struct InvalidCacheRoot;
 
 fn validate_cache_root(cache_root: &str) -> Result<(), InvalidCacheRoot> {
@@ -312,7 +312,8 @@ mod tests {
 
     #[test]
     fn wave1_storage_and_live_scrub_exports_are_linked_together() {
-        let _storage_stats = Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats;
+        let _storage_stats =
+            Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats;
         let _preview_frame = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewFrame;
         let _preview_timestamp = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewTimestampUs;
     }
