@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.framescope.app.data.ExportedFrameDocument
+import com.framescope.app.data.ExportStorageFailureClassifier
 import com.framescope.app.data.FrameExportException
 import com.framescope.app.data.FrameExportFormat
 import com.framescope.app.data.FrameScopeRepository
@@ -110,9 +111,17 @@ class FrameExportViewModel(
                 }.onFailure { error ->
                     if (revision == generation.get()) {
                         val exportError = error as? FrameExportException
+                        val storageFailure = exportError?.let {
+                            ExportStorageFailureClassifier.classifyNative(
+                                code = it.code,
+                                message = error.message.orEmpty(),
+                            )
+                        } ?: ExportStorageFailureClassifier.classify(error)
                         _state.value = FrameExportUiState.Error(
-                            message = error.message ?: "Could not export this frame.",
-                            code = exportError?.code,
+                            message = storageFailure?.message
+                                ?: error.message
+                                ?: "Could not export this frame.",
+                            code = storageFailure?.code ?: exportError?.code,
                         )
                     }
                 }

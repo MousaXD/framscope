@@ -8,7 +8,7 @@ use framescope_extraction_output::{
 };
 use framescope_video::{OpenOptions, VideoDecoder};
 use jni::JNIEnv;
-use jni::objects::{JClass, JObject, JValue};
+use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jint, jlong, jstring};
 use serde::Serialize;
 use std::fs::File;
@@ -36,6 +36,10 @@ const COMMIT_FRAME_METHOD: &str = "commitFrame";
 const COMMIT_FRAME_SIGNATURE: &str = "(Ljava/lang/String;JJJJ)Z";
 const ABORT_FRAME_METHOD: &str = "abortFrame";
 const ABORT_FRAME_SIGNATURE: &str = "(Ljava/lang/String;)V";
+const FAILURE_CODE_METHOD: &str = "failureCode";
+const FAILURE_CODE_SIGNATURE: &str = "()Ljava/lang/String;";
+const STORAGE_FULL_CODE: &str = "storage_full";
+const STORAGE_FULL_MESSAGE: &str = "The export destination is out of space or has reached its storage quota. Free space or choose another folder and try again.";
 
 #[derive(Debug, Serialize)]
 struct BatchExportDetails {
@@ -87,6 +91,8 @@ enum JniFrameSinkError {
     Jni(#[from] jni::errors::Error),
     #[error("frame sink did not return a writable file descriptor")]
     InvalidDestination,
+    #[error("{STORAGE_FULL_MESSAGE}")]
+    StorageFull,
     #[error("image encoding failed: {0}")]
     Image(#[from] ImageExportError),
     #[error("frame sink rejected the committed artifact")]
@@ -99,6 +105,7 @@ impl JniFrameSinkError {
             Self::NumericRange => "numeric_range",
             Self::Jni(_) => "output_callback_error",
             Self::InvalidDestination => "invalid_destination",
+            Self::StorageFull => STORAGE_FULL_CODE,
             Self::Image(_) => "image_encode_error",
             Self::CommitRejected => "output_commit_error",
         }
@@ -136,7 +143,11 @@ impl JniFrameSink<'_, '_> {
         let _ = self.env.delete_local_ref(mime_type);
         let fd = result?.i()?;
         if fd < 0 {
-            return Err(JniFrameSinkError::InvalidDestination);
+            return Err(if self.reported_storage_full() {
+                JniFrameSinkError::StorageFull
+            } else {
+                JniFrameSinkError::InvalidDestination
+            });
         }
         Ok(fd)
     }
@@ -168,9 +179,42 @@ impl JniFrameSink<'_, '_> {
         );
         let _ = self.env.delete_local_ref(file_name);
         if !result?.z()? {
-            return Err(JniFrameSinkError::CommitRejected);
+            return Err(if self.reported_storage_full() {
+                JniFrameSinkError::StorageFull
+            } else {
+                JniFrameSinkError::CommitRejected
+            });
         }
         Ok(())
+    }
+
+    fn reported_storage_full(&mut self) -> bool {
+        let result = match self.env.call_method(
+            &self.callback,
+            FAILURE_CODE_METHOD,
+            FAILURE_CODE_SIGNATURE,
+            &[],
+        ) {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.env.exception_clear();
+                return false;
+            }
+        };
+        let Ok(object) = result.l() else {
+            return false;
+        };
+        if object.is_null() {
+            return false;
+        }
+        let code = JString::from(object);
+        let matches = self
+            .env
+            .get_string(&code)
+            .map(|value| value.to_string_lossy() == STORAGE_FULL_CODE)
+            .unwrap_or(false);
+        let _ = self.env.delete_local_ref(code);
+        matches
     }
 
     fn abort_frame(&mut self, file_name: &str) {
@@ -636,6 +680,15 @@ mod tests {
                 .unwrap_err()
                 .code,
             "invalid_request"
+        );
+    }
+
+    #[test]
+    fn storage_full_error_code_is_stable() {
+        assert_eq!(JniFrameSinkError::StorageFull.code(), STORAGE_FULL_CODE);
+        assert_eq!(
+            JniFrameSinkError::StorageFull.to_string(),
+            STORAGE_FULL_MESSAGE
         );
     }
 }

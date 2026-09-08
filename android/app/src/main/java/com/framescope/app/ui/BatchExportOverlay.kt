@@ -27,9 +27,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.framescope.app.data.BatchExportProgress
 import com.framescope.app.data.BatchExportRequest
 import com.framescope.app.data.BatchExportSelection
 import com.framescope.app.data.FrameExportFormat
@@ -91,6 +97,7 @@ fun BatchExportOverlay(
                         "Frame ${progress.frameId} · ${formatLabel(exportState.pending.request.format)}"
                     },
                     busy = true,
+                    progress = progress,
                     onCancel = onCancelExport,
                 )
             }
@@ -411,10 +418,21 @@ private fun BatchExportStatusCard(
     title: String,
     detail: String,
     busy: Boolean = false,
+    progress: BatchExportProgress? = null,
     onCancel: (() -> Unit)? = null,
     onDismiss: (() -> Unit)? = null,
 ) {
     Card(
+        modifier = Modifier.semantics {
+            liveRegion = LiveRegionMode.Polite
+            progress?.takeIf(BatchExportProgress::isSane)?.let { value ->
+                progressBarRangeInfo = ProgressBarRangeInfo(
+                    current = value.ordinal.toFloat(),
+                    range = 0f..value.total.toFloat(),
+                    steps = 0,
+                )
+            }
+        },
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
     ) {
         Column(

@@ -119,6 +119,14 @@ interface NativeBatchFrameSink {
     ): Boolean
 
     fun abortFrame(fileName: String)
+
+    /**
+     * Optional stable failure code for the most recent rejected output callback.
+     *
+     * This keeps provider exceptions on the Kotlin side while still letting Rust distinguish
+     * actionable storage-capacity failures from a generic invalid destination.
+     */
+    fun failureCode(): String? = null
 }
 
 data class BatchExportProgress(
