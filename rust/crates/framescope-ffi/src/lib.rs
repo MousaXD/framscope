@@ -4,6 +4,7 @@ mod batch_export;
 mod frame_handoff;
 mod microscope;
 pub mod presentation_handoff;
+mod storage_admin;
 mod unique_export;
 
 use framescope_core::{FrameScopeError, MediaKind, StreamInfo, VideoInfo};
@@ -17,7 +18,8 @@ use std::collections::HashMap;
 use std::os::fd::BorrowedFd;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 const ENGINE_VERSION: &str = concat!("framescope-rust/", env!("CARGO_PKG_VERSION"));
 const MAX_PENDING_CANCELLATIONS: usize = 64;
@@ -27,6 +29,19 @@ type OperationId = i64;
 
 static INSPECTION_TOKENS: OnceLock<Mutex<HashMap<OperationId, CancellationToken>>> =
     OnceLock::new();
+static STORAGE_SESSION_LIFECYCLE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static ACTIVE_MICROSCOPE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn storage_session_lifecycle_lock() -> Result<MutexGuard<'static, ()>, ()> {
+    STORAGE_SESSION_LIFECYCLE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| ())
+}
+
+pub(crate) fn active_microscope_sessions() -> usize {
+    ACTIVE_MICROSCOPE_SESSIONS.load(Ordering::Acquire)
+}
 
 #[derive(Debug, Serialize)]
 struct InspectionMetadata {
@@ -289,6 +304,20 @@ fn panic_json() -> String {
     .unwrap_or_else(|_| "{\"status\":\"error\"}".into())
 }
 
+fn microscope_lifecycle_error_json() -> String {
+    format!(
+        "{{\"status\":\"error\",\"engine\":\"{ENGINE_VERSION}\",\"code\":\"bridge_error\",\"message\":\"native storage/session lifecycle state is unavailable\"}}"
+    )
+}
+
+fn microscope_open_succeeded(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|value| value.get("status").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .as_deref()
+        == Some("ok")
+}
+
 fn to_jstring(env: &mut JNIEnv<'_>, value: &str) -> jstring {
     match env.new_string(value) {
         Ok(result) => result.into_raw(),
@@ -335,7 +364,16 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeOpenMicrosc
         Err(_) => return ptr::null_mut(),
     };
     let json = catch_unwind(AssertUnwindSafe(|| {
-        microscope::open_response(fd, operation_id, &cache_root)
+        let _lifecycle = match storage_session_lifecycle_lock() {
+            Ok(guard) => guard,
+            Err(()) => return microscope_lifecycle_error_json(),
+        };
+        ACTIVE_MICROSCOPE_SESSIONS.fetch_add(1, Ordering::AcqRel);
+        let json = microscope::open_response(fd, operation_id, &cache_root);
+        if !microscope_open_succeeded(&json) {
+            ACTIVE_MICROSCOPE_SESSIONS.fetch_sub(1, Ordering::AcqRel);
+        }
+        json
     }))
     .unwrap_or_else(|_| microscope::panic_response());
     to_jstring(&mut env, &json)
@@ -390,8 +428,22 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeCloseMicros
     _class: JClass,
     session_id: jlong,
 ) -> jboolean {
-    let closed =
-        catch_unwind(AssertUnwindSafe(|| microscope::close_session(session_id))).unwrap_or(false);
+    let closed = catch_unwind(AssertUnwindSafe(|| {
+        let _lifecycle = match storage_session_lifecycle_lock() {
+            Ok(guard) => guard,
+            Err(()) => return false,
+        };
+        let closed = microscope::close_session(session_id);
+        if closed {
+            let _ = ACTIVE_MICROSCOPE_SESSIONS.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |current| current.checked_sub(1),
+            );
+        }
+        closed
+    }))
+    .unwrap_or(false);
     if closed { 1 } else { 0 }
 }
 
@@ -447,6 +499,17 @@ mod tests {
             bridge_variable_frame_rate(ObservedFrameRateMode::Variable),
             Some(true)
         );
+    }
+
+    #[test]
+    fn microscope_success_status_is_parsed_strictly() {
+        assert!(microscope_open_succeeded(
+            r#"{"status":"ok","engine":"framescope-rust/test","session":{}}"#
+        ));
+        assert!(!microscope_open_succeeded(
+            r#"{"status":"error","message":"contains ok but is not success"}"#
+        ));
+        assert!(!microscope_open_succeeded("not json"));
     }
 
     #[test]
