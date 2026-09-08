@@ -1,70 +1,179 @@
 name: Main snapshot release
 
 on:
-  workflow_run:
-    workflows:
-      - CI
-    types:
-      - completed
+  push:
     branches:
       - main
+  pull_request:
+    paths:
+      - '.github/workflows/main-snapshot-release.yml'
+  workflow_dispatch:
 
 permissions:
-  actions: read
-  contents: write
+  contents: read
 
 concurrency:
-  group: main-snapshot-release-${{ github.event.workflow_run.head_sha }}
-  cancel-in-progress: false
+  group: main-snapshot-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NDK_VERSION: '27.3.13750724'
+  CARGO_NDK_VERSION: '4.1.2'
+  GRADLE_VERSION: '8.13'
+  RUST_ANDROID_TOOLCHAIN: '1.86.0'
 
 jobs:
-  publish-main-snapshot:
-    name: publish-main-snapshot
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+  snapshot-build:
+    name: snapshot-build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      GH_TOKEN: ${{ github.token }}
-      RUN_ID: ${{ github.event.workflow_run.id }}
-      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-      ARTIFACT_NAME: framescope-debug-${{ github.event.workflow_run.head_sha }}
+    timeout-minutes: 50
     steps:
-      - name: Download verified main APK artifact
+      - name: Checkout exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Java 17
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165 # v5.0.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: ''
+
+      - name: Install Android SDK and NDK packages
+        run: |
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;$ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Set up Rust Android target
+        run: |
+          rustup toolchain install "$RUST_ANDROID_TOOLCHAIN" --profile minimal --target aarch64-linux-android
+          rustup default "$RUST_ANDROID_TOOLCHAIN"
+
+      - name: Cache Cargo Android build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-ndk
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
+            rust/target
+          key: cargo-main-snapshot-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-${{ hashFiles('rust/Cargo.toml', 'rust/Cargo.lock', 'rust/crates/**/Cargo.toml', 'rust/crates/framescope-ffmpeg/build.rs', 'rust/crates/framescope-ffmpeg/native/**', 'scripts/build-rust.sh', 'scripts/build-ffmpeg-android.sh', 'scripts/verify-ffmpeg-android.sh') }}
+          restore-keys: |
+            cargo-main-snapshot-arm64-rust-${{ env.RUST_ANDROID_TOOLCHAIN }}-ndk-${{ env.ANDROID_NDK_VERSION }}-cargo-ndk-${{ env.CARGO_NDK_VERSION }}-
+
+      - name: Install cargo-ndk
+        run: |
+          if ! cargo ndk --version 2>/dev/null | grep -q "cargo-ndk $CARGO_NDK_VERSION"; then
+            cargo install cargo-ndk --locked --version "$CARGO_NDK_VERSION"
+          fi
+
+      - name: Build and verify native arm64 library
+        run: bash ./scripts/verify-native-android.sh
+
+      - name: Android unit tests
+        working-directory: android
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Android lint
+        working-directory: android
+        run: gradle --no-daemon lintDebug
+
+      - name: Build snapshot debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - name: Verify snapshot APK packaging
+        run: bash ./scripts/verify-debug-apk.sh
+
+      - name: Stage immutable snapshot assets
         run: |
           set -euo pipefail
-          mkdir -p build/main-snapshot
-          gh run download "$RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
-            --name "$ARTIFACT_NAME" \
-            --dir build/main-snapshot
+          short_sha="${GITHUB_SHA:0:12}"
+          out="build/main-snapshot-release"
+          mkdir -p "$out"
+          apk="$out/FrameScope-main-${short_sha}-arm64-v8a-debug.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$apk"
+          sha256sum "$apk" > "$apk.sha256"
 
-          count="$(find build/main-snapshot -type f -name '*.apk' | wc -l | tr -d ' ')"
-          test "$count" = "1" || {
-            echo "error: expected exactly one APK in $ARTIFACT_NAME, found $count" >&2
+          count="$(find "$out" -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+          test "$count" = "1"
+          test -s "$apk"
+          test -s "$apk.sha256"
+
+      - name: Upload snapshot assets for publisher
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: framescope-main-snapshot-${{ github.sha }}
+          path: build/main-snapshot-release
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-main-snapshot:
+    name: publish-main-snapshot
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: snapshot-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download exact snapshot assets from this workflow run
+        run: |
+          set -euo pipefail
+          artifact="framescope-main-snapshot-$GITHUB_SHA"
+          mkdir -p build/publish
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact" \
+            --dir build/publish
+
+          apk_count="$(find build/publish -type f -name '*.apk' | wc -l | tr -d ' ')"
+          sum_count="$(find build/publish -type f -name '*.apk.sha256' | wc -l | tr -d ' ')"
+          test "$apk_count" = "1" || {
+            echo "error: expected one APK, found $apk_count" >&2
+            exit 1
+          }
+          test "$sum_count" = "1" || {
+            echo "error: expected one APK checksum, found $sum_count" >&2
             exit 1
           }
 
-          apk="$(find build/main-snapshot -type f -name '*.apk' -print -quit)"
-          short_sha="${HEAD_SHA:0:12}"
-          staged="build/FrameScope-main-${short_sha}-arm64-v8a-debug.apk"
-          cp "$apk" "$staged"
-          sha256sum "$staged" > "$staged.sha256"
+          apk="$(find build/publish -type f -name '*.apk' -print -quit)"
+          checksum="$apk.sha256"
+          test -s "$apk"
+          test -s "$checksum"
+          sha256sum --check "$checksum"
 
-          echo "SNAPSHOT_APK=$staged" >> "$GITHUB_ENV"
-          echo "SNAPSHOT_SHA256=$staged.sha256" >> "$GITHUB_ENV"
+          short_sha="${GITHUB_SHA:0:12}"
+          echo "SNAPSHOT_APK=$apk" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_SHA256=$checksum" >> "$GITHUB_ENV"
           echo "SNAPSHOT_TAG=main-$short_sha" >> "$GITHUB_ENV"
           echo "SNAPSHOT_TITLE=FrameScope main $short_sha" >> "$GITHUB_ENV"
 
       - name: Publish immutable main snapshot pre-release
         run: |
           set -euo pipefail
-          notes="Automated installable debug snapshot from main commit $HEAD_SHA.
+          notes="Automated installable debug snapshot from main commit $GITHUB_SHA.
 
-This snapshot was published only after the canonical CI workflow completed successfully for the same commit. It is intended for testing and is not the signed, physically certified production release. Production v* releases remain protected by the Phase 7 physical-device and signing gates."
+This pre-release was published only after the dedicated main snapshot workflow built the native arm64 library, passed Android unit tests and lint, built the debug APK, and verified APK native packaging for this exact commit. It is intended for testing and is not the signed, physically certified production release. Production v* releases remain protected by the Phase 7 physical-device and signing gates."
 
           if gh release view "$SNAPSHOT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$SNAPSHOT_TAG" \
@@ -77,7 +186,7 @@ This snapshot was published only after the canonical CI workflow completed succe
               "$SNAPSHOT_APK" \
               "$SNAPSHOT_SHA256" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$HEAD_SHA" \
+              --target "$GITHUB_SHA" \
               --prerelease \
               --title "$SNAPSHOT_TITLE" \
               --notes "$notes"
