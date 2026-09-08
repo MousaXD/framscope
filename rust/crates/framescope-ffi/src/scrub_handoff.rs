@@ -12,6 +12,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(unix)]
@@ -21,11 +22,17 @@ use crate::{ENGINE_VERSION, microscope, to_jstring};
 
 const MIN_PREVIEW_EDGE: u32 = 64;
 const MAX_PREVIEW_EDGE: u32 = 1_024;
-const PREVIEW_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_PREVIEW_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const PREVIEW_CACHE_MAX_FRAMES: usize = 12;
 const MAX_RETAINED_PREVIEW_SESSIONS: usize = 2;
-const SOURCE_CACHE_RAM_BUDGET_BYTES: usize = 0;
 const SOURCE_CACHE_DISK_BUDGET_BYTES: u64 = 0;
+const MAX_CONFIGURED_RAM_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+
+static SOURCE_CACHE_RAM_BUDGET_BYTES: AtomicUsize =
+    AtomicUsize::new(DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES);
+static PREVIEW_CACHE_BUDGET_BYTES: AtomicUsize =
+    AtomicUsize::new(DEFAULT_PREVIEW_CACHE_BUDGET_BYTES);
 
 #[derive(Debug, Serialize)]
 struct PreviewDetails {
@@ -130,6 +137,14 @@ fn scrub_registry() -> &'static Mutex<ScrubRegistry> {
 
 fn preview_cancellation_registry() -> &'static Mutex<PreviewCancellationRegistry> {
     PREVIEW_CANCELLATIONS.get_or_init(|| Mutex::new(PreviewCancellationRegistry::default()))
+}
+
+fn source_cache_budget_bytes() -> usize {
+    SOURCE_CACHE_RAM_BUDGET_BYTES.load(Ordering::Acquire)
+}
+
+fn preview_cache_budget_bytes() -> usize {
+    PREVIEW_CACHE_BUDGET_BYTES.load(Ordering::Acquire)
 }
 
 fn begin_preview_operation(
@@ -271,6 +286,86 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nati
     if removed { 1 } else { 0 }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RamAccelerationBridge_nativeConfigureRamAcceleration(
+    mut env: JNIEnv,
+    _class: JClass,
+    cache_root: JString,
+    source_cache_bytes: jlong,
+    preview_cache_bytes: jlong,
+) -> jboolean {
+    let cache_root: String = match env.get_string(&cache_root) {
+        Ok(value) => value.into(),
+        Err(_) => return 0,
+    };
+    let configured = catch_unwind(AssertUnwindSafe(|| {
+        let cache_root = validate_cache_root(&cache_root)?;
+        let source_cache_bytes = parse_ram_budget(source_cache_bytes)?;
+        let preview_cache_bytes = parse_ram_budget(preview_cache_bytes)?;
+        let total = source_cache_bytes
+            .checked_add(preview_cache_bytes)
+            .ok_or_else(|| PreviewFailure::new("invalid_request", "RAM budget overflows."))?;
+        if total > MAX_CONFIGURED_RAM_BUDGET_BYTES {
+            return Err(PreviewFailure::new(
+                "invalid_request",
+                "Combined RAM acceleration budget exceeds the native safety limit.",
+            ));
+        }
+        configure_ram_budgets(&cache_root, source_cache_bytes, preview_cache_bytes)
+    }))
+    .is_ok_and(|result| result.is_ok());
+    if configured { 1 } else { 0 }
+}
+
+fn parse_ram_budget(value: jlong) -> Result<usize, PreviewFailure> {
+    if value < 0 {
+        return Err(PreviewFailure::new(
+            "invalid_request",
+            "RAM acceleration budget must be non-negative.",
+        ));
+    }
+    usize::try_from(value).map_err(|_| {
+        PreviewFailure::new(
+            "invalid_request",
+            "RAM acceleration budget does not fit the native address space.",
+        )
+    })
+}
+
+fn configure_ram_budgets(
+    cache_root: &Path,
+    source_cache_bytes: usize,
+    preview_cache_bytes: usize,
+) -> Result<(), PreviewFailure> {
+    SOURCE_CACHE_RAM_BUDGET_BYTES.store(source_cache_bytes, Ordering::Release);
+    PREVIEW_CACHE_BUDGET_BYTES.store(preview_cache_bytes, Ordering::Release);
+    FrameCacheHierarchy::configure_shared_ram_budget(
+        cache_root.join("microscope-frame-cache"),
+        source_cache_bytes,
+    );
+
+    let states = {
+        let registry = scrub_registry()
+            .lock()
+            .map_err(|_| PreviewFailure::new("bridge_error", "Live preview registry is poisoned."))?;
+        registry
+            .sessions
+            .values()
+            .map(|handle| handle.state.clone())
+            .collect::<Vec<_>>()
+    };
+    for state in states {
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        if state.cache_root == cache_root {
+            state.source_cache.set_ram_budget_bytes(source_cache_bytes);
+            state.preview_cache.set_budget_bytes(preview_cache_bytes);
+        }
+    }
+    Ok(())
+}
+
 fn with_direct_buffer(
     env: &JNIEnv<'_>,
     destination: &JByteBuffer<'_>,
@@ -379,70 +474,81 @@ fn render_preview(
         })?;
     let cache_root = validate_cache_root(cache_root)?;
     let (cancellation, _operation) = begin_preview_operation(session_id)?;
+    ensure_not_cancelled(&cancellation)?;
 
-    microscope::with_extraction_context(session_id, |source_fd, index| {
-        ensure_not_cancelled(&cancellation)?;
-        let target = resolve(index)?;
-        let frame_id = target.frame_id();
-        let state = session_state(session_id, &cache_root)?;
+    // Resolve the persistent target under the authoritative session lock, then release it before
+    // touching disposable preview state. This keeps preview-cache hits entirely out of the exact
+    // navigation critical section.
+    let target = microscope::with_extraction_context(session_id, |_source_fd, index| resolve(index))
+        .map_err(from_microscope_failure)??;
+    let frame_id = target.frame_id();
+    let timestamp_us = target.entry.timestamp_us();
+    let state = session_state(session_id, &cache_root)?;
+
+    let cached_preview = {
         let mut state = state.lock().map_err(|_| {
             PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
         })?;
+        state.preview_cache.get(frame_id, max_edge)
+    };
+    if let Some(preview) = cached_preview {
         ensure_not_cancelled(&cancellation)?;
-
-        let (preview, source, decoded_frames) = if let Some(preview) =
-            state.preview_cache.get(frame_id, max_edge)
-        {
-            (preview, "preview_ram", 0)
-        } else {
-            let decoder_cancellation = cancellation.clone();
-            let navigated = navigate_to_frame_cached(
-                index,
-                &mut state.source_cache,
-                || open_decoder(source_fd, decoder_cancellation.clone()),
-                frame_id,
-            )
-            .map_err(from_navigation)?;
-            ensure_not_cancelled(&cancellation)?;
-            let source = match navigated.source {
-                CachedFrameSource::Ram => "source_ram",
-                CachedFrameSource::Decoded => "decoded",
-            };
-            let decoded_frames = navigated.decoded_frames;
-            let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
-                .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
-            ensure_not_cancelled(&cancellation)?;
-            state
-                .preview_cache
-                .insert(frame_id, max_edge, preview.clone());
-            (preview, source, decoded_frames)
-        };
-
-        ensure_not_cancelled(&cancellation)?;
-        if destination.len() < preview.byte_len() {
-            return Err(PreviewFailure::new(
-                "buffer_too_small",
-                format!(
-                    "Android preview buffer has {} bytes but {} are required.",
-                    destination.len(),
-                    preview.byte_len()
-                ),
-            ));
-        }
-        destination[..preview.byte_len()].copy_from_slice(preview.pixels());
-        Ok(PreviewDetails {
+        return finish_preview(
             session_id,
-            frame_id: frame_id.0,
-            timestamp_us: target.entry.timestamp_us(),
-            width: preview.width,
-            height: preview.height,
-            stride_bytes: preview.stride_bytes,
-            byte_len: preview.byte_len(),
-            source,
-            decoded_frames,
-        })
+            frame_id,
+            timestamp_us,
+            preview,
+            "preview_ram",
+            0,
+            destination,
+        );
+    }
+
+    // Only source-cache lookup/decode needs the authoritative source/index borrow. The shared RAM
+    // hierarchy means exact navigation and scrub can hit the same immutable RGBA allocation. The
+    // session lock is released before downscaling, preview-cache insertion, and JNI buffer copy.
+    let navigated = microscope::with_extraction_context(session_id, |source_fd, index| {
+        ensure_not_cancelled(&cancellation)?;
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        let decoder_cancellation = cancellation.clone();
+        navigate_to_frame_cached(
+            index,
+            &mut state.source_cache,
+            || open_decoder(source_fd, decoder_cancellation.clone()),
+            frame_id,
+        )
+        .map_err(from_navigation)
     })
-    .map_err(|error| PreviewFailure::new(error.code(), error.message().to_owned()))?
+    .map_err(from_microscope_failure)??;
+    ensure_not_cancelled(&cancellation)?;
+
+    let source = match navigated.source {
+        CachedFrameSource::Ram => "source_ram",
+        CachedFrameSource::Decoded => "decoded",
+    };
+    let decoded_frames = navigated.decoded_frames;
+    let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
+        .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
+    ensure_not_cancelled(&cancellation)?;
+    {
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        state
+            .preview_cache
+            .insert(frame_id, max_edge, preview.clone());
+    }
+    finish_preview(
+        session_id,
+        frame_id,
+        timestamp_us,
+        preview,
+        source,
+        decoded_frames,
+        destination,
+    )
 }
 
 #[cfg(not(unix))]
@@ -459,6 +565,39 @@ fn render_preview(
         "bridge_error",
         "Live microscope preview is only available on Android/Unix targets.",
     ))
+}
+
+fn finish_preview(
+    session_id: i64,
+    frame_id: FrameId,
+    timestamp_us: Option<i64>,
+    preview: framescope_cache::OwnedRgbaFrame,
+    source: &'static str,
+    decoded_frames: u64,
+    destination: &mut [u8],
+) -> Result<PreviewDetails, PreviewFailure> {
+    if destination.len() < preview.byte_len() {
+        return Err(PreviewFailure::new(
+            "buffer_too_small",
+            format!(
+                "Android preview buffer has {} bytes but {} are required.",
+                destination.len(),
+                preview.byte_len()
+            ),
+        ));
+    }
+    destination[..preview.byte_len()].copy_from_slice(preview.pixels());
+    Ok(PreviewDetails {
+        session_id,
+        frame_id: frame_id.0,
+        timestamp_us,
+        width: preview.width,
+        height: preview.height,
+        stride_bytes: preview.stride_bytes,
+        byte_len: preview.byte_len(),
+        source,
+        decoded_frames,
+    })
 }
 
 #[cfg(unix)]
@@ -547,14 +686,17 @@ fn session_state(
     }
 
     let source_cache = FrameCacheHierarchy::open_resilient(
-        cache_root.join("live-scrub-navigation"),
-        SOURCE_CACHE_RAM_BUDGET_BYTES,
+        cache_root.join("microscope-frame-cache"),
+        source_cache_budget_bytes(),
         SOURCE_CACHE_DISK_BUDGET_BYTES,
     );
     let state = Arc::new(Mutex::new(ScrubSessionState {
         cache_root: cache_root.to_path_buf(),
         source_cache,
-        preview_cache: ScrubPreviewCache::new(PREVIEW_CACHE_BUDGET_BYTES, PREVIEW_CACHE_MAX_FRAMES),
+        preview_cache: ScrubPreviewCache::new(
+            preview_cache_budget_bytes(),
+            PREVIEW_CACHE_MAX_FRAMES,
+        ),
     }));
     registry.sessions.insert(
         session_id,
@@ -575,6 +717,10 @@ fn forget_session(session_id: i64) -> bool {
         .lock()
         .map(|mut registry| registry.sessions.remove(&session_id).is_some())
         .unwrap_or(false)
+}
+
+fn from_microscope_failure(error: microscope::MicroscopeFailure) -> PreviewFailure {
+    PreviewFailure::new(error.code(), error.message().to_owned())
 }
 
 fn from_navigation(error: CachedNavigationError) -> PreviewFailure {
@@ -624,6 +770,8 @@ fn error_json(code: &str, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use framescope_cache::OwnedRgbaFrame;
+    use std::fs;
 
     #[test]
     fn timestamp_policy_wire_values_are_stable() {
@@ -673,7 +821,37 @@ mod tests {
         registry.clock = 0;
         drop(registry);
         assert_eq!(MAX_RETAINED_PREVIEW_SESSIONS, 2);
-        assert_eq!(PREVIEW_CACHE_BUDGET_BYTES, 8 * 1024 * 1024);
+        assert_eq!(DEFAULT_PREVIEW_CACHE_BUDGET_BYTES, 8 * 1024 * 1024);
         assert_eq!(PREVIEW_CACHE_MAX_FRAMES, 12);
+    }
+
+    #[test]
+    fn configuring_zero_budget_trims_existing_preview_state_immediately() {
+        let root = std::env::temp_dir().join(format!(
+            "framescope-scrub-budget-test-{}",
+            std::process::id()
+        ));
+        let state = session_state(88_001, &root).unwrap();
+        {
+            let mut state = state.lock().unwrap();
+            let frame = OwnedRgbaFrame::new(2, 2, 8, vec![7; 16]).unwrap();
+            state.preview_cache.insert(FrameId(1), 320, frame);
+            assert_eq!(state.preview_cache.stats().resident_frames, 1);
+        }
+
+        configure_ram_budgets(&root, 0, 0).unwrap();
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.source_cache.ram_budget_bytes(), 0);
+            assert_eq!(state.preview_cache.stats().resident_frames, 0);
+        }
+        forget_session(88_001);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_ram_budget_rejects_values_above_safety_limit() {
+        assert!(parse_ram_budget(-1).is_err());
+        assert!(parse_ram_budget(MAX_CONFIGURED_RAM_BUDGET_BYTES as i64).is_ok());
     }
 }
