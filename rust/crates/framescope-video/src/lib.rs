@@ -36,6 +36,9 @@ pub use preview_navigation::{
     EncodedPreview, PreviewEncoder, PreviewNavigationError, PreviewNavigationResult, PreviewSource,
     navigate_to_frame_preview,
 };
+pub use scrub_preview::{
+    ScrubPreviewCache, ScrubPreviewCacheStats, ScrubPreviewError, downscale_scrub_preview,
+};
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;
 
@@ -228,6 +231,7 @@ mod microscope;
 mod microscope_presentation;
 mod navigation;
 mod preview_navigation;
+mod scrub_preview;
 
 use iso::{
     parse_hdlr_is_video, parse_mdhd, parse_minf_sample_count, parse_mvhd, parse_tkhd,
