@@ -9,8 +9,7 @@ on:
       - main
 
 permissions:
-  actions: read
-  contents: write
+  contents: read
 
 concurrency:
   group: main-snapshot-release-${{ github.ref }}
@@ -29,6 +28,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       HEAD_SHA: ${{ github.sha }}
