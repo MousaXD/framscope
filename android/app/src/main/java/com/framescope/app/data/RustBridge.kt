@@ -35,6 +35,18 @@ interface NativeBridge {
         engine = null,
     )
 
+    fun exportMicroscopeBatch(
+        sessionId: Long,
+        manifestFd: Int,
+        operationId: Long,
+        request: BatchExportRequest,
+        sink: NativeBatchFrameSink,
+    ): NativeBatchExport = NativeBatchExport.Failure(
+        code = "not_supported",
+        message = "Batch export is not supported by this native bridge.",
+        engine = null,
+    )
+
     fun closeMicroscopeSession(sessionId: Long): Boolean = false
 
     private fun unsupportedMicroscope(): NativeMicroscope = NativeMicroscope.Failure(
@@ -82,6 +94,20 @@ object RustBridge : NativeBridge {
         operationId: Long,
         format: Int,
         jpegQuality: Int,
+    ): String?
+
+    @JvmStatic
+    private external fun nativeExportMicroscopeBatchFd(
+        sessionId: Long,
+        manifestFd: Int,
+        operationId: Long,
+        selectionKind: Int,
+        start: Long,
+        end: Long,
+        everyN: Long,
+        format: Int,
+        jpegQuality: Int,
+        sink: NativeBatchFrameSink,
     ): String?
 
     @JvmStatic
@@ -207,6 +233,36 @@ object RustBridge : NativeBridge {
         }
     }
 
+    override fun exportMicroscopeBatch(
+        sessionId: Long,
+        manifestFd: Int,
+        operationId: Long,
+        request: BatchExportRequest,
+        sink: NativeBatchFrameSink,
+    ): NativeBatchExport {
+        if (sessionId <= 0L || manifestFd < 0 || operationId <= 0L || !request.isSane()) {
+            return NativeBatchExport.Failure(
+                code = "invalid_request",
+                message = "Batch export requires a valid session, manifest destination, operation id, selection, and format.",
+                engine = null,
+            )
+        }
+        return batchExportCall {
+            nativeExportMicroscopeBatchFd(
+                sessionId = sessionId,
+                manifestFd = manifestFd,
+                operationId = operationId,
+                selectionKind = request.selection.nativeKind,
+                start = request.selection.start,
+                end = request.selection.end,
+                everyN = request.everyNFrames,
+                format = request.format.nativeValue,
+                jpegQuality = request.jpegQuality,
+                sink = sink,
+            )
+        }
+    }
+
     override fun closeMicroscopeSession(sessionId: Long): Boolean {
         if (sessionId <= 0L || loadFailure != null) return false
         return runCatching { nativeCloseMicroscopeSession(sessionId) }.getOrDefault(false)
@@ -292,6 +348,31 @@ object RustBridge : NativeBridge {
         )
     }
 
+    internal fun parseBatchExportResponse(raw: String): NativeBatchExport = try {
+        val json = JSONObject(raw)
+        val engine = json.optionalString("engine")
+        when (json.optString("status")) {
+            "ok" -> parseBatchExportSuccess(json, engine)
+            "error" -> NativeBatchExport.Failure(
+                code = json.optString("code", "rust_error"),
+                message = json.optString("message", "Rust batch export failed."),
+                engine = engine,
+            )
+
+            else -> NativeBatchExport.Failure(
+                code = "malformed_response",
+                message = "Rust returned an unrecognized batch export response.",
+                engine = engine,
+            )
+        }
+    } catch (error: Exception) {
+        NativeBatchExport.Failure(
+            code = "malformed_response",
+            message = "Could not decode Rust batch export response: ${error.message ?: error::class.java.simpleName}",
+            engine = null,
+        )
+    }
+
     private fun microscopeCall(call: () -> String?): NativeMicroscope {
         loadFailure?.let {
             return NativeMicroscope.Failure(
@@ -334,6 +415,28 @@ object RustBridge : NativeBridge {
             engine = null,
         )
         return parseFrameExportResponse(raw)
+    }
+
+    private fun batchExportCall(call: () -> String?): NativeBatchExport {
+        loadFailure?.let {
+            return NativeBatchExport.Failure(
+                code = "native_library_unavailable",
+                message = "Rust engine could not be loaded: ${it.message ?: it::class.java.simpleName}",
+                engine = null,
+            )
+        }
+        val raw = runCatching(call).getOrElse {
+            return NativeBatchExport.Failure(
+                code = "jni_error",
+                message = "Rust batch export call failed: ${it.message ?: it::class.java.simpleName}",
+                engine = null,
+            )
+        } ?: return NativeBatchExport.Failure(
+            code = "jni_error",
+            message = "Rust engine returned a null batch export response.",
+            engine = null,
+        )
+        return parseBatchExportResponse(raw)
     }
 
     private fun parseSuccess(json: JSONObject, engine: String?): NativeInspection {
@@ -444,6 +547,43 @@ object RustBridge : NativeBridge {
             NativeFrameExport.Failure(
                 code = "malformed_export_state",
                 message = "Rust returned frame export metadata outside expected safety bounds.",
+                engine = engine,
+            )
+        }
+    }
+
+    private fun parseBatchExportSuccess(json: JSONObject, engine: String?): NativeBatchExport {
+        if (engine == null) {
+            return NativeBatchExport.Failure(
+                code = "malformed_response",
+                message = "Rust batch export success response did not identify the engine.",
+                engine = null,
+            )
+        }
+        val exportJson = json.getJSONObject("export")
+        val format = FrameExportFormat.fromWireName(exportJson.getString("format"))
+            ?: return NativeBatchExport.Failure(
+                code = "malformed_export_state",
+                message = "Rust returned an unknown batch export format.",
+                engine = engine,
+            )
+        val export = BatchExportResult(
+            sessionId = exportJson.getLong("session_id"),
+            expectedFrames = exportJson.getLong("expected_frames"),
+            committedFrames = exportJson.getLong("committed_frames"),
+            encodedBytes = exportJson.getLong("encoded_bytes"),
+            decodedFrames = exportJson.getLong("decoded_frames"),
+            usedKeyframeSeek = exportJson.getBoolean("used_keyframe_seek"),
+            fellBackToStreamStart = exportJson.getBoolean("fell_back_to_stream_start"),
+            format = format,
+            mimeType = exportJson.getString("mime_type"),
+        )
+        return if (export.isSane()) {
+            NativeBatchExport.Success(export = export, engine = engine)
+        } else {
+            NativeBatchExport.Failure(
+                code = "malformed_export_state",
+                message = "Rust returned batch export metadata outside expected safety bounds.",
                 engine = engine,
             )
         }
