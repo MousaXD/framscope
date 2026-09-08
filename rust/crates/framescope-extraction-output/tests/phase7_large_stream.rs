@@ -52,9 +52,7 @@ impl RgbaNavigationDecoder for GeneratedDecoder {
         &self.stream
     }
 
-    fn next_rgba_for_navigation(
-        &mut self,
-    ) -> Result<Option<DecodedRgbaFrame>, FrameScopeError> {
+    fn next_rgba_for_navigation(&mut self) -> Result<Option<DecodedRgbaFrame>, FrameScopeError> {
         self.counters.nexts.set(self.counters.nexts.get() + 1);
         if self.next_frame >= self.frame_count {
             return Ok(None);
@@ -95,10 +93,7 @@ impl CountingSink {
 impl FrameOutputSink for CountingSink {
     type Error = Infallible;
 
-    fn write_frame(
-        &mut self,
-        output: FrameOutput<'_>,
-    ) -> Result<EncodedImageReport, Self::Error> {
+    fn write_frame(&mut self, output: FrameOutput<'_>) -> Result<EncodedImageReport, Self::Error> {
         if let Some(previous) = self.last_ordinal {
             assert_eq!(output.progress.ordinal, previous + 1);
         }
@@ -191,8 +186,7 @@ fn entry(frame_id: u64) -> FrameIndexEntry {
         anchor: KeyframeAnchor::Keyframe {
             frame_id: FrameId(frame_id - (frame_id % 30)),
             presentation_timestamp: Some(MediaTimestamp {
-                ticks: i64::try_from(frame_id - (frame_id % 30))
-                    .expect("anchor frame id fits i64")
+                ticks: i64::try_from(frame_id - (frame_id % 30)).expect("anchor frame id fits i64")
                     * 40,
                 time_base,
             }),
@@ -242,7 +236,9 @@ fn complete_index(root: &Path, frame_count: u64) -> FrameIndex {
         let end = (start + INDEX_BATCH_SIZE).min(frame_count);
         let batch: Vec<_> = (start..end).map(entry).collect();
         assert!(u64::try_from(batch.len()).expect("batch length fits u64") <= INDEX_BATCH_SIZE);
-        index.append_batch(&batch).expect("append bounded index batch");
+        index
+            .append_batch(&batch)
+            .expect("append bounded index batch");
         start = end;
     }
     index.mark_complete().expect("complete stress index");
