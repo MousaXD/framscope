@@ -79,8 +79,31 @@ impl SourceIdentity {
         modified_time_ms: Option<u64>,
         provider_document_id: Option<String>,
     ) -> io::Result<Self> {
+        Self::from_seekable_cancellable(
+            reader,
+            modified_time_ms,
+            provider_document_id,
+            || Ok(()),
+        )
+    }
+
+    /// Whole-source identity hashing with a cooperative cancellation/check hook.
+    ///
+    /// `check` runs before hashing and before every source-read chunk. Returning an error aborts the
+    /// hash and still restores the reader's original logical position. Higher layers can map a
+    /// cancellation-specific error without making the source optimistically reusable.
+    pub fn from_seekable_cancellable<R, F>(
+        reader: &mut R,
+        modified_time_ms: Option<u64>,
+        provider_document_id: Option<String>,
+        mut check: F,
+    ) -> io::Result<Self>
+    where
+        R: Read + Seek,
+        F: FnMut() -> io::Result<()>,
+    {
         let original_position = reader.stream_position()?;
-        let hashed = hash_complete_seekable(reader);
+        let hashed = hash_complete_seekable(reader, &mut check);
         let restore = reader.seek(SeekFrom::Start(original_position));
 
         let (size_bytes, content_tag) = match hashed {
@@ -130,7 +153,12 @@ fn is_complete_content_tag(tag: &str) -> bool {
     !tag.is_empty() && !tag.starts_with(LEGACY_SAMPLE_TAG_PREFIX)
 }
 
-fn hash_complete_seekable<R: Read + Seek>(reader: &mut R) -> io::Result<(u64, String)> {
+fn hash_complete_seekable<R, F>(reader: &mut R, check: &mut F) -> io::Result<(u64, String)>
+where
+    R: Read + Seek,
+    F: FnMut() -> io::Result<()>,
+{
+    check()?;
     let size = reader.seek(SeekFrom::End(0))?;
     reader.seek(SeekFrom::Start(0))?;
 
@@ -141,6 +169,7 @@ fn hash_complete_seekable<R: Read + Seek>(reader: &mut R) -> io::Result<(u64, St
     let mut buffer = vec![0_u8; FULL_HASH_BUFFER_BYTES];
     let mut total_read = 0_u64;
     while total_read < size {
+        check()?;
         let remaining = size - total_read;
         let wanted = buffer
             .len()
@@ -301,6 +330,30 @@ mod tests {
         let id_a = SourceIdentity::from_seekable(&mut Cursor::new(a), None, None).unwrap();
         let id_b = SourceIdentity::from_seekable(&mut Cursor::new(b), None, None).unwrap();
         assert_ne!(id_a.content_tag, id_b.content_tag);
+    }
+
+    #[test]
+    fn cancellable_identity_restores_position_and_stops_before_full_read() {
+        let mut cursor = Cursor::new(vec![0x5a_u8; FULL_HASH_BUFFER_BYTES * 4]);
+        cursor.seek(SeekFrom::Start(77)).unwrap();
+        let mut checks = 0_u32;
+        let error = SourceIdentity::from_seekable_cancellable(
+            &mut cursor,
+            None,
+            None,
+            || {
+                checks += 1;
+                if checks >= 3 {
+                    Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(cursor.stream_position().unwrap(), 77);
+        assert!(checks < 6);
     }
 
     #[test]
