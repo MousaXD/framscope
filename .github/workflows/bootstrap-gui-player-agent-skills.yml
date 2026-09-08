@@ -1,0 +1,142 @@
+name: Bootstrap GUI player agent skills
+
+on:
+  push:
+    branches:
+      - chore/gui-player-agent-skills
+
+permissions:
+  contents: write
+
+jobs:
+  vendor-skills:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Fetch pinned upstream skills
+        shell: bash
+        env:
+          COMPOSE_EXPERT_SHA: 954ef54ea32288fbc90745f012d09d7b791f0d8a
+          CHRISBANES_SKILLS_SHA: 2db11bb412254246bf0a5f6e5e320177107a7c53
+          MATERIAL3_SKILL_SHA: 14385f2bf3804d8779f8b4db2604211f1e70b4c1
+        run: |
+          set -euo pipefail
+
+          clone_at() {
+            local repo="$1"
+            local sha="$2"
+            local dir="$3"
+            git init -q "$dir"
+            git -C "$dir" remote add origin "https://github.com/${repo}.git"
+            git -C "$dir" fetch -q --depth=1 origin "$sha"
+            git -C "$dir" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$dir" rev-parse HEAD)" = "$sha"
+          }
+
+          clone_at aldefy/compose-skill "$COMPOSE_EXPERT_SHA" /tmp/compose-skill
+          clone_at chrisbanes/skills "$CHRISBANES_SKILLS_SHA" /tmp/chrisbanes-skills
+          clone_at hamen/material-3-skill "$MATERIAL3_SKILL_SHA" /tmp/material-3-skill
+
+      - name: Vendor selected skills with licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp -a /tmp/compose-skill/skills/compose-expert .agents/skills/compose-expert
+          cp /tmp/compose-skill/LICENSE .agents/skills/compose-expert/LICENSE.upstream
+
+          for skill in \
+            compose-performance \
+            compose-state-and-effects \
+            compose-component-design \
+            compose-ui-testing-patterns
+          do
+            cp -a "/tmp/chrisbanes-skills/skills/$skill" ".agents/skills/$skill"
+            cp /tmp/chrisbanes-skills/LICENSE ".agents/skills/$skill/LICENSE.upstream"
+          done
+
+          cp -a /tmp/material-3-skill/skills/material-3 .agents/skills/material-3
+          rm -rf .agents/skills/material-3/.claude-plugin
+          cp /tmp/material-3-skill/LICENSE .agents/skills/material-3/LICENSE.upstream
+
+          cat > .agents/skills/README.md <<'EOF'
+          # FrameScope agent skills
+
+          FrameScope keeps Android/Compose skills project-local so coding agents can use the same guidance in every environment.
+
+          ## Official Google Android skills
+
+          Installed with Google's Android CLI from `android/skills`:
+
+          - `android-cli`
+          - `testing-setup`
+          - `android-profiler`
+          - `r8-analyzer`
+          - `edge-to-edge`
+          - `android-intent-security`
+          - `adaptive`
+          - `navigation-3`
+
+          Refresh these with `android skills add <skill> --project=. --agent=codex`; keep Google's generated contents intact.
+
+          ## GUI / player Compose skills
+
+          Vendored from reviewed public upstreams at exact commits:
+
+          - `compose-expert` — `aldefy/compose-skill@954ef54ea32288fbc90745f012d09d7b791f0d8a` (MIT; bundled AOSP source references are Apache-2.0)
+          - `compose-performance` — `chrisbanes/skills@2db11bb412254246bf0a5f6e5e320177107a7c53` (Apache-2.0)
+          - `compose-state-and-effects` — `chrisbanes/skills@2db11bb412254246bf0a5f6e5e320177107a7c53` (Apache-2.0)
+          - `compose-component-design` — `chrisbanes/skills@2db11bb412254246bf0a5f6e5e320177107a7c53` (Apache-2.0)
+          - `compose-ui-testing-patterns` — `chrisbanes/skills@2db11bb412254246bf0a5f6e5e320177107a7c53` (Apache-2.0)
+          - `material-3` — `hamen/material-3-skill@14385f2bf3804d8779f8b4db2604211f1e70b4c1` (MIT)
+
+          Each community skill contains `LICENSE.upstream`. The Material 3 package's Claude-plugin metadata is intentionally excluded because FrameScope vendors these skills for its project-local agent skill directory, not as a Claude plugin.
+          EOF
+
+      - name: Verify vendored skill surface
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          skills=(
+            compose-expert
+            compose-performance
+            compose-state-and-effects
+            compose-component-design
+            compose-ui-testing-patterns
+            material-3
+          )
+
+          for skill in "${skills[@]}"; do
+            test -f ".agents/skills/$skill/SKILL.md"
+            test -f ".agents/skills/$skill/LICENSE.upstream"
+            if find ".agents/skills/$skill" -type l -print -quit | grep -q .; then
+              echo "Symlink rejected in $skill" >&2
+              exit 1
+            fi
+            if find ".agents/skills/$skill" -type f -perm /111 -print -quit | grep -q .; then
+              echo "Executable file rejected in $skill" >&2
+              exit 1
+            fi
+          done
+
+          test ! -d .agents/skills/material-3/.claude-plugin
+          find .agents/skills -maxdepth 2 -name SKILL.md -print | sort
+
+      - name: Commit vendored skills and remove bootstrap workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/bootstrap-gui-player-agent-skills.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .agents/skills .github/workflows/bootstrap-gui-player-agent-skills.yml
+          git status --short
+          git commit -m "chore: add GUI and player agent skills"
+          git push origin HEAD:chore/gui-player-agent-skills
