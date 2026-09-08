@@ -498,12 +498,14 @@ object RustBridge : NativeBridge {
                 corrupt = it.getBoolean("corrupt"),
             )
         }
+        val diagnostics = sessionJson.optJSONObject("open_diagnostics")?.let(::parseMicroscopeOpenDiagnostics)
         val session = MicroscopeSessionSnapshot(
             sessionId = sessionJson.getLong("session_id"),
             frameCount = sessionJson.getLong("frame_count"),
             currentFrame = frame,
             canStepPrevious = sessionJson.getBoolean("can_step_previous"),
             canStepNext = sessionJson.getBoolean("can_step_next"),
+            openDiagnostics = diagnostics,
         )
         return if (session.isSane()) {
             NativeMicroscope.Success(session = session, engine = engine)
@@ -514,6 +516,49 @@ object RustBridge : NativeBridge {
                 engine = engine,
             )
         }
+    }
+
+    private fun parseMicroscopeOpenDiagnostics(json: JSONObject): MicroscopeOpenDiagnostics {
+        val indexingJson = json.getJSONObject("indexing")
+        val indexing = IndexingRuntimeDiagnostics(
+            reusedExistingFrames = indexingJson.getLong("reused_existing_frames"),
+            newlyIndexedFrames = indexingJson.getLong("newly_indexed_frames"),
+            restartedAfterPartialMismatch = indexingJson.getBoolean("restarted_after_partial_mismatch"),
+            maxPendingEntries = indexingJson.getLong("max_pending_entries"),
+            totalElapsedUs = indexingJson.getLong("total_elapsed_us"),
+            indexStatusElapsedUs = indexingJson.getLong("index_status_elapsed_us"),
+            decoderOpenElapsedUs = indexingJson.getLong("decoder_open_elapsed_us"),
+            decoderOpenCount = indexingJson.getLong("decoder_open_count"),
+            framesDecoded = indexingJson.getLong("frames_decoded"),
+            validationFramesReplayed = indexingJson.getLong("validation_frames_replayed"),
+            reconciliationSqliteElapsedUs = indexingJson.getLong("reconciliation_sqlite_elapsed_us"),
+            reconciliationRangeQueries = indexingJson.getLong("reconciliation_range_queries"),
+            sqliteBatchElapsedUs = indexingJson.getLong("sqlite_batch_elapsed_us"),
+            batchCommits = indexingJson.getLong("batch_commits"),
+            boundedResumeAttempted = indexingJson.getBoolean("bounded_resume_attempted"),
+            boundedResumeSucceeded = indexingJson.getBoolean("bounded_resume_succeeded"),
+            boundedResumeFellBack = indexingJson.getBoolean("bounded_resume_fell_back"),
+            resumeCheckpointFrameId = indexingJson.optionalLong("resume_checkpoint_frame_id"),
+            resumeSeekScanFrames = indexingJson.getLong("resume_seek_scan_frames"),
+        )
+        return MicroscopeOpenDiagnostics(
+            sourceSeekable = json.getBoolean("source_seekable"),
+            sourceSizeBytes = json.optionalLong("source_size_bytes"),
+            sourceIdentityBytesRead = json.getLong("source_identity_bytes_read"),
+            sourceIdentityReadCalls = json.getLong("source_identity_read_calls"),
+            sourceIdentitySeekCalls = json.getLong("source_identity_seek_calls"),
+            sourceIdentityIoElapsedUs = json.getLong("source_identity_io_elapsed_us"),
+            sourceIdentityElapsedUs = json.getLong("source_identity_elapsed_us"),
+            sourceReuseSafe = json.getBoolean("source_reuse_safe"),
+            persistentIndex = json.getBoolean("persistent_index"),
+            probeOpenElapsedUs = json.getLong("probe_open_elapsed_us"),
+            indexOpenElapsedUs = json.getLong("index_open_elapsed_us"),
+            indexOpenDisposition = json.getString("index_open_disposition"),
+            databaseBytes = json.getLong("database_bytes"),
+            walBytes = json.getLong("wal_bytes"),
+            totalOpenElapsedUs = json.getLong("total_open_elapsed_us"),
+            indexing = indexing,
+        )
     }
 
     private fun parseFrameExportSuccess(json: JSONObject, engine: String?): NativeFrameExport {
