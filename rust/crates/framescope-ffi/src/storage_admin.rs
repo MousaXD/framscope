@@ -8,10 +8,7 @@ use serde::Serialize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
-use crate::{
-    ENGINE_VERSION, active_microscope_sessions, scrub_handoff, storage_session_lifecycle_lock,
-    to_jstring,
-};
+use crate::{ENGINE_VERSION, active_microscope_sessions, storage_session_lifecycle_lock, to_jstring};
 
 const MAX_CACHE_ROOT_LENGTH: usize = 4_096;
 const MAX_SOURCE_KEY_LENGTH: usize = 256;
@@ -279,6 +276,7 @@ pub extern "system" fn Java_com_framescope_app_data_FrameScopeStorageBridge_nati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scrub_handoff;
     use std::sync::atomic::Ordering;
 
     #[test]
