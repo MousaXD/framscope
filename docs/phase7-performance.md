@@ -13,7 +13,9 @@ The stress harness deliberately avoids test-only whole-video allocations:
 - frame-index entries are persisted in batches of at most 256 entries;
 - the decoder generates one 2x1 RGBA frame on demand instead of storing a frame vector or queue;
 - one decoder instance serves the complete extraction span;
-- every tenth frame is selected, while all 100,000 authoritative timeline entries are reconciled sequentially;
+- every tenth frame is selected;
+- the sequential decoder reconciles frames only through the final selected frame and does not waste work on an unselected tail;
+- with the default 100,000-frame corpus, 10,000 frames are selected and the decoder must stop after exactly 99,991 decoded frames, at selected FrameId 99,990;
 - the output sink records counters only and retains no encoded-frame collection;
 - the manifest writer counts writes and bytes without retaining the JSONL document;
 - the test requires exact decoded/selected/committed counts, strict progress ordering, one decoder open, one initial seek, and bounded manifest write size.
