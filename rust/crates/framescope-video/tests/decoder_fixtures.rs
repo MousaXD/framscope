@@ -44,6 +44,22 @@ fn assert_codec_decodes(file: &str, codec: &str, expected_frames: usize) {
     assert!(frames.iter().all(|frame| !frame.corrupt));
 }
 
+fn assert_probe_rejected(file: &str) {
+    let error = match VideoDecoder::open_path(fixture(file)) {
+        Ok(_) => panic!("hostile input {file} unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error,
+            FrameScopeError::MalformedContainer(_)
+                | FrameScopeError::UnsupportedFormat(_)
+                | FrameScopeError::InvalidSource(_)
+        ),
+        "hostile input {file} returned unexpected error {error:?}"
+    );
+}
+
 #[test]
 fn h264_cfr_uses_real_presentation_timestamps_and_stable_eof() {
     let mut decoder = VideoDecoder::open_path(fixture("h264-cfr.mp4")).unwrap();
@@ -150,6 +166,15 @@ fn discovers_audio_without_confusing_it_with_selected_video() {
 }
 
 #[test]
+fn valid_audio_only_media_is_rejected_as_no_video_track() {
+    let error = match VideoDecoder::open_path(fixture("audio-only.m4a")) {
+        Ok(_) => panic!("audio-only media unexpectedly opened as video"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, FrameScopeError::NoVideoTrack));
+}
+
+#[test]
 fn multiple_video_stream_selection_is_predictable_and_explicitly_overridable() {
     let path = fixture("multi-stream.mkv");
     let mut default_decoder = VideoDecoder::open_path(&path).unwrap();
@@ -194,6 +219,61 @@ fn truncated_input_is_a_typed_malformed_error() {
         Err(error) => error,
     };
     assert!(matches!(error, FrameScopeError::MalformedContainer(_)));
+}
+
+#[test]
+fn empty_and_garbage_inputs_are_rejected_without_panics() {
+    assert_probe_rejected("empty.bin");
+    assert_probe_rejected("garbage.bin");
+}
+
+#[test]
+fn truncated_payload_never_decodes_as_complete_healthy_source() {
+    const HEALTHY_FRAME_COUNT: usize = 12;
+
+    let mut decoder = match VideoDecoder::open_path(fixture("truncated-payload.mp4")) {
+        Ok(decoder) => decoder,
+        Err(error) => {
+            assert!(matches!(
+                error,
+                FrameScopeError::MalformedContainer(_)
+                    | FrameScopeError::InvalidSource(_)
+                    | FrameScopeError::DecoderFailure(_)
+                    | FrameScopeError::Io(_)
+            ));
+            return;
+        }
+    };
+
+    let mut decoded = 0usize;
+    loop {
+        match decoder.next_frame() {
+            Ok(Some(_frame)) => {
+                decoded += 1;
+                assert!(
+                    decoded < HEALTHY_FRAME_COUNT,
+                    "truncated payload produced the complete healthy frame sequence"
+                );
+            }
+            Ok(None) => {
+                assert!(
+                    decoded < HEALTHY_FRAME_COUNT,
+                    "truncated payload reached clean EOF after the full healthy frame count"
+                );
+                break;
+            }
+            Err(error) => {
+                assert!(matches!(
+                    error,
+                    FrameScopeError::MalformedContainer(_)
+                        | FrameScopeError::InvalidSource(_)
+                        | FrameScopeError::DecoderFailure(_)
+                        | FrameScopeError::Io(_)
+                ));
+                break;
+            }
+        }
+    }
 }
 
 #[test]

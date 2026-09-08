@@ -56,6 +56,10 @@ ffmpeg "${common[@]}" \
   -shortest -movflags +faststart "$OUT/h264-with-audio.mp4"
 
 ffmpeg "${common[@]}" \
+  -f lavfi -i "sine=frequency=660:sample_rate=48000:duration=0.5" \
+  -c:a aac -b:a 48k -ar 48000 -ac 1 -vn -movflags +faststart "$OUT/audio-only.m4a"
+
+ffmpeg "${common[@]}" \
   -f lavfi -i "testsrc2=size=64x48:rate=8:duration=0.5" \
   -f lavfi -i "color=c=black:size=32x24:rate=8:duration=0.5" \
   -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=0.5" \
@@ -70,7 +74,62 @@ ffmpeg "${common[@]}" -f lavfi -i "testsrc2=size=62x46:rate=8:duration=0.5" \
 ffmpeg "${common[@]}" -f lavfi -i "testsrc2=size=64x48:rate=8" -frames:v 1 \
   "${x264[@]}" -an -movflags +faststart "$OUT/very-short.mp4"
 
-# Keep only the opening MP4 bytes so probing must reject the truncated container.
+# Adversarial fixtures stay deterministic so failures are reproducible across CI runs.
+# Keep only the opening MP4 bytes so probing must reject the header-only container.
 head -c 12 "$OUT/h264-cfr.mp4" > "$OUT/truncated.mp4"
+
+# Build a fast-start MP4 whose metadata remains intact while the media-data box itself is cut.
+# Parsing top-level boxes avoids a fragile percentage-of-file truncation that could remove only
+# trailing metadata/free space while leaving every compressed frame readable.
+python3 - "$OUT/h264-cfr.mp4" "$OUT/truncated-payload.mp4" <<'PY'
+from pathlib import Path
+import struct
+import sys
+
+source = Path(sys.argv[1]).read_bytes()
+out_path = Path(sys.argv[2])
+position = 0
+moov_position = None
+mdat = None
+
+while position + 8 <= len(source):
+    size32, box_type = struct.unpack_from(">I4s", source, position)
+    header = 8
+    if size32 == 1:
+        if position + 16 > len(source):
+            raise SystemExit("invalid extended MP4 box header")
+        size = struct.unpack_from(">Q", source, position + 8)[0]
+        header = 16
+    elif size32 == 0:
+        size = len(source) - position
+    else:
+        size = size32
+    if size < header or position + size > len(source):
+        raise SystemExit("invalid top-level MP4 box size")
+    if box_type == b"moov":
+        moov_position = position
+    if box_type == b"mdat":
+        mdat = (position, header, size)
+        break
+    position += size
+
+if moov_position is None or mdat is None:
+    raise SystemExit("expected fast-start MP4 with moov and mdat boxes")
+mdat_position, mdat_header, mdat_size = mdat
+if moov_position > mdat_position:
+    raise SystemExit("fixture is not fast-start: moov follows mdat")
+payload_start = mdat_position + mdat_header
+payload_size = mdat_size - mdat_header
+if payload_size < 8:
+    raise SystemExit("mdat payload is unexpectedly small")
+# Keep only one eighth of compressed media bytes. The original mdat size remains in its header,
+# making the file structurally truncated while retaining the complete leading moov metadata.
+keep_payload = max(1, payload_size // 8)
+out_path.write_bytes(source[: payload_start + keep_payload])
+PY
+
+# Zero bytes and deterministic non-container bytes exercise format probing without nondeterminism.
+: > "$OUT/empty.bin"
+printf 'FrameScope deterministic hostile input\x00\xff\x7fnot-a-container\n' > "$OUT/garbage.bin"
 
 printf 'Generated fixtures in %s\n' "$OUT"
