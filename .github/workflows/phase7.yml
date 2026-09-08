@@ -81,6 +81,59 @@ jobs:
       - name: Reject known RustSec vulnerabilities
         run: cargo audit --file rust/Cargo.lock
 
+  large-media-stress:
+    name: large-media-stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FRAMESCOPE_PHASE7_STRESS_FRAMES: '100000'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install measurement tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends time
+
+      - name: Set up pinned Rust host toolchain
+        run: |
+          rustup toolchain install "$RUST_HOST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_HOST_TOOLCHAIN"
+
+      - name: Compile large-stream stress harness
+        working-directory: rust
+        run: cargo test -p framescope-extraction-output --test phase7_large_stream --no-run --locked
+
+      - name: Run deterministic large-stream extraction stress
+        run: |
+          set -o pipefail
+          mkdir -p build
+          /usr/bin/time -v -o build/phase7-large-media-time.txt \
+            cargo test \
+              --manifest-path rust/Cargo.toml \
+              -p framescope-extraction-output \
+              --test phase7_large_stream \
+              phase7_large_streaming_export_stays_bounded \
+              --locked \
+              -- \
+              --ignored \
+              --exact \
+              --nocapture \
+            | tee build/phase7-large-media-test.log
+          cat build/phase7-large-media-time.txt
+
+      - name: Preserve hosted-runner performance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phase7-large-media-stress-${{ github.sha }}
+          path: |
+            build/phase7-large-media-time.txt
+            build/phase7-large-media-test.log
+          if-no-files-found: warn
+          retention-days: 7
+
   release-package:
     name: release-package
     runs-on: ubuntu-latest
