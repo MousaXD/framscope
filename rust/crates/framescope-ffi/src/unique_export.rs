@@ -339,13 +339,13 @@ fn export_unique_groups<'local>(
     }
     if manifest_fd < 0 {
         return Err(UniqueExportFailure::new(
-            "invalid_destination",
+            "invalid_destination_preflight",
             "unique export requires a writable manifest file descriptor",
         ));
     }
     if sink.is_null() {
         return Err(UniqueExportFailure::new(
-            "invalid_destination",
+            "invalid_destination_preflight",
             "unique export requires a frame output callback",
         ));
     }
@@ -359,8 +359,9 @@ fn export_unique_groups<'local>(
     let format = parse_export_format(format_code, jpeg_quality)?;
     let (cancellation, _operation) = operation_token(operation_id)
         .map_err(|error| UniqueExportFailure::new(error.code(), error.to_string()))?;
-    let manifest_duplicate = duplicate_fd(manifest_fd)
-        .map_err(|error| UniqueExportFailure::new("invalid_destination", error.to_string()))?;
+    let manifest_duplicate = duplicate_fd(manifest_fd).map_err(|error| {
+        UniqueExportFailure::new("invalid_destination_preflight", error.to_string())
+    })?;
     let mut manifest_output = File::from(manifest_duplicate);
     let mut frame_sink = JniFrameSink {
         env,
