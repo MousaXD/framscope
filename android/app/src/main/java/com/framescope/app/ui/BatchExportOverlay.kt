@@ -39,6 +39,7 @@ private enum class BatchSelectionMode {
     FrameRange,
     TimestampRange,
     AllFrames,
+    UniqueGroups,
 }
 
 @Composable
@@ -73,6 +74,7 @@ fun BatchExportOverlay(
 
             is BatchExportUiState.Exporting -> {
                 val progress = exportState.progress
+                val unique = exportState.pending.request.selection == BatchExportSelection.UniqueGroups
                 BatchExportStatusCard(
                     title = if (progress == null) {
                         "Preparing batch export"
@@ -80,7 +82,11 @@ fun BatchExportOverlay(
                         "Exporting ${progress.ordinal} / ${progress.total}"
                     },
                     detail = if (progress == null) {
-                        "Opening the indexed source-quality extraction pipeline…"
+                        if (unique) {
+                            "Preparing or reusing bounded similarity groups before source-quality representative export…"
+                        } else {
+                            "Opening the indexed source-quality extraction pipeline…"
+                        }
                     } else {
                         "Frame ${progress.frameId} · ${formatLabel(exportState.pending.request.format)}"
                     },
@@ -185,6 +191,11 @@ private fun BatchExportDialog(
                         mode = BatchSelectionMode.AllFrames
                     }
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModeButton("Unique groups", mode == BatchSelectionMode.UniqueGroups) {
+                        mode = BatchSelectionMode.UniqueGroups
+                    }
+                }
 
                 when (mode) {
                     BatchSelectionMode.CurrentFrame -> Text(
@@ -230,14 +241,21 @@ private fun BatchExportDialog(
                         text = "All $frameCount indexed frames",
                         style = MaterialTheme.typography.bodyMedium,
                     )
+
+                    BatchSelectionMode.UniqueGroups -> Text(
+                        text = "Export one source-quality representative from each validated similarity group. Similarity uses FrameScope's bounded hybrid metric, not a literal changed-pixel percentage.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
 
-                NumberField(
-                    value = everyN,
-                    onValueChange = { everyN = it },
-                    label = "Every N frames",
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (mode != BatchSelectionMode.UniqueGroups) {
+                    NumberField(
+                        value = everyN,
+                        onValueChange = { everyN = it },
+                        label = "Every N frames",
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
 
                 Text("Format", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -260,7 +278,7 @@ private fun BatchExportDialog(
                 }
                 if (request == null) {
                     Text(
-                        "Enter a valid selection and a positive frame interval.",
+                        "Enter a valid selection and frame interval.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
@@ -356,7 +374,11 @@ private fun buildRequest(
     everyN: String,
     format: FrameExportFormat,
 ): BatchExportRequest? {
-    val stride = everyN.toLongOrNull()?.takeIf { it > 0L } ?: return null
+    val stride = if (mode == BatchSelectionMode.UniqueGroups) {
+        1L
+    } else {
+        everyN.toLongOrNull()?.takeIf { it > 0L } ?: return null
+    }
     val selection = when (mode) {
         BatchSelectionMode.CurrentFrame -> BatchExportSelection.CurrentFrame(
             currentFrameId ?: return null,
@@ -375,6 +397,7 @@ private fun buildRequest(
         }
 
         BatchSelectionMode.AllFrames -> BatchExportSelection.AllFrames
+        BatchSelectionMode.UniqueGroups -> BatchExportSelection.UniqueGroups
     }
     return BatchExportRequest(
         selection = selection,
@@ -440,6 +463,7 @@ private fun selectionLabel(selection: BatchExportSelection): String = when (sele
     is BatchExportSelection.TimestampRangeUsInclusive ->
         "${selection.startUs}–${selection.endUs} µs"
     BatchExportSelection.AllFrames -> "All indexed frames"
+    BatchExportSelection.UniqueGroups -> "Unique similarity-group representatives"
 }
 
 private fun formatLabel(format: FrameExportFormat): String = when (format) {

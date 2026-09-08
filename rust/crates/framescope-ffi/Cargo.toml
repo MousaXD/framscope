@@ -12,8 +12,12 @@ crate-type = ["cdylib", "rlib"]
 framescope-cache = { path = "../framescope-cache" }
 framescope-core = { path = "../framescope-core" }
 framescope-extraction = { path = "../framescope-extraction" }
+framescope-extraction-groups-output = { path = "../framescope-extraction-groups-output" }
 framescope-extraction-image = { path = "../framescope-extraction-image" }
 framescope-extraction-output = { path = "../framescope-extraction-output" }
+framescope-group-navigation = { path = "../framescope-group-navigation" }
+framescope-group-navigation-video = { path = "../framescope-group-navigation-video" }
+framescope-perceptual = { path = "../framescope-perceptual" }
 framescope-video = { path = "../framescope-video" }
 jni.workspace = true
 libc.workspace = true
