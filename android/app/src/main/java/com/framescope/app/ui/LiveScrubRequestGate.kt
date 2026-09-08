@@ -3,11 +3,11 @@ package com.framescope.app.ui
 /**
  * Bounds live-scrub work to one native request in flight plus one replaceable pending request.
  *
- * The gate deliberately does not cancel an in-flight native call. A blocking JNI call may not be
- * cooperatively cancellable, and starting a replacement beside it would defeat the backpressure
- * guarantee. Instead, newer submissions replace the single pending slot and make older results
- * ineligible for publication. Releasing the scrub gesture or replacing the source invalidates the
- * current epoch, so a late native result can never become visible.
+ * Newer submissions replace the single pending slot and make older results ineligible for
+ * publication. Releasing the scrub gesture or replacing the source invalidates the current epoch
+ * and returns the active request, if any, so the native layer can cooperatively cancel the exact
+ * obsolete request. Publication fencing remains independent from native cancellation: a late native
+ * result is never allowed to become visible even if cancellation is delayed or unsupported.
  */
 internal class LiveScrubRequestGate {
     private var nextRequestId = 1L
@@ -58,13 +58,24 @@ internal class LiveScrubRequestGate {
     }
 
     /**
-     * Invalidates queued/current publication without pretending a blocking native call was stopped.
+     * Invalidates queued/current publication and identifies native work that should be preempted.
+     *
+     * The returned request is the only request that can currently be executing in native code. Its
+     * monotonically increasing request id is also used by native cancellation to close the race
+     * where invalidation happens just before that request registers its cancellation token.
      */
     @Synchronized
-    fun invalidate() {
+    fun invalidate(): LiveScrubCancellation? {
+        val cancellation = inFlight?.let {
+            LiveScrubCancellation(
+                sessionId = it.sessionId,
+                requestId = it.requestId,
+            )
+        }
         epoch = increment(epoch, "live scrub epoch")
         latestRequestId = 0L
         pending = null
+        return cancellation
     }
 
     @Synchronized
@@ -97,4 +108,9 @@ internal data class LiveScrubRequest(
     val epoch: Long,
     val sessionId: Long,
     val target: LiveScrubTarget,
+)
+
+internal data class LiveScrubCancellation(
+    val sessionId: Long,
+    val requestId: Long,
 )
