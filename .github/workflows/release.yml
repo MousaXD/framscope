@@ -30,11 +30,80 @@ jobs:
       SIGNING_KEY_ALIAS: ${{ secrets.FRAMESCOPE_SIGNING_KEY_ALIAS }}
       SIGNING_KEY_PASSWORD: ${{ secrets.FRAMESCOPE_SIGNING_KEY_PASSWORD }}
     steps:
-      - name: Checkout release tag
+      - name: Checkout release tag with acceptance ancestry
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Verify release tag matches source version
         run: bash ./scripts/verify-release-version.sh "$GITHUB_REF_NAME"
+
+      - name: Require accepted physical-device evidence
+        run: |
+          report="acceptance/phase7/device-report.json"
+          test -f "$report" || {
+            echo "error: Phase 7 physical-device report is not committed; production release is locked" >&2
+            exit 1
+          }
+          python3 ./scripts/verify-phase7-device-report.py "$report"
+
+          tested_commit="$(python3 - "$report" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          print(json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))['tested_commit'])
+          PY
+          )"
+          reported_version="$(python3 - "$report" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          print(json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))['app_version'])
+          PY
+          )"
+          source_version="$(awk -F= '$1 == "versionName" { print $2 }' version.properties | tr -d '\r')"
+          test "$reported_version" = "$source_version" || {
+            echo "error: physical report version $reported_version does not match source version $source_version" >&2
+            exit 1
+          }
+
+          git cat-file -e "$tested_commit^{commit}" || {
+            echo "error: tested physical-device commit is unavailable: $tested_commit" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$tested_commit" "$GITHUB_SHA" || {
+            echo "error: tested physical-device commit is not an ancestor of the release tag" >&2
+            exit 1
+          }
+
+          apk_affecting_paths=(
+            android
+            rust
+            version.properties
+            scripts/build-rust.sh
+            scripts/build-ffmpeg-android.sh
+            scripts/verify-ffmpeg-android.sh
+            .github/workflows/release.yml
+            .github/workflows/phase7-device-kit.yml
+          )
+          if ! git diff --quiet "$tested_commit" "$GITHUB_SHA" -- "${apk_affecting_paths[@]}"; then
+            echo "error: APK-affecting inputs changed after physical-device acceptance; retest the current source" >&2
+            git diff --name-only "$tested_commit" "$GITHUB_SHA" -- "${apk_affecting_paths[@]}" >&2
+            exit 1
+          fi
+
+          acceptance_contract_paths=(
+            acceptance/phase7/device-report.template.json
+            scripts/verify-phase7-device-report.py
+            scripts/generate-video-fixtures.sh
+            scripts/verify-video-fixtures.py
+            .github/workflows/phase7-device-report.yml
+          )
+          if ! git diff --quiet "$tested_commit" "$GITHUB_SHA" -- "${acceptance_contract_paths[@]}"; then
+            echo "error: physical acceptance contract changed after device testing; retest the current contract" >&2
+            git diff --name-only "$tested_commit" "$GITHUB_SHA" -- "${acceptance_contract_paths[@]}" >&2
+            exit 1
+          fi
 
       - name: Require complete release signing material
         run: |

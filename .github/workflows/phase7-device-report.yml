@@ -1,0 +1,39 @@
+name: Phase 7 device-report contract
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase7-device-report-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  device-report-schema:
+    name: device-report-schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Self-test physical report validator
+        run: python3 ./scripts/verify-phase7-device-report.py --self-test
+
+      - name: Validate pending report template
+        run: python3 ./scripts/verify-phase7-device-report.py --template ./acceptance/phase7/device-report.template.json
+
+      - name: Validate committed physical evidence when present
+        run: |
+          if test -f acceptance/phase7/device-report.json; then
+            python3 ./scripts/verify-phase7-device-report.py acceptance/phase7/device-report.json
+          else
+            echo "Phase 7 physical evidence is not committed yet; production release remains locked."
+          fi

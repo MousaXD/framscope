@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "status": "pending",
+  "tested_commit": null,
+  "app_version": "0.1.0",
+  "build_type": null,
+  "tested_apk_sha256": null,
+  "tested_at_utc": null,
+  "device": {
+    "manufacturer": null,
+    "model": null,
+    "android_api": null,
+    "abi": "arm64-v8a",
+    "is_emulator": false
+  },
+  "provider": {
+    "name": null,
+    "authority": null,
+    "local_only": true,
+    "capabilities": {
+      "local_picker_visibility": "pending",
+      "create_workspace_directory": "pending",
+      "create_document": "pending",
+      "open_writable_descriptor": "pending",
+      "stable_requested_filenames": "pending",
+      "delete_uncommitted_document": "pending",
+      "delete_uncommitted_workspace": "pending"
+    }
+  },
+  "codec_cases": {
+    "h264_cfr": "pending",
+    "h264_vfr": "pending",
+    "hevc_cfr": "pending",
+    "vp9_cfr": "pending",
+    "av1_cfr": "pending",
+    "rotated_portrait": "pending",
+    "h264_with_audio": "pending",
+    "multi_stream": "pending",
+    "unusual_dimensions": "pending",
+    "very_short": "pending"
+  },
+  "scenarios": {
+    "install_and_launch": "pending",
+    "open_local_video": "pending",
+    "frame_step_boundaries": "pending",
+    "vfr_timestamp_navigation": "pending",
+    "zoom_and_pan": "pending",
+    "group_navigation": "pending",
+    "background_foreground": "pending",
+    "source_replacement": "pending",
+    "current_frame_png": "pending",
+    "current_frame_jpeg": "pending",
+    "current_frame_webp": "pending",
+    "batch_frame_range": "pending",
+    "batch_timestamp_range": "pending",
+    "batch_every_n": "pending",
+    "batch_all_frames_small_fixture": "pending",
+    "batch_unique_groups": "pending",
+    "batch_cancel": "pending",
+    "workspace_manifest_and_names": "pending",
+    "abort_cleanup": "pending",
+    "force_stop_mid_export_no_false_success": "pending"
+  },
+  "large_media": {
+    "source_name": null,
+    "source_size_bytes": null,
+    "duration_seconds": null,
+    "codec": null,
+    "width": null,
+    "height": null,
+    "open_to_ready_ms": null,
+    "ten_step_navigation_ms": null,
+    "sampled_export_stride": null,
+    "sampled_export_elapsed_ms": null,
+    "peak_pss_kib": null
+  },
+  "notes": []
+}

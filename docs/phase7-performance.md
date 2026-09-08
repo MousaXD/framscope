@@ -1,6 +1,6 @@
 # Phase 7 Performance and Large-Media Evidence
 
-**Status: in progress.**
+**Status: deterministic CI layer accepted; physical-device layer pending.**
 
 Phase 7 adds representative stress and profiling evidence on top of the structural boundedness contracts accepted in Phases 3–6. Performance evidence must never replace correctness invariants or make CI depend on noisy hosted-runner timing.
 
@@ -22,17 +22,28 @@ The stress harness deliberately avoids test-only whole-video allocations:
 
 These are deterministic pass/fail contracts. A regression that materializes a video-wide decoded-frame list, selection list, or output list should require an explicit design review rather than increasing a CI memory allowance.
 
-## Hosted-runner measurements
+## Accepted hosted-runner evidence
 
-After precompiling the stress harness, CI runs it under `/usr/bin/time -v` and preserves:
+The final pre-merge Phase 7 stress run for the accepted large-media integration reported:
 
-- the test's structural counter report;
-- wall-clock/process accounting from the hosted runner;
-- maximum resident set size reported by the operating system.
+- indexed frames: 100,000;
+- selected/committed frames: 10,000;
+- final selected FrameId: 99,990;
+- decoded frames: 99,991;
+- decoder opens: 1;
+- decoder seeks: 1;
+- index batch limit: 256;
+- manifest bytes: 3,849,189;
+- manifest write calls: 1,140,108;
+- largest individual manifest write: 30 bytes;
+- observed wall time: approximately 2.43 seconds;
+- observed maximum resident set size: 34,092 KiB;
+- major page faults: 0;
+- swaps: 0.
 
-The files are uploaded as the `phase7-large-media-stress-<commit>` artifact for seven days.
+These timing/RSS numbers describe one GitHub-hosted Linux runner and are **not** thresholds. CPU model, host load, kernel state, caches, and runner image changes are outside FrameScope's control.
 
-Timing and RSS from GitHub-hosted runners are **observational evidence only**. CPU model, host load, kernel state, caches, and runner image changes are outside FrameScope's control, so no fixed latency or RSS threshold is used as a correctness gate.
+The job precompiles the stress harness before measurement, runs it under `/usr/bin/time -v`, and uploads the structural log plus process-accounting report as a short-lived `phase7-large-media-stress-<commit>` artifact.
 
 ## What this does not prove
 
@@ -43,15 +54,15 @@ A Linux hosted runner is not an Android device. This job does not establish:
 - GPU/Compose rendering cost;
 - thermal throttling or sustained battery behavior;
 - SAF provider latency;
-- performance differences across Android versions, SoCs, storage providers, codecs, or high-resolution source media.
+- performance differences across Android versions, SoCs, local document providers, codecs, or high-resolution source media.
 
-Those claims require physical-device profiling. Device evidence must be reported separately with the device model, Android version, source codec/resolution/duration, provider/storage path, operation, and observed measurements.
+Those claims require physical-device profiling. The mandatory baseline is defined in `docs/phase7-device-provider-acceptance.md` and recorded through `acceptance/phase7/device-report.json`.
 
 ## Acceptance rule
 
 Phase 7 performance acceptance therefore has two layers:
 
-1. **Required deterministic CI:** bounded-state contracts, exact frame/output accounting, canonical regression suites, and release gates must pass.
-2. **Physical-device evidence:** representative device/provider profiling is recorded before the first production release. Device measurements may identify optimizations or release blockers, but they must not be converted into fake hosted-runner equivalence.
+1. **Accepted deterministic CI:** bounded-state contracts, exact frame/output accounting, canonical regression suites, and release gates pass without timing/RSS thresholds.
+2. **Pending physical-device evidence:** representative >=1 GiB local media is profiled on non-emulator arm64 Android hardware, including open/navigation/export elapsed time and observed peak PSS.
 
 Correctness, frame identity, timestamp truth, source-quality guarantees, cancellation semantics, and output atomicity remain higher priority than benchmark numbers.
