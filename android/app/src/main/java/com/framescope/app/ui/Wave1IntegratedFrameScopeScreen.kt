@@ -288,6 +288,7 @@ private fun Wave1WorkspaceScreen(
                     }
                     MicroscopePanel(
                         state = state.microscopeState,
+                        indexingProgress = state.indexingProgress,
                         timelineBounds = state.timelineBounds,
                         rangeSelection = state.timelineRange,
                         scrubPreview = state.scrubPreview,
