@@ -63,6 +63,7 @@ private sealed interface MicroscopePreviewState {
 @Composable
 internal fun MicroscopePanel(
     state: MicroscopeUiState,
+    indexingProgress: IndexingProgressUi? = null,
     timelineBounds: IndexedTimelineBounds?,
     rangeSelection: TimelineRangeSelection?,
     scrubPreview: MicroscopeScrubPreview?,
@@ -79,9 +80,7 @@ internal fun MicroscopePanel(
 ) {
     when (state) {
         MicroscopeUiState.Idle -> Unit
-        MicroscopeUiState.Opening -> MicroscopeBusyCard(
-            "Indexing presentation timestamps in Rust… Exact timeline navigation unlocks when the complete index is ready.",
-        )
+        MicroscopeUiState.Opening -> MicroscopeIndexingCard(indexingProgress)
         is MicroscopeUiState.LoadingFrame -> MicroscopeBusyCard("Decoding source-quality frame…")
         is MicroscopeUiState.Navigating -> {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
