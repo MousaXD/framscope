@@ -1,0 +1,15 @@
+[package]
+name = "framescope-extraction-manifest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+framescope-cache = { path = "../framescope-cache" }
+framescope-core = { path = "../framescope-core" }
+framescope-extraction = { path = "../framescope-extraction" }
+framescope-extraction-image = { path = "../framescope-extraction-image" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
