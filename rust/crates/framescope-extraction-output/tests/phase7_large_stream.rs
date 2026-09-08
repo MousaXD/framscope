@@ -295,14 +295,17 @@ fn phase7_large_streaming_export_stays_bounded() {
     .expect("large streaming export must complete");
 
     let expected_selected = ((frame_count - 1) / SAMPLE_EVERY_N) + 1;
+    let last_selected_frame = (expected_selected - 1) * SAMPLE_EVERY_N;
+    let expected_decoded = last_selected_frame + 1;
     assert_eq!(report.plan.selected_count, expected_selected);
     assert_eq!(report.committed_frames, expected_selected);
     assert_eq!(report.batch.selected_frames, expected_selected);
-    assert_eq!(report.batch.decoded_frames, frame_count);
+    assert_eq!(report.batch.decoded_frames, expected_decoded);
     assert_eq!(sink.committed, expected_selected);
+    assert_eq!(sink.last_frame_id, Some(last_selected_frame));
     assert_eq!(counters.opens.get(), 1);
     assert_eq!(counters.seeks.get(), 1);
-    assert_eq!(counters.nexts.get(), frame_count);
+    assert_eq!(counters.nexts.get(), expected_decoded);
     assert_eq!(report.encoded_bytes, expected_selected * 8);
     assert!(manifest.bytes > 0);
     assert!(manifest.writes > expected_selected);
@@ -310,6 +313,7 @@ fn phase7_large_streaming_export_stays_bounded() {
 
     println!(
         "phase7 large-stream frames={frame_count} selected={expected_selected} \
+         last_selected={last_selected_frame} decoded={expected_decoded} \
          decoder_opens={} decoder_seeks={} decoder_nexts={} index_batch_limit={} \
          manifest_bytes={} manifest_writes={} manifest_max_write_bytes={}",
         counters.opens.get(),
