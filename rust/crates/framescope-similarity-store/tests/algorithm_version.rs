@@ -2,9 +2,7 @@ use framescope_cache::{FrameId, FrameIndexStreamIdentity, SourceIdentity};
 use framescope_core::{CodecInfo, MediaDuration, MediaKind, MediaTimestamp, StreamInfo, TimeBase};
 use framescope_perceptual::HybridSimilarityPolicy;
 use framescope_similarity::FrameGroup;
-use framescope_similarity_store::{
-    SimilarityStore, SimilarityStoreKey, SimilarityStoreLoad,
-};
+use framescope_similarity_store::{SimilarityStore, SimilarityStoreKey, SimilarityStoreLoad};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
@@ -112,9 +110,7 @@ fn persisted_hybrid_algorithm_version_mismatch_is_invalidated_for_rebuild() {
     drop(connection);
 
     assert_eq!(
-        store
-            .visit_groups_for_frame_count(&key, 1, |_| {})
-            .unwrap(),
+        store.visit_groups_for_frame_count(&key, 1, |_| {}).unwrap(),
         SimilarityStoreLoad::InvalidatedStale
     );
     assert!(!path.exists());
