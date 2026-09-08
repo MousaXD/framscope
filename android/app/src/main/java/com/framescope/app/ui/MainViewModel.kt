@@ -501,12 +501,23 @@ class MainViewModel(
         operation: suspend () -> Result<MicroscopeSessionSnapshot>,
     ) {
         val current = _uiState.value.microscopeState
-        val session = when (current) {
-            is MicroscopeUiState.Ready -> current.session
-            is MicroscopeUiState.Empty -> current.session
+        val session: MicroscopeSessionSnapshot
+        val previousFrame: MicroscopeFrame?
+        when (current) {
+            is MicroscopeUiState.Ready -> {
+                session = current.session
+                previousFrame = current.frame
+            }
+            is MicroscopeUiState.Empty -> {
+                session = current.session
+                previousFrame = null
+            }
+            is MicroscopeUiState.Navigating -> {
+                session = current.session
+                previousFrame = current.previousFrame
+            }
             else -> return
         }
-        val previousFrame = (current as? MicroscopeUiState.Ready)?.frame
         val inspectionRevision = inspectionGeneration.get()
         val microscopeRevision = microscopeGeneration.incrementAndGet()
         microscopeJob?.cancel()
