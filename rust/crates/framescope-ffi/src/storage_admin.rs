@@ -1,6 +1,3 @@
-#[path = "scrub_handoff.rs"]
-mod scrub_handoff;
-
 use framescope_cache::{
     FrameScopeStorageStats, StorageAdmin, StorageAdminError, StorageClearReport, StorageClearScope,
 };
@@ -12,7 +9,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
 use crate::{
-    ENGINE_VERSION, active_microscope_sessions, storage_session_lifecycle_lock, to_jstring,
+    ENGINE_VERSION, active_microscope_sessions, scrub_handoff, storage_session_lifecycle_lock,
+    to_jstring,
 };
 
 const MAX_CACHE_ROOT_LENGTH: usize = 4_096;
