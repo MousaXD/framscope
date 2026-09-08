@@ -37,6 +37,7 @@ internal fun MicroscopeTimelineControls(
     onJumpTimestampUs: (Long) -> Unit,
     onCommitRange: (Long, Long) -> Unit,
     onClearRange: () -> Unit,
+    showImplementationGuidance: Boolean = true,
 ) {
     val currentFrame = session.currentFrame ?: return
     val bounds = timelineBounds?.takeIf {
@@ -169,11 +170,13 @@ internal fun MicroscopeTimelineControls(
                     style = MaterialTheme.typography.labelMedium,
                 )
             }
-            Text(
-                text = "Dragging updates only local UI state. Releasing requests one indexed timestamp seek; Rust resolves the final authoritative VFR-safe frame.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (showImplementationGuidance) {
+                Text(
+                    text = "Dragging updates only local UI state. Releasing requests one indexed timestamp seek; Rust resolves the final authoritative VFR-safe frame.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             TimelineRangeControls(
                 sessionId = session.sessionId,
                 bounds = bounds,
@@ -182,7 +185,7 @@ internal fun MicroscopeTimelineControls(
                 onCommitRange = onCommitRange,
                 onClearRange = onClearRange,
             )
-        } else {
+        } else if (showImplementationGuidance) {
             Text(
                 text = "Indexed timestamps are unavailable for the timeline endpoints, so dragging stays presentation-order based and release performs one exact FrameId jump.",
                 style = MaterialTheme.typography.bodySmall,
