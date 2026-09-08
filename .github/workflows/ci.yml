@@ -241,3 +241,70 @@ jobs:
       - name: Test real video engine integration
         working-directory: rust
         run: cargo test -p framescope-video --features system-ffmpeg
+
+  publish-main-snapshot:
+    name: publish-main-snapshot
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - rust-fast
+      - native-android
+      - android
+      - video-fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download verified APK from this CI run
+        run: |
+          set -euo pipefail
+          artifact="framescope-debug-$GITHUB_SHA"
+          mkdir -p build/main-snapshot
+          gh run download "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact" \
+            --dir build/main-snapshot
+
+          count="$(find build/main-snapshot -type f -name '*.apk' | wc -l | tr -d ' ')"
+          test "$count" = "1" || {
+            echo "error: expected exactly one APK in $artifact, found $count" >&2
+            exit 1
+          }
+
+          apk="$(find build/main-snapshot -type f -name '*.apk' -print -quit)"
+          short_sha="${GITHUB_SHA:0:12}"
+          staged="build/FrameScope-main-${short_sha}-arm64-v8a-debug.apk"
+          cp "$apk" "$staged"
+          sha256sum "$staged" > "$staged.sha256"
+
+          echo "SNAPSHOT_APK=$staged" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_SHA256=$staged.sha256" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_TAG=main-$short_sha" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_TITLE=FrameScope main $short_sha" >> "$GITHUB_ENV"
+
+      - name: Publish immutable main snapshot pre-release
+        run: |
+          set -euo pipefail
+          notes="Automated installable debug snapshot from main commit $GITHUB_SHA.
+
+This snapshot was published only after canonical CI passed for the same commit. It is intended for testing and is not the signed, physically certified production release. Production v* releases remain protected by the Phase 7 physical-device and signing gates."
+
+          if gh release view "$SNAPSHOT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$SNAPSHOT_TAG" \
+              "$SNAPSHOT_APK" \
+              "$SNAPSHOT_SHA256" \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$SNAPSHOT_TAG" \
+              "$SNAPSHOT_APK" \
+              "$SNAPSHOT_SHA256" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "$SNAPSHOT_TITLE" \
+              --notes "$notes"
+          fi
