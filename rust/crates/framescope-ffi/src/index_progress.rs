@@ -92,7 +92,11 @@ pub(crate) fn update(operation_id: OperationId, progress: IndexingProgress) {
     state.reused_frames = progress.reused_frames;
     state.expected_reuse_frames = progress.expected_reuse_frames;
     if let Some(timestamp_us) = progress.current_timestamp_us {
-        state.first_timestamp_us.get_or_insert(timestamp_us);
+        state.first_timestamp_us = Some(
+            state
+                .first_timestamp_us
+                .map_or(timestamp_us, |first| first.min(timestamp_us)),
+        );
         state.current_timestamp_us = Some(timestamp_us);
     }
 }
@@ -158,10 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_origin_is_stable_for_vfr_progress() {
+    fn timestamp_origin_tracks_earliest_observed_vfr_pts() {
         let operation_id = 73_002;
         let guard = begin(operation_id).expect("progress slot");
-        for timestamp_us in [100_000, 141_000, 205_000] {
+        for timestamp_us in [205_000, 100_000, 141_000] {
             update(
                 operation_id,
                 IndexingProgress {
@@ -175,7 +179,37 @@ mod tests {
         }
         let json = response_json(operation_id);
         assert!(json.contains("\"first_timestamp_us\":100000"));
-        assert!(json.contains("\"current_timestamp_us\":205000"));
+        assert!(json.contains("\"current_timestamp_us\":141000"));
+        drop(guard);
+    }
+
+    #[test]
+    fn partial_resume_can_validate_before_persisted_tail_without_becoming_invalid() {
+        let operation_id = 73_003;
+        let guard = begin(operation_id).expect("progress slot");
+        update(
+            operation_id,
+            IndexingProgress {
+                stage: IndexingProgressStage::CheckingExistingIndex,
+                indexed_frames: 64,
+                reused_frames: 0,
+                expected_reuse_frames: 64,
+                current_timestamp_us: Some(2_800_000),
+            },
+        );
+        update(
+            operation_id,
+            IndexingProgress {
+                stage: IndexingProgressStage::ValidatingExistingIndex,
+                indexed_frames: 64,
+                reused_frames: 1,
+                expected_reuse_frames: 64,
+                current_timestamp_us: Some(0),
+            },
+        );
+        let json = response_json(operation_id);
+        assert!(json.contains("\"first_timestamp_us\":0"));
+        assert!(json.contains("\"current_timestamp_us\":0"));
         drop(guard);
     }
 }
