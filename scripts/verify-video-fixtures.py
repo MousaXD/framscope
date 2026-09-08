@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "fixtures" / "video" / "manifest.json"
 FIXTURE_DIR = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "build" / "video-fixtures"
+EXPECTED_PROBE_MODES = {"success", "failure", "no_video", "damaged_video"}
 
 
 def run_ffprobe(path: Path, *, frames: bool = False) -> subprocess.CompletedProcess[str]:
@@ -59,10 +60,15 @@ def has_variable_timestamps(path: Path) -> bool:
     return bool(deltas) and (max(deltas) - min(deltas)) > 0.01
 
 
-def verify_success(entry: dict, path: Path, info: dict) -> None:
+def stream_sets(info: dict) -> tuple[list[dict], list[dict], list[dict]]:
     streams = info.get("streams", [])
     video_streams = [s for s in streams if s.get("codec_type") == "video"]
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    return streams, video_streams, audio_streams
+
+
+def verify_success(entry: dict, path: Path, info: dict) -> None:
+    streams, video_streams, audio_streams = stream_sets(info)
     assert video_streams, f"{path.name}: expected at least one video stream"
     primary = video_streams[0]
 
@@ -97,29 +103,65 @@ def verify_success(entry: dict, path: Path, info: dict) -> None:
     assert variable == entry["variable_frame_rate"], f"{path.name}: variable_frame_rate={variable}"
 
 
+def verify_no_video(entry: dict, path: Path, info: dict) -> None:
+    streams, video_streams, audio_streams = stream_sets(info)
+    assert not video_streams, f"{path.name}: adversarial no-video fixture unexpectedly contains video"
+    assert len(streams) == entry["stream_count"], f"{path.name}: stream_count={len(streams)}"
+    assert len(audio_streams) == entry["audio_stream_count"], f"{path.name}: audio stream count mismatch"
+    if "audio_codec" in entry:
+        assert audio_streams and audio_streams[0].get("codec_name") == entry["audio_codec"], f"{path.name}: audio codec mismatch"
+
+
+def verify_damaged_video(entry: dict, path: Path, result: subprocess.CompletedProcess[str]) -> None:
+    baseline = FIXTURE_DIR / "h264-cfr.mp4"
+    assert baseline.is_file(), f"{path.name}: healthy baseline fixture is missing"
+    assert path.stat().st_size < baseline.stat().st_size, f"{path.name}: damaged fixture is not smaller than baseline"
+    if result.returncode != 0:
+        return
+    info = json.loads(result.stdout)
+    _, video_streams, _ = stream_sets(info)
+    assert video_streams, f"{path.name}: probe succeeded but reported no video stream"
+    count = frame_count(video_streams[0])
+    healthy_count = int(entry["healthy_frame_count"])
+    if count is not None:
+        assert count < healthy_count, (
+            f"{path.name}: damaged payload still exposed {count} readable frames; expected fewer than {healthy_count}"
+        )
+
+
 def main() -> int:
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     errors: list[str] = []
 
-    for entry in manifest["fixtures"]:
+    if manifest.get("schema_version") != 2:
+        errors.append(f"manifest schema_version={manifest.get('schema_version')!r}, expected 2")
+
+    for entry in manifest.get("fixtures", []):
         path = FIXTURE_DIR / entry["file"]
+        mode = entry.get("expect_probe")
+        if mode not in EXPECTED_PROBE_MODES:
+            errors.append(f"{entry['file']}: unsupported expect_probe={mode!r}")
+            continue
         if not path.is_file():
             errors.append(f"{entry['file']}: missing fixture")
             continue
 
         result = run_ffprobe(path)
-        if entry["expect_probe"] == "failure":
-            if result.returncode == 0:
-                errors.append(f"{entry['file']}: expected ffprobe failure but probe succeeded")
-            continue
-
-        if result.returncode != 0:
-            errors.append(f"{entry['file']}: ffprobe failed: {result.stderr.strip()}")
-            continue
-
         try:
-            verify_success(entry, path, json.loads(result.stdout))
-        except (AssertionError, KeyError, TypeError, ValueError) as exc:
+            if mode == "failure":
+                if result.returncode == 0:
+                    raise AssertionError(f"{entry['file']}: expected ffprobe failure but probe succeeded")
+            elif mode == "damaged_video":
+                verify_damaged_video(entry, path, result)
+            else:
+                if result.returncode != 0:
+                    raise AssertionError(f"{entry['file']}: ffprobe failed: {result.stderr.strip()}")
+                info = json.loads(result.stdout)
+                if mode == "success":
+                    verify_success(entry, path, info)
+                else:
+                    verify_no_video(entry, path, info)
+        except (AssertionError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             errors.append(str(exc))
 
     if errors:
