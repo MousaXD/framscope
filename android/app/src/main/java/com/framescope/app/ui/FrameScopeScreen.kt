@@ -42,6 +42,8 @@ fun FrameScopeScreen(
     onStepMicroscope: (Int) -> Unit,
     onJumpMicroscopeFrame: (Long) -> Unit,
     onJumpMicroscopeTimestampUs: (Long) -> Unit,
+    onCommitMicroscopeRange: (Long, Long) -> Unit,
+    onClearMicroscopeRange: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -81,15 +83,19 @@ fun FrameScopeScreen(
                 VideoInspectionState.Cancelled -> StatusCard("Video inspection cancelled.")
                 VideoInspectionState.Picking -> StatusCard("Waiting for Android's video picker…")
                 VideoInspectionState.Opening -> BusyCard("Opening selected video…")
-                VideoInspectionState.Inspecting -> BusyCard("Inspecting video in Rust…")
+                VideoInspectionState.Inspecting -> BusyCard("Reading video metadata in Rust…")
                 VideoInspectionState.Idle -> Unit
             }
 
             MicroscopePanel(
                 state = state.microscopeState,
+                timelineBounds = state.timelineBounds,
+                rangeSelection = state.timelineRange,
                 onStep = onStepMicroscope,
                 onJumpFrame = onJumpMicroscopeFrame,
                 onJumpTimestampUs = onJumpMicroscopeTimestampUs,
+                onCommitRange = onCommitMicroscopeRange,
+                onClearRange = onClearMicroscopeRange,
                 onDismissError = onDismissError,
             )
 
