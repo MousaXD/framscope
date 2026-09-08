@@ -88,10 +88,94 @@ struct ScrubRegistry {
     sessions: HashMap<i64, ScrubSessionHandle>,
 }
 
+#[derive(Debug)]
+struct ActivePreviewOperation {
+    generation: u64,
+    cancellation: CancellationToken,
+}
+
+#[derive(Debug, Default)]
+struct PreviewCancellationRegistry {
+    next_generation: u64,
+    active: HashMap<i64, ActivePreviewOperation>,
+}
+
+#[derive(Debug)]
+struct PreviewOperationGuard {
+    session_id: i64,
+    generation: u64,
+}
+
+impl Drop for PreviewOperationGuard {
+    fn drop(&mut self) {
+        let Ok(mut registry) = preview_cancellation_registry().lock() else {
+            return;
+        };
+        let should_remove = registry
+            .active
+            .get(&self.session_id)
+            .map(|operation| operation.generation == self.generation)
+            .unwrap_or(false);
+        if should_remove {
+            registry.active.remove(&self.session_id);
+        }
+    }
+}
+
 static SCRUB_REGISTRY: OnceLock<Mutex<ScrubRegistry>> = OnceLock::new();
+static PREVIEW_CANCELLATIONS: OnceLock<Mutex<PreviewCancellationRegistry>> = OnceLock::new();
 
 fn scrub_registry() -> &'static Mutex<ScrubRegistry> {
     SCRUB_REGISTRY.get_or_init(|| Mutex::new(ScrubRegistry::default()))
+}
+
+fn preview_cancellation_registry() -> &'static Mutex<PreviewCancellationRegistry> {
+    PREVIEW_CANCELLATIONS.get_or_init(|| Mutex::new(PreviewCancellationRegistry::default()))
+}
+
+fn begin_preview_operation(
+    session_id: i64,
+) -> Result<(CancellationToken, PreviewOperationGuard), PreviewFailure> {
+    let mut registry = preview_cancellation_registry().lock().map_err(|_| {
+        PreviewFailure::new("bridge_error", "Live preview cancellation state is poisoned.")
+    })?;
+    if let Some(previous) = registry.active.remove(&session_id) {
+        previous.cancellation.cancel();
+    }
+    registry.next_generation = registry.next_generation.saturating_add(1).max(1);
+    let generation = registry.next_generation;
+    let cancellation = CancellationToken::new();
+    registry.active.insert(
+        session_id,
+        ActivePreviewOperation {
+            generation,
+            cancellation: cancellation.clone(),
+        },
+    );
+    Ok((
+        cancellation,
+        PreviewOperationGuard {
+            session_id,
+            generation,
+        },
+    ))
+}
+
+/// Cooperatively cancels the currently executing preview for [session_id] without acquiring the
+/// authoritative microscope session mutex. Exact finger-up navigation calls this before it waits
+/// for that mutex, preventing disposable preview decode from naturally running to completion first.
+pub(crate) fn cancel_session_preview(session_id: i64) -> bool {
+    if session_id <= 0 {
+        return false;
+    }
+    let Ok(registry) = preview_cancellation_registry().lock() else {
+        return false;
+    };
+    let Some(operation) = registry.active.get(&session_id) else {
+        return false;
+    };
+    operation.cancellation.cancel();
+    true
 }
 
 #[unsafe(no_mangle)]
@@ -285,27 +369,32 @@ fn render_preview(
             )
         })?;
     let cache_root = validate_cache_root(cache_root)?;
+    let (cancellation, _operation) = begin_preview_operation(session_id)?;
 
     microscope::with_extraction_context(session_id, |source_fd, index| {
+        ensure_not_cancelled(&cancellation)?;
         let target = resolve(index)?;
         let frame_id = target.frame_id();
         let state = session_state(session_id, &cache_root)?;
         let mut state = state.lock().map_err(|_| {
             PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
         })?;
+        ensure_not_cancelled(&cancellation)?;
 
         let (preview, source, decoded_frames) = if let Some(preview) =
-            state.preview_cache.get(frame_id)
+            state.preview_cache.get(frame_id, max_edge)
         {
             (preview, "preview_ram", 0)
         } else {
+            let decoder_cancellation = cancellation.clone();
             let navigated = navigate_to_frame_cached(
                 index,
                 &mut state.source_cache,
-                || open_decoder(source_fd),
+                || open_decoder(source_fd, decoder_cancellation),
                 frame_id,
             )
             .map_err(from_navigation)?;
+            ensure_not_cancelled(&cancellation)?;
             let source = match navigated.source {
                 CachedFrameSource::Ram => "source_ram",
                 CachedFrameSource::Decoded => "decoded",
@@ -313,10 +402,14 @@ fn render_preview(
             let decoded_frames = navigated.decoded_frames;
             let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
                 .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
-            state.preview_cache.insert(frame_id, preview.clone());
+            ensure_not_cancelled(&cancellation)?;
+            state
+                .preview_cache
+                .insert(frame_id, max_edge, preview.clone());
             (preview, source, decoded_frames)
         };
 
+        ensure_not_cancelled(&cancellation)?;
         if destination.len() < preview.byte_len() {
             return Err(PreviewFailure::new(
                 "buffer_too_small",
@@ -360,15 +453,29 @@ fn render_preview(
 }
 
 #[cfg(unix)]
-fn open_decoder(source_fd: RawFd) -> Result<VideoDecoder, FrameScopeError> {
+fn open_decoder(
+    source_fd: RawFd,
+    cancellation: CancellationToken,
+) -> Result<VideoDecoder, FrameScopeError> {
     // SAFETY: `with_extraction_context` keeps the owned microscope descriptor alive and locked for
     // this call. VideoDecoder duplicates the descriptor immediately and owns only the duplicate.
     let borrowed = unsafe { BorrowedFd::borrow_raw(source_fd) };
     VideoDecoder::open_file_descriptor_with_options(
         borrowed,
         OpenOptions::default(),
-        CancellationToken::new(),
+        cancellation,
     )
+}
+
+fn ensure_not_cancelled(cancellation: &CancellationToken) -> Result<(), PreviewFailure> {
+    if cancellation.is_cancelled() {
+        Err(PreviewFailure::new(
+            "cancelled",
+            "Live preview was superseded by a higher-priority request.",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_selection(value: i32) -> Result<MicroscopeTimestampSelection, PreviewFailure> {
@@ -458,6 +565,7 @@ fn forget_session(session_id: i64) -> bool {
     if session_id <= 0 {
         return false;
     }
+    let _ = cancel_session_preview(session_id);
     scrub_registry()
         .lock()
         .map(|mut registry| registry.sessions.remove(&session_id).is_some())
@@ -526,6 +634,30 @@ mod tests {
             MicroscopeTimestampSelection::Nearest
         );
         assert!(parse_selection(3).is_err());
+    }
+
+    #[test]
+    fn exact_navigation_can_cancel_active_preview_without_scrub_state_lock() {
+        let session_id = 77_777;
+        let (token, operation) = begin_preview_operation(session_id).unwrap();
+        assert!(!token.is_cancelled());
+        assert!(cancel_session_preview(session_id));
+        assert!(token.is_cancelled());
+        drop(operation);
+        assert!(!cancel_session_preview(session_id));
+    }
+
+    #[test]
+    fn newer_preview_registration_cancels_previous_operation() {
+        let session_id = 77_778;
+        let (first, first_guard) = begin_preview_operation(session_id).unwrap();
+        let (second, second_guard) = begin_preview_operation(session_id).unwrap();
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        drop(first_guard);
+        assert!(cancel_session_preview(session_id));
+        assert!(second.is_cancelled());
+        drop(second_guard);
     }
 
     #[test]
