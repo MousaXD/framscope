@@ -12,5 +12,6 @@ readelf -h "$LIB" | grep -Eq 'Machine:[[:space:]]+AArch64'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeVersion'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeInspectVideoFd'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeCancelInspection'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustUniqueExportBridge_nativeExportMicroscopeUniqueGroupsFd'
 
 printf 'Verified Android arm64 Rust JNI library: %s\n' "$LIB"
