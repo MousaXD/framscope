@@ -4,6 +4,7 @@ mod batch_export;
 mod frame_handoff;
 mod microscope;
 pub mod presentation_handoff;
+mod scrub_handoff;
 mod unique_export;
 
 use framescope_core::{FrameScopeError, MediaKind, StreamInfo, VideoInfo};
