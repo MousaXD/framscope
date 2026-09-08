@@ -161,7 +161,7 @@ struct PreparedFrameDetails {
 enum MicroscopeResponse {
     Ok {
         engine: &'static str,
-        session: SessionSnapshot,
+        session: Box<SessionSnapshot>,
     },
     Error {
         engine: &'static str,
@@ -311,7 +311,7 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
     let response = match result {
         Ok(session) => MicroscopeResponse::Ok {
             engine: ENGINE_VERSION,
-            session,
+            session: Box::new(session),
         },
         Err(error) => MicroscopeResponse::Error {
             engine: ENGINE_VERSION,
