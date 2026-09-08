@@ -24,7 +24,6 @@ class StorageOperationException(
 
 internal class AndroidFrameScopeStorageRepository(
     private val cacheRoot: String,
-    private val microscopeController: MicroscopeSessionController,
     private val nativeBridge: NativeFrameScopeStorageBridge = FrameScopeStorageBridge,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : FrameScopeStorageRepository {
@@ -37,27 +36,13 @@ internal class AndroidFrameScopeStorageRepository(
 
     override suspend fun clear(scope: StorageClearScope): Result<StorageMutationResult> =
         withContext(ioDispatcher) {
-            when (
-                val access = microscopeController.runStorageAdminIfIdle {
-                    nativeBridge.clear(cacheRoot, scope)
-                }
-            ) {
-                StorageGateResult.Busy -> Result.failure(activeSessionFailure())
-                is StorageGateResult.Available -> access.value.toMutationResult(scope)
-            }
+            nativeBridge.clear(cacheRoot, scope).toMutationResult(scope)
         }
 
     override suspend fun clearSourceIndexes(sourceKey: String): Result<StorageMutationResult> =
         withContext(ioDispatcher) {
-            when (
-                val access = microscopeController.runStorageAdminIfIdle {
-                    nativeBridge.clearSourceIndexes(cacheRoot, sourceKey)
-                }
-            ) {
-                StorageGateResult.Busy -> Result.failure(activeSessionFailure())
-                is StorageGateResult.Available ->
-                    access.value.toMutationResult(StorageClearScope.PersistentIndexes)
-            }
+            nativeBridge.clearSourceIndexes(cacheRoot, sourceKey)
+                .toMutationResult(StorageClearScope.PersistentIndexes)
         }
 
     private fun NativeStorageResponse.toMutationResult(
@@ -88,9 +73,4 @@ internal class AndroidFrameScopeStorageRepository(
 
     private fun NativeStorageResponse.Failure.toException(): StorageOperationException =
         StorageOperationException(code = code, message = message)
-
-    private fun activeSessionFailure(): StorageOperationException = StorageOperationException(
-        code = "active_session",
-        message = "Close the current video before clearing FrameScope index or cache data.",
-    )
 }
