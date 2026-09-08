@@ -280,7 +280,7 @@ fn open_session(
 
     let (cancellation, _operation) = operation_token(operation_id).map_err(from_frame_scope)?;
     let source_fd = duplicate_fd(fd).map_err(from_io)?;
-    let source_identity = source_identity(source_fd.as_raw_fd());
+    let source_identity = source_identity(source_fd.as_raw_fd(), &cancellation)?;
     let reusable_index = source_identity.is_reuse_safe();
 
     let probe = open_decoder(source_fd.as_fd(), cancellation.clone()).map_err(from_frame_scope)?;
@@ -809,15 +809,32 @@ fn duplicate_fd(fd: RawFd) -> io::Result<OwnedFd> {
 }
 
 #[cfg(unix)]
-fn source_identity(fd: RawFd) -> SourceIdentity {
+fn source_identity(
+    fd: RawFd,
+    cancellation: &CancellationToken,
+) -> Result<SourceIdentity, MicroscopeFailure> {
     match FdLogicalReader::new(fd) {
         Ok(mut reader) if reader.len > 0 => {
             let size = reader.len;
-            SourceIdentity::from_seekable(&mut reader, None, None)
-                .unwrap_or_else(|_| SourceIdentity::metadata_only(Some(size), None, None))
+            match SourceIdentity::from_seekable_cancellable(&mut reader, None, None, || {
+                if cancellation.is_cancelled() {
+                    Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "source identity hashing cancelled",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }) {
+                Ok(identity) => Ok(identity),
+                Err(_) if cancellation.is_cancelled() => {
+                    Err(from_frame_scope(FrameScopeError::Cancelled))
+                }
+                Err(_) => Ok(SourceIdentity::metadata_only(Some(size), None, None)),
+            }
         }
-        Ok(reader) => SourceIdentity::metadata_only(Some(reader.len), None, None),
-        Err(_) => SourceIdentity::metadata_only(None, None, None),
+        Ok(reader) => Ok(SourceIdentity::metadata_only(Some(reader.len), None, None)),
+        Err(_) => Ok(SourceIdentity::metadata_only(None, None, None)),
     }
 }
 
@@ -994,6 +1011,28 @@ mod tests {
         reader.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"0123");
         assert_eq!(file.stream_position().unwrap(), 7);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_identity_propagates_cancellation_instead_of_downgrading_reuse() {
+        use std::fs::File;
+        use std::io::Write as _;
+
+        let path = std::env::temp_dir().join(format!(
+            "framescope-microscope-identity-cancel-{}",
+            std::process::id()
+        ));
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&vec![0x55_u8; 512 * 1024]).unwrap();
+        drop(file);
+        let file = File::open(&path).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = source_identity(file.as_raw_fd(), &cancellation).unwrap_err();
+        assert_eq!(error.code(), FrameScopeError::Cancelled.code());
         let _ = std::fs::remove_file(path);
     }
 }
