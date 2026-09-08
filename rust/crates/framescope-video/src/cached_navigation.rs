@@ -334,9 +334,7 @@ fn matches_index_entry(decoded: &DecodedFrame, indexed: &FrameIndexEntry) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framescope_cache::{
-        FrameIndexOpenDisposition, SourceIdentity, TimestampSeekSafety,
-    };
+    use framescope_cache::{FrameIndexOpenDisposition, SourceIdentity, TimestampSeekSafety};
     use framescope_core::{CodecInfo, MediaDuration, MediaKind, MediaTimestamp, TimeBase};
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -550,11 +548,8 @@ mod tests {
 
     #[test]
     fn duplicate_keyframe_pts_never_return_earlier_rgba_payload_for_later_frame_id() {
-        let source = SourceIdentity::new(
-            100,
-            None,
-            Some("duplicate-keyframe-complete-proof".into()),
-        );
+        let source =
+            SourceIdentity::new(100, None, Some("duplicate-keyframe-complete-proof".into()));
         let (index_path, index) =
             complete_index_with_timeline_and_source(source, &[0, 40, 0, 40], &[0, 2]);
         assert_eq!(
