@@ -2,16 +2,16 @@ use framescope_cache::{FrameCacheHierarchy, FrameId};
 use framescope_core::FrameScopeError;
 use framescope_video::{
     CachedFrameSource, CachedNavigationError, CancellationToken, MicroscopeTimestampSelection,
-    OpenOptions, ScrubPreviewCache, VideoDecoder, downscale_scrub_preview,
-    microscope_target, microscope_timestamp_us, navigate_to_frame_cached,
+    OpenOptions, ScrubPreviewCache, VideoDecoder, downscale_scrub_preview, microscope_target,
+    microscope_timestamp_us, navigate_to_frame_cached,
 };
 use jni::JNIEnv;
 use jni::objects::{JByteBuffer, JClass, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(unix)]
@@ -105,9 +105,14 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nati
     cache_root: JString,
     destination: JByteBuffer,
 ) -> jstring {
-    let cache_root = match env.get_string(&cache_root) {
+    let cache_root: String = match env.get_string(&cache_root) {
         Ok(value) => value.into(),
-        Err(_) => return to_jstring(&mut env, &error_json("invalid_request", "Preview cache root is not valid UTF-8.")),
+        Err(_) => {
+            return to_jstring(
+                &mut env,
+                &error_json("invalid_request", "Preview cache root is not valid UTF-8."),
+            );
+        }
     };
     let json = catch_unwind(AssertUnwindSafe(|| {
         with_direct_buffer(&env, &destination, |bytes| {
@@ -121,7 +126,12 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nati
             )
         })
     }))
-    .unwrap_or_else(|_| error_json("bridge_error", "Native live preview aborted safely after an internal panic."));
+    .unwrap_or_else(|_| {
+        error_json(
+            "bridge_error",
+            "Native live preview aborted safely after an internal panic.",
+        )
+    });
     to_jstring(&mut env, &json)
 }
 
@@ -135,16 +145,26 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nati
     cache_root: JString,
     destination: JByteBuffer,
 ) -> jstring {
-    let cache_root = match env.get_string(&cache_root) {
+    let cache_root: String = match env.get_string(&cache_root) {
         Ok(value) => value.into(),
-        Err(_) => return to_jstring(&mut env, &error_json("invalid_request", "Preview cache root is not valid UTF-8.")),
+        Err(_) => {
+            return to_jstring(
+                &mut env,
+                &error_json("invalid_request", "Preview cache root is not valid UTF-8."),
+            );
+        }
     };
     let json = catch_unwind(AssertUnwindSafe(|| {
         with_direct_buffer(&env, &destination, |bytes| {
             render_frame_response(session_id, frame_id, max_edge, &cache_root, bytes)
         })
     }))
-    .unwrap_or_else(|_| error_json("bridge_error", "Native live preview aborted safely after an internal panic."));
+    .unwrap_or_else(|_| {
+        error_json(
+            "bridge_error",
+            "Native live preview aborted safely after an internal panic.",
+        )
+    });
     to_jstring(&mut env, &json)
 }
 
@@ -165,11 +185,21 @@ fn with_direct_buffer(
 ) -> String {
     let capacity = match env.get_direct_buffer_capacity(destination) {
         Ok(value) if value > 0 => value,
-        _ => return error_json("invalid_buffer", "Android did not provide a non-empty direct preview buffer."),
+        _ => {
+            return error_json(
+                "invalid_buffer",
+                "Android did not provide a non-empty direct preview buffer.",
+            );
+        }
     };
     let address = match env.get_direct_buffer_address(destination) {
         Ok(value) => value,
-        Err(_) => return error_json("invalid_buffer", "Android did not provide a valid direct preview buffer."),
+        Err(_) => {
+            return error_json(
+                "invalid_buffer",
+                "Android did not provide a valid direct preview buffer.",
+            );
+        }
     };
     // SAFETY: JNI guarantees a valid writable address for exactly `capacity` bytes while this local
     // direct ByteBuffer reference is alive. The slice never escapes this synchronous JNI call.
@@ -194,9 +224,10 @@ fn render_timestamp_response(
         max_edge,
         cache_root,
         destination,
-        |index| microscope_timestamp_us(index, timestamp_us, selection).map_err(|error| {
-            PreviewFailure::new("timestamp_not_indexed", error.to_string())
-        }),
+        |index| {
+            microscope_timestamp_us(index, timestamp_us, selection)
+                .map_err(|error| PreviewFailure::new("timestamp_not_indexed", error.to_string()))
+        },
     ))
 }
 
@@ -209,16 +240,22 @@ fn render_frame_response(
 ) -> String {
     let frame_id = match u64::try_from(frame_id) {
         Ok(value) => FrameId(value),
-        Err(_) => return serialize_result(Err(PreviewFailure::new("invalid_request", "Preview frame id must be non-negative."))),
+        Err(_) => {
+            return serialize_result(Err(PreviewFailure::new(
+                "invalid_request",
+                "Preview frame id must be non-negative.",
+            )));
+        }
     };
     serialize_result(render_preview(
         session_id,
         max_edge,
         cache_root,
         destination,
-        |index| microscope_target(index, frame_id).map_err(|error| {
-            PreviewFailure::new("frame_out_of_range", error.to_string())
-        }),
+        |index| {
+            microscope_target(index, frame_id)
+                .map_err(|error| PreviewFailure::new("frame_out_of_range", error.to_string()))
+        },
     ))
 }
 
@@ -228,26 +265,38 @@ fn render_preview(
     max_edge: i32,
     cache_root: &str,
     destination: &mut [u8],
-    resolve: impl FnOnce(&framescope_cache::FrameIndex) -> Result<framescope_video::MicroscopeTarget, PreviewFailure>,
+    resolve: impl FnOnce(
+        &framescope_cache::FrameIndex,
+    ) -> Result<framescope_video::MicroscopeTarget, PreviewFailure>,
 ) -> Result<PreviewDetails, PreviewFailure> {
     if session_id <= 0 {
-        return Err(PreviewFailure::new("invalid_request", "Live preview requires a positive microscope session id."));
+        return Err(PreviewFailure::new(
+            "invalid_request",
+            "Live preview requires a positive microscope session id.",
+        ));
     }
     let max_edge = u32::try_from(max_edge)
         .ok()
         .filter(|value| (MIN_PREVIEW_EDGE..=MAX_PREVIEW_EDGE).contains(value))
-        .ok_or_else(|| PreviewFailure::new("invalid_request", "Live preview max edge is outside the supported range."))?;
+        .ok_or_else(|| {
+            PreviewFailure::new(
+                "invalid_request",
+                "Live preview max edge is outside the supported range.",
+            )
+        })?;
     let cache_root = validate_cache_root(cache_root)?;
 
     let rendered = microscope::with_extraction_context(session_id, |source_fd, index| {
         let target = resolve(index)?;
         let frame_id = target.frame_id();
         let state = session_state(session_id, &cache_root)?;
-        let mut state = state
-            .lock()
-            .map_err(|_| PreviewFailure::new("bridge_error", "Live preview cache state is poisoned."))?;
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
 
-        let (preview, source, decoded_frames) = if let Some(preview) = state.preview_cache.get(frame_id) {
+        let (preview, source, decoded_frames) = if let Some(preview) =
+            state.preview_cache.get(frame_id)
+        {
             (preview, "preview_ram", 0)
         } else {
             let navigated = navigate_to_frame_cached(
@@ -302,7 +351,9 @@ fn render_preview(
     _max_edge: i32,
     _cache_root: &str,
     _destination: &mut [u8],
-    _resolve: impl FnOnce(&framescope_cache::FrameIndex) -> Result<framescope_video::MicroscopeTarget, PreviewFailure>,
+    _resolve: impl FnOnce(
+        &framescope_cache::FrameIndex,
+    ) -> Result<framescope_video::MicroscopeTarget, PreviewFailure>,
 ) -> Result<PreviewDetails, PreviewFailure> {
     Err(PreviewFailure::new(
         "bridge_error",
@@ -359,7 +410,9 @@ fn session_state(
         let state = handle.state.clone();
         let configured_root = state
             .lock()
-            .map_err(|_| PreviewFailure::new("bridge_error", "Live preview cache state is poisoned."))?
+            .map_err(|_| {
+                PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+            })?
             .cache_root
             .clone();
         if configured_root != cache_root {
@@ -391,10 +444,7 @@ fn session_state(
     let state = Arc::new(Mutex::new(ScrubSessionState {
         cache_root: cache_root.to_path_buf(),
         source_cache,
-        preview_cache: ScrubPreviewCache::new(
-            PREVIEW_CACHE_BUDGET_BYTES,
-            PREVIEW_CACHE_MAX_FRAMES,
-        ),
+        preview_cache: ScrubPreviewCache::new(PREVIEW_CACHE_BUDGET_BYTES, PREVIEW_CACHE_MAX_FRAMES),
     }));
     registry.sessions.insert(
         session_id,
@@ -442,8 +492,12 @@ fn serialize_result(result: Result<PreviewDetails, PreviewFailure>) -> String {
             message: error.message,
         },
     };
-    serde_json::to_string(&response)
-        .unwrap_or_else(|_| error_json("bridge_error", "Failed to serialize native live preview response."))
+    serde_json::to_string(&response).unwrap_or_else(|_| {
+        error_json(
+            "bridge_error",
+            "Failed to serialize native live preview response.",
+        )
+    })
 }
 
 fn error_json(code: &str, message: &str) -> String {
@@ -461,9 +515,18 @@ mod tests {
 
     #[test]
     fn timestamp_policy_wire_values_are_stable() {
-        assert_eq!(parse_selection(0).unwrap(), MicroscopeTimestampSelection::AtOrBefore);
-        assert_eq!(parse_selection(1).unwrap(), MicroscopeTimestampSelection::AtOrAfter);
-        assert_eq!(parse_selection(2).unwrap(), MicroscopeTimestampSelection::Nearest);
+        assert_eq!(
+            parse_selection(0).unwrap(),
+            MicroscopeTimestampSelection::AtOrBefore
+        );
+        assert_eq!(
+            parse_selection(1).unwrap(),
+            MicroscopeTimestampSelection::AtOrAfter
+        );
+        assert_eq!(
+            parse_selection(2).unwrap(),
+            MicroscopeTimestampSelection::Nearest
+        );
         assert!(parse_selection(3).is_err());
     }
 
