@@ -28,6 +28,6 @@ pub use index::{
     KeyframeAnchor,
 };
 pub use storage_admin::{
-    FRAME_INDEX_NAMESPACE, PREVIEW_PROXY_NAMESPACE, FrameScopeStorageStats, StorageAdmin,
+    FRAME_INDEX_NAMESPACE, FrameScopeStorageStats, PREVIEW_PROXY_NAMESPACE, StorageAdmin,
     StorageAdminError, StorageCategoryStats, StorageClearReport, StorageClearScope,
 };
