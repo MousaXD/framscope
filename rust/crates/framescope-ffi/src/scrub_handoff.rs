@@ -286,7 +286,7 @@ fn render_preview(
         })?;
     let cache_root = validate_cache_root(cache_root)?;
 
-    let rendered = microscope::with_extraction_context(session_id, |source_fd, index| {
+    microscope::with_extraction_context(session_id, |source_fd, index| {
         let target = resolve(index)?;
         let frame_id = target.frame_id();
         let state = session_state(session_id, &cache_root)?;
@@ -340,9 +340,7 @@ fn render_preview(
             decoded_frames,
         })
     })
-    .map_err(|error| PreviewFailure::new(error.code(), error.message().to_owned()))?;
-
-    rendered
+    .map_err(|error| PreviewFailure::new(error.code(), error.message().to_owned()))?
 }
 
 #[cfg(not(unix))]
