@@ -23,6 +23,18 @@ interface NativeBridge {
         selection: TimestampSelectionPolicy,
     ): NativeMicroscope = unsupportedMicroscope()
 
+    fun exportCurrentMicroscopeFrame(
+        sessionId: Long,
+        outputFd: Int,
+        operationId: Long,
+        format: FrameExportFormat,
+        jpegQuality: Int,
+    ): NativeFrameExport = NativeFrameExport.Failure(
+        code = "not_supported",
+        message = "Current-frame export is not supported by this native bridge.",
+        engine = null,
+    )
+
     fun closeMicroscopeSession(sessionId: Long): Boolean = false
 
     private fun unsupportedMicroscope(): NativeMicroscope = NativeMicroscope.Failure(
@@ -61,6 +73,15 @@ object RustBridge : NativeBridge {
         sessionId: Long,
         timestampUs: Long,
         selection: Int,
+    ): String?
+
+    @JvmStatic
+    private external fun nativeExportCurrentMicroscopeFrameFd(
+        sessionId: Long,
+        outputFd: Int,
+        operationId: Long,
+        format: Int,
+        jpegQuality: Int,
     ): String?
 
     @JvmStatic
@@ -154,6 +175,38 @@ object RustBridge : NativeBridge {
         }
     }
 
+    override fun exportCurrentMicroscopeFrame(
+        sessionId: Long,
+        outputFd: Int,
+        operationId: Long,
+        format: FrameExportFormat,
+        jpegQuality: Int,
+    ): NativeFrameExport {
+        if (sessionId <= 0L || outputFd < 0 || operationId <= 0L) {
+            return NativeFrameExport.Failure(
+                code = "invalid_request",
+                message = "Frame export requires a positive session id, writable descriptor, and operation id.",
+                engine = null,
+            )
+        }
+        if (format == FrameExportFormat.Jpeg && jpegQuality !in 1..100) {
+            return NativeFrameExport.Failure(
+                code = "invalid_request",
+                message = "JPEG quality must be between 1 and 100.",
+                engine = null,
+            )
+        }
+        return frameExportCall {
+            nativeExportCurrentMicroscopeFrameFd(
+                sessionId,
+                outputFd,
+                operationId,
+                format.nativeValue,
+                jpegQuality,
+            )
+        }
+    }
+
     override fun closeMicroscopeSession(sessionId: Long): Boolean {
         if (sessionId <= 0L || loadFailure != null) return false
         return runCatching { nativeCloseMicroscopeSession(sessionId) }.getOrDefault(false)
@@ -214,6 +267,31 @@ object RustBridge : NativeBridge {
         )
     }
 
+    internal fun parseFrameExportResponse(raw: String): NativeFrameExport = try {
+        val json = JSONObject(raw)
+        val engine = json.optionalString("engine")
+        when (json.optString("status")) {
+            "ok" -> parseFrameExportSuccess(json, engine)
+            "error" -> NativeFrameExport.Failure(
+                code = json.optString("code", "rust_error"),
+                message = json.optString("message", "Rust frame export failed."),
+                engine = engine,
+            )
+
+            else -> NativeFrameExport.Failure(
+                code = "malformed_response",
+                message = "Rust returned an unrecognized frame export response.",
+                engine = engine,
+            )
+        }
+    } catch (error: Exception) {
+        NativeFrameExport.Failure(
+            code = "malformed_response",
+            message = "Could not decode Rust frame export response: ${error.message ?: error::class.java.simpleName}",
+            engine = null,
+        )
+    }
+
     private fun microscopeCall(call: () -> String?): NativeMicroscope {
         loadFailure?.let {
             return NativeMicroscope.Failure(
@@ -234,6 +312,28 @@ object RustBridge : NativeBridge {
             engine = null,
         )
         return parseMicroscopeResponse(raw)
+    }
+
+    private fun frameExportCall(call: () -> String?): NativeFrameExport {
+        loadFailure?.let {
+            return NativeFrameExport.Failure(
+                code = "native_library_unavailable",
+                message = "Rust engine could not be loaded: ${it.message ?: it::class.java.simpleName}",
+                engine = null,
+            )
+        }
+        val raw = runCatching(call).getOrElse {
+            return NativeFrameExport.Failure(
+                code = "jni_error",
+                message = "Rust frame export call failed: ${it.message ?: it::class.java.simpleName}",
+                engine = null,
+            )
+        } ?: return NativeFrameExport.Failure(
+            code = "jni_error",
+            message = "Rust engine returned a null frame export response.",
+            engine = null,
+        )
+        return parseFrameExportResponse(raw)
     }
 
     private fun parseSuccess(json: JSONObject, engine: String?): NativeInspection {
@@ -308,6 +408,42 @@ object RustBridge : NativeBridge {
             NativeMicroscope.Failure(
                 code = "malformed_microscope_state",
                 message = "Rust returned microscope state outside expected safety bounds.",
+                engine = engine,
+            )
+        }
+    }
+
+    private fun parseFrameExportSuccess(json: JSONObject, engine: String?): NativeFrameExport {
+        if (engine == null) {
+            return NativeFrameExport.Failure(
+                code = "malformed_response",
+                message = "Rust frame export success response did not identify the engine.",
+                engine = null,
+            )
+        }
+        val exportJson = json.getJSONObject("export")
+        val wireFormat = exportJson.getString("format")
+        val format = FrameExportFormat.fromWireName(wireFormat)
+            ?: return NativeFrameExport.Failure(
+                code = "malformed_export_state",
+                message = "Rust returned an unknown frame export format.",
+                engine = engine,
+            )
+        val export = FrameExportResult(
+            sessionId = exportJson.getLong("session_id"),
+            frameId = exportJson.getLong("frame_id"),
+            width = exportJson.getInt("width"),
+            height = exportJson.getInt("height"),
+            format = format,
+            mimeType = exportJson.getString("mime_type"),
+            byteLength = exportJson.getLong("byte_len"),
+        )
+        return if (export.isSane()) {
+            NativeFrameExport.Success(export = export, engine = engine)
+        } else {
+            NativeFrameExport.Failure(
+                code = "malformed_export_state",
+                message = "Rust returned frame export metadata outside expected safety bounds.",
                 engine = engine,
             )
         }
