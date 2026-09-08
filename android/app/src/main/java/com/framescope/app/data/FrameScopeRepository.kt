@@ -9,8 +9,12 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 interface FrameScopeRepository {
@@ -23,6 +27,11 @@ interface FrameScopeRepository {
 
     suspend fun openMicroscope(uri: String): Result<MicroscopeSessionSnapshot> =
         Result.failure(UnsupportedOperationException("Microscope sessions are not supported."))
+
+    suspend fun openMicroscope(
+        uri: String,
+        onIndexingProgress: (MicroscopeIndexingProgress) -> Unit,
+    ): Result<MicroscopeSessionSnapshot> = openMicroscope(uri)
 
     suspend fun stepMicroscope(delta: Int): Result<MicroscopeSessionSnapshot> =
         Result.failure(UnsupportedOperationException("Microscope navigation is not supported."))
@@ -69,6 +78,8 @@ class AndroidFrameScopeRepository(
     private val cacheRoot: String,
     private val nativeBridge: NativeBridge = RustBridge,
     private val frameBridge: NativeMicroscopeFrameBridge = MicroscopeFrameBridge,
+    private val indexingProgressSource: MicroscopeIndexingProgressSource =
+        RustMicroscopeIndexingProgressSource,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val microscopeController: MicroscopeSessionController =
         MicroscopeSessionController(nativeBridge, frameBridge),
@@ -144,7 +155,13 @@ class AndroidFrameScopeRepository(
         Result.failure(unreadableUri(error))
     }
 
-    override suspend fun openMicroscope(uri: String): Result<MicroscopeSessionSnapshot> = try {
+    override suspend fun openMicroscope(uri: String): Result<MicroscopeSessionSnapshot> =
+        openMicroscope(uri) {}
+
+    override suspend fun openMicroscope(
+        uri: String,
+        onIndexingProgress: (MicroscopeIndexingProgress) -> Unit,
+    ): Result<MicroscopeSessionSnapshot> = try {
         withContext(ioDispatcher) {
             currentCoroutineContext().ensureActive()
             val parsedUri = requireContentUri(uri)
@@ -154,11 +171,41 @@ class AndroidFrameScopeRepository(
                 val operationId = nextOperationId()
                 activeNativeOperationId.set(operationId)
                 val nativeResult = try {
-                    microscopeController.open(
-                        fd = pfd.fd,
-                        operationId = operationId,
-                        cacheRoot = cacheRoot,
-                    )
+                    coroutineScope {
+                        val progressJob = launch {
+                            var lastProgress: MicroscopeIndexingProgress? = null
+                            while (isActive) {
+                                val progressResult = indexingProgressSource.read(operationId)
+                                if (progressResult.isFailure) {
+                                    Log.w(
+                                        TAG,
+                                        "Indexing progress polling stopped: ${progressResult.exceptionOrNull()?.message}",
+                                    )
+                                    return@launch
+                                }
+                                progressResult.getOrNull()?.let { progress ->
+                                    if (progress != lastProgress) {
+                                        try {
+                                            onIndexingProgress(progress)
+                                        } catch (error: Exception) {
+                                            Log.w(TAG, "Indexing progress observer failed: ${error.message}")
+                                        }
+                                        lastProgress = progress
+                                    }
+                                }
+                                delay(INDEX_PROGRESS_POLL_MS)
+                            }
+                        }
+                        try {
+                            microscopeController.open(
+                                fd = pfd.fd,
+                                operationId = operationId,
+                                cacheRoot = cacheRoot,
+                            )
+                        } finally {
+                            progressJob.cancel()
+                        }
+                    }
                 } finally {
                     activeNativeOperationId.compareAndSet(operationId, NO_OPERATION)
                 }
@@ -646,6 +693,7 @@ class AndroidFrameScopeRepository(
     private companion object {
         const val TAG = "FrameScopeRepository"
         const val NO_OPERATION = 0L
+        const val INDEX_PROGRESS_POLL_MS = 125L
         const val FRAME_ID_WIDTH = 20
         const val MANIFEST_MIME_TYPE = "application/json"
         val CANCELLATION_CODES = setOf("cancelled", "cancellation", "cancelled_preflight")

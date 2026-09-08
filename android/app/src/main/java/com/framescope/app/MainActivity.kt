@@ -20,10 +20,9 @@ import com.framescope.app.data.SharedPreferencesRecentVideoStore
 import com.framescope.app.platform.LocalExportTree
 import com.framescope.app.platform.LocalVideoOpenDocument
 import com.framescope.app.platform.VideoUriPermissionManager
-import com.framescope.app.ui.BatchExportOverlay
 import com.framescope.app.ui.BatchExportViewModel
 import com.framescope.app.ui.BatchExportViewModelFactory
-import com.framescope.app.ui.CurrentFrameExportOverlay
+import com.framescope.app.ui.ExtractionWorkflow
 import com.framescope.app.ui.FrameExportViewModel
 import com.framescope.app.ui.FrameExportViewModelFactory
 import com.framescope.app.ui.FrameScopeScreen
@@ -247,15 +246,17 @@ class MainActivity : ComponentActivity() {
                     storageContent = {
                         StorageDestinationContent(cacheRoot = frameScopeCacheRoot)
                     },
-                    workspaceOverlay = {
-                        CurrentFrameExportOverlay(
+                    workspaceExtractionContent = {
+                        ExtractionWorkflow(
                             microscopeState = state.microscopeState,
-                            exportState = exportState,
-                            onRequestExport = { format ->
+                            selectedTimelineRange = state.timelineRange,
+                            currentFrameState = exportState,
+                            batchState = batchExportState,
+                            onRequestCurrentFrame = { format ->
                                 val ready = state.microscopeState as? MicroscopeUiState.Ready
-                                    ?: return@CurrentFrameExportOverlay
+                                    ?: return@ExtractionWorkflow
                                 val frameId = ready.session.currentFrame?.frameId
-                                    ?: return@CurrentFrameExportOverlay
+                                    ?: return@ExtractionWorkflow
                                 batchExportViewModel.cancelForMicroscopeChange()
                                 exportViewModel.beginCurrentFrameExport(
                                     sessionId = ready.session.sessionId,
@@ -264,17 +265,9 @@ class MainActivity : ComponentActivity() {
                                 )
                                 exportTreePicker.launch(null)
                             },
-                            onCancelExport = exportViewModel::cancelForMicroscopeChange,
-                            onDismissStatus = exportViewModel::dismissStatus,
-                        )
-
-                        BatchExportOverlay(
-                            microscopeState = state.microscopeState,
-                            selectedTimelineRange = state.timelineRange,
-                            exportState = batchExportState,
-                            onRequestExport = { request ->
+                            onRequestBatch = { request ->
                                 val ready = state.microscopeState as? MicroscopeUiState.Ready
-                                    ?: return@BatchExportOverlay
+                                    ?: return@ExtractionWorkflow
                                 exportViewModel.cancelForMicroscopeChange()
                                 batchExportViewModel.beginBatchExport(
                                     sessionId = ready.session.sessionId,
@@ -283,8 +276,10 @@ class MainActivity : ComponentActivity() {
                                 )
                                 batchExportTreePicker.launch(null)
                             },
-                            onCancelExport = batchExportViewModel::cancelForMicroscopeChange,
-                            onDismissStatus = batchExportViewModel::dismissStatus,
+                            onCancelCurrentFrame = exportViewModel::cancelForMicroscopeChange,
+                            onCancelBatch = batchExportViewModel::cancelForMicroscopeChange,
+                            onDismissCurrentFrameStatus = exportViewModel::dismissStatus,
+                            onDismissBatchStatus = batchExportViewModel::dismissStatus,
                         )
                     },
                 )

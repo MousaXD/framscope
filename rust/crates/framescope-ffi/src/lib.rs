@@ -2,13 +2,17 @@
 
 mod batch_export;
 mod frame_handoff;
+mod index_progress;
 mod microscope;
 pub mod presentation_handoff;
 mod storage_admin;
 mod unique_export;
 
 use framescope_core::{FrameScopeError, MediaKind, StreamInfo, VideoInfo};
-use framescope_video::{CancellationToken, ObservedFrameRateMode, OpenOptions, VideoDecoder};
+use framescope_video::{
+    CancellationToken, ObservedFrameRateMode, OpenOptions, VideoDecoder,
+    with_indexing_progress_observer,
+};
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, jint, jlong, jstring};
@@ -369,18 +373,35 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeOpenMicrosc
         Err(_) => return ptr::null_mut(),
     };
     let json = catch_unwind(AssertUnwindSafe(|| {
+        let _progress_operation = index_progress::begin(operation_id);
         let _lifecycle = match storage_session_lifecycle_lock() {
             Ok(guard) => guard,
             Err(()) => return microscope_lifecycle_error_json(),
         };
         ACTIVE_MICROSCOPE_SESSIONS.fetch_add(1, Ordering::AcqRel);
-        let json = microscope::open_response(fd, operation_id, &cache_root);
+        let json = with_indexing_progress_observer(
+            move |progress| index_progress::update(operation_id, progress),
+            || microscope::open_response(fd, operation_id, &cache_root),
+        );
         if !microscope_open_succeeded(&json) {
             ACTIVE_MICROSCOPE_SESSIONS.fetch_sub(1, Ordering::AcqRel);
         }
         json
     }))
     .unwrap_or_else(|_| microscope::panic_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RustMicroscopeIndexingProgressSource_nativeMicroscopeIndexingProgress(
+    mut env: JNIEnv,
+    _class: JClass,
+    operation_id: jlong,
+) -> jstring {
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        index_progress::response_json(operation_id)
+    }))
+    .unwrap_or_else(|_| r#"{"status":"idle"}"#.into());
     to_jstring(&mut env, &json)
 }
 

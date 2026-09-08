@@ -7,6 +7,7 @@ import com.framescope.app.data.FrameScopeRepository
 import com.framescope.app.data.InspectedVideo
 import com.framescope.app.data.InspectionProgress
 import com.framescope.app.data.MicroscopeFrame
+import com.framescope.app.data.MicroscopeIndexingProgress
 import com.framescope.app.data.MicroscopeOperationException
 import com.framescope.app.data.MicroscopeScrubPreview
 import com.framescope.app.data.MicroscopeScrubPreviewSource
@@ -91,6 +92,7 @@ data class FrameScopeUiState(
     val engineStatus: EngineStatus = EngineStatus.Checking,
     val videoState: VideoInspectionState = VideoInspectionState.Idle,
     val microscopeState: MicroscopeUiState = MicroscopeUiState.Idle,
+    val indexingProgress: IndexingProgressUi? = null,
     val timelineBounds: IndexedTimelineBounds? = null,
     val timelineRange: TimelineRangeSelection? = null,
     val scrubPreview: MicroscopeScrubPreview? = null,
@@ -140,6 +142,7 @@ class MainViewModel(
             it.copy(
                 videoState = VideoInspectionState.Picking,
                 microscopeState = MicroscopeUiState.Idle,
+                indexingProgress = null,
                 timelineBounds = null,
                 timelineRange = null,
                 scrubPreview = null,
@@ -160,6 +163,7 @@ class MainViewModel(
             it.copy(
                 videoState = VideoInspectionState.Opening,
                 microscopeState = MicroscopeUiState.Idle,
+                indexingProgress = null,
                 timelineBounds = null,
                 timelineRange = null,
                 scrubPreview = null,
@@ -186,6 +190,7 @@ class MainViewModel(
                             it.copy(
                                 engineStatus = EngineStatus.Ready(video.engine),
                                 videoState = VideoInspectionState.Ready(video),
+                                indexingProgress = null,
                             )
                         }
                         openMicroscope(uri, generation)
@@ -200,6 +205,7 @@ class MainViewModel(
                                     diagnostic = bridgeError?.diagnostic,
                                 ),
                                 microscopeState = MicroscopeUiState.Idle,
+                                indexingProgress = null,
                                 timelineBounds = null,
                                 timelineRange = null,
                                 scrubPreview = null,
@@ -299,6 +305,7 @@ class MainViewModel(
             it.copy(
                 videoState = VideoInspectionState.Cancelled,
                 microscopeState = MicroscopeUiState.Idle,
+                indexingProgress = null,
                 timelineBounds = null,
                 timelineRange = null,
                 scrubPreview = null,
@@ -317,6 +324,7 @@ class MainViewModel(
             it.copy(
                 videoState = VideoInspectionState.Cancelled,
                 microscopeState = MicroscopeUiState.Idle,
+                indexingProgress = null,
                 timelineBounds = null,
                 timelineRange = null,
                 scrubPreview = null,
@@ -348,6 +356,11 @@ class MainViewModel(
                     MicroscopeUiState.Idle
                 } else {
                     current.microscopeState
+                },
+                indexingProgress = if (current.microscopeState is MicroscopeUiState.Error) {
+                    null
+                } else {
+                    current.indexingProgress
                 },
                 timelineBounds = if (current.microscopeState is MicroscopeUiState.Error) {
                     null
@@ -383,6 +396,7 @@ class MainViewModel(
                     if (current.microscopeState == error) {
                         current.copy(
                             microscopeState = MicroscopeUiState.Idle,
+                            indexingProgress = null,
                             timelineBounds = null,
                             timelineRange = null,
                             scrubPreview = null,
@@ -402,6 +416,11 @@ class MainViewModel(
         inspectionGenerationAtStart: Long,
     ) {
         val microscopeRevision = microscopeGeneration.incrementAndGet()
+        val durationUs = (_uiState.value.videoState as? VideoInspectionState.Ready)
+            ?.video
+            ?.metadata
+            ?.durationUs
+        val progressEstimator = IndexingProgressEstimator(durationUs)
         invalidateLiveScrub(clearPreview = true)
         microscopeJob?.cancel()
         microscopeJob = viewModelScope.launch {
@@ -412,7 +431,23 @@ class MainViewModel(
                     microscopeRevision,
                     MicroscopeUiState.Opening,
                 )
-                repository.openMicroscope(uri)
+                repository.openMicroscope(
+                    uri = uri,
+                    onIndexingProgress = progress@{ nativeProgress: MicroscopeIndexingProgress ->
+                        if (!isCurrent(inspectionGenerationAtStart, microscopeRevision)) return@progress
+                        val presented = progressEstimator.update(nativeProgress)
+                        _uiState.update { current ->
+                            if (
+                                isCurrent(inspectionGenerationAtStart, microscopeRevision) &&
+                                current.microscopeState == MicroscopeUiState.Opening
+                            ) {
+                                current.copy(indexingProgress = presented)
+                            } else {
+                                current
+                            }
+                        }
+                    },
+                )
                     .onSuccess { openedSession ->
                         if (!isCurrent(inspectionGenerationAtStart, microscopeRevision)) return@onSuccess
                         if (openedSession.currentFrame == null) {
@@ -765,6 +800,7 @@ class MainViewModel(
                         code = nativeError?.code,
                         session = session,
                     ),
+                    indexingProgress = null,
                     scrubPreview = null,
                 )
             }
@@ -787,6 +823,11 @@ class MainViewModel(
             _uiState.update { current ->
                 current.copy(
                     microscopeState = state,
+                    indexingProgress = if (state == MicroscopeUiState.Opening) {
+                        current.indexingProgress
+                    } else {
+                        null
+                    },
                     scrubPreview = when (state) {
                         is MicroscopeUiState.Navigating -> current.scrubPreview
                         else -> null
@@ -802,7 +843,13 @@ class MainViewModel(
         state: MicroscopeUiState.Ready,
     ) {
         if (isCurrent(inspectionRevision, microscopeRevision)) {
-            _uiState.update { it.copy(microscopeState = state, scrubPreview = null) }
+            _uiState.update {
+                it.copy(
+                    microscopeState = state,
+                    indexingProgress = null,
+                    scrubPreview = null,
+                )
+            }
         }
     }
 

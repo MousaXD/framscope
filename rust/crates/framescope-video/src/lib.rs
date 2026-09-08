@@ -19,7 +19,8 @@ pub use framescope_core::{
     MediaTimestamp, Rational, StreamInfo, TimeBase, VideoInfo, VideoMetadata,
 };
 pub use indexing::{
-    FrameIndexDecoder, IndexingError, IndexingOptions, IndexingReport, build_or_resume_frame_index,
+    FrameIndexDecoder, IndexingError, IndexingOptions, IndexingProgress, IndexingProgressStage,
+    IndexingReport, build_or_resume_frame_index, with_indexing_progress_observer,
 };
 pub use microscope::{
     MicroscopeNavigationError, MicroscopeStep, MicroscopeTarget, MicroscopeTimestampSelection,
