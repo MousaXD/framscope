@@ -69,6 +69,16 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
 
+      - name: Install FFmpeg fixture and development tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            ffmpeg \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswscale-dev
+
       - name: Set up Rust host checks
         run: |
           rustup toolchain install "$RUST_HOST_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
@@ -80,6 +90,16 @@ jobs:
           cargo fmt --all --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
+
+      - name: Verify real media integration before signing
+        run: |
+          bash ./scripts/generate-video-fixtures.sh
+          python3 ./scripts/verify-video-fixtures.py
+          bytes="$(du -sb build/video-fixtures | cut -f1)"
+          test "$bytes" -le 1048576
+          cd rust
+          cargo clippy -p framescope-video --features system-ffmpeg --all-targets -- -D warnings
+          cargo test -p framescope-video --features system-ffmpeg
 
       - name: Set up Rust Android target
         run: |
@@ -101,8 +121,7 @@ jobs:
 
       - name: Build and test signed release
         working-directory: android
-        run: |
-          gradle --no-daemon testDebugUnitTest lintRelease assembleRelease
+        run: gradle --no-daemon testDebugUnitTest lintRelease assembleRelease
 
       - name: Verify signed release package
         run: |
