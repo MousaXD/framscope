@@ -16,6 +16,7 @@ class MicroscopeSessionController(
 ) {
     private val stateLock = Any()
     private val revision = AtomicLong(0L)
+    private val storageGate = MicroscopeStorageGate()
 
     private var snapshot: MicroscopeSessionSnapshot? = null
     private var engine: String? = null
@@ -24,44 +25,52 @@ class MicroscopeSessionController(
 
     fun currentEngine(): String? = synchronized(stateLock) { engine }
 
+    internal fun <T> runStorageAdminIfIdle(operation: () -> T): StorageGateResult<T> =
+        storageGate.runStorageIfIdle(operation)
+
     fun open(
         fd: Int,
         operationId: Long,
         cacheRoot: String,
     ): NativeMicroscope {
-        val requestRevision = nextRevision() ?: return revisionExhaustedFailure(currentEngine())
-        val result = nativeBridge.openMicroscopeSession(fd, operationId, cacheRoot)
-        val success = when (result) {
-            is NativeMicroscope.Failure -> {
-                return if (revision.get() == requestRevision) {
-                    result
+        storageGate.beginSessionTransition()
+        try {
+            val requestRevision = nextRevision() ?: return revisionExhaustedFailure(currentEngine())
+            val result = nativeBridge.openMicroscopeSession(fd, operationId, cacheRoot)
+            val success = when (result) {
+                is NativeMicroscope.Failure -> {
+                    return if (revision.get() == requestRevision) {
+                        result
+                    } else {
+                        staleFailure(result.engine)
+                    }
+                }
+                is NativeMicroscope.Success -> result
+            }
+
+            var previousSessionId: Long? = null
+            val committed = synchronized(stateLock) {
+                if (revision.get() != requestRevision) {
+                    false
                 } else {
-                    staleFailure(result.engine)
+                    previousSessionId = snapshot?.sessionId
+                    snapshot = success.session
+                    engine = success.engine
+                    true
                 }
             }
-            is NativeMicroscope.Success -> result
-        }
 
-        var previousSessionId: Long? = null
-        val committed = synchronized(stateLock) {
-            if (revision.get() != requestRevision) {
-                false
-            } else {
-                previousSessionId = snapshot?.sessionId
-                snapshot = success.session
-                engine = success.engine
-                true
+            if (!committed) {
+                nativeBridge.closeMicroscopeSession(success.session.sessionId)
+                return staleFailure(success.engine)
             }
+            previousSessionId
+                ?.takeIf { it != success.session.sessionId }
+                ?.let(nativeBridge::closeMicroscopeSession)
+            return success
+        } finally {
+            storageGate.endSessionTransition(currentSnapshot() != null)
         }
-
-        if (!committed) {
-            nativeBridge.closeMicroscopeSession(success.session.sessionId)
-            return staleFailure(success.engine)
-        }
-        previousSessionId
-            ?.takeIf { it != success.session.sessionId }
-            ?.let(nativeBridge::closeMicroscopeSession)
-        return success
     }
 
     fun step(delta: Int): NativeMicroscope = navigate { sessionId ->
@@ -196,14 +205,19 @@ class MicroscopeSessionController(
     }
 
     fun closeCurrent(): Boolean {
-        invalidateRevision()
-        val sessionId = synchronized(stateLock) {
-            val value = snapshot?.sessionId
-            snapshot = null
-            engine = null
-            value
-        } ?: return true
-        return nativeBridge.closeMicroscopeSession(sessionId)
+        storageGate.beginSessionTransition()
+        try {
+            invalidateRevision()
+            val sessionId = synchronized(stateLock) {
+                val value = snapshot?.sessionId
+                snapshot = null
+                engine = null
+                value
+            } ?: return true
+            return nativeBridge.closeMicroscopeSession(sessionId)
+        } finally {
+            storageGate.endSessionTransition(currentSnapshot() != null)
+        }
     }
 
     /**
@@ -215,17 +229,22 @@ class MicroscopeSessionController(
      * invalidate or close that replacement.
      */
     fun closeIfCurrent(sessionId: Long): Boolean {
-        if (sessionId <= 0L) return false
-        val detached = synchronized(stateLock) {
-            if (snapshot?.sessionId != sessionId) {
-                false
-            } else {
-                snapshot = null
-                engine = null
-                true
+        storageGate.beginSessionTransition()
+        try {
+            if (sessionId <= 0L) return false
+            val detached = synchronized(stateLock) {
+                if (snapshot?.sessionId != sessionId) {
+                    false
+                } else {
+                    snapshot = null
+                    engine = null
+                    true
+                }
             }
+            return if (detached) nativeBridge.closeMicroscopeSession(sessionId) else true
+        } finally {
+            storageGate.endSessionTransition(currentSnapshot() != null)
         }
-        return if (detached) nativeBridge.closeMicroscopeSession(sessionId) else true
     }
 
     private fun navigate(call: (Long) -> NativeMicroscope): NativeMicroscope {

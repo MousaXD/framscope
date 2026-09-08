@@ -9,6 +9,7 @@ mod frame_cache;
 mod hierarchy;
 mod identity;
 mod index;
+mod storage_admin;
 
 pub use disk_cache::{
     DiskCacheError, DiskCacheStats, DiskInsertResult, DiskProxyCache, ProxyFormat, ProxyFrame,
@@ -25,4 +26,8 @@ pub use index::{
     FRAME_INDEX_SCHEMA_VERSION, FrameId, FrameIndex, FrameIndexEntry, FrameIndexError,
     FrameIndexLifecycle, FrameIndexOpenDisposition, FrameIndexStatus, FrameIndexStreamIdentity,
     KeyframeAnchor,
+};
+pub use storage_admin::{
+    FRAME_INDEX_NAMESPACE, FrameScopeStorageStats, PREVIEW_PROXY_NAMESPACE, StorageAdmin,
+    StorageAdminError, StorageCategoryStats, StorageClearReport, StorageClearScope,
 };

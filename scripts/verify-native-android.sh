@@ -33,5 +33,8 @@ nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeVersion'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeInspectVideoFd'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeCancelInspection'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustUniqueExportBridge_nativeExportMicroscopeUniqueGroupsFd'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_FrameScopeStorageBridge_nativeClearStorage'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_FrameScopeStorageBridge_nativeClearSourceIndexes'
 
 printf 'Verified hardened Android arm64 Rust JNI library: %s\n' "$LIB"
