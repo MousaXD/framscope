@@ -10,8 +10,10 @@ enum class RamAccelerationMode {
 
 data class RamAccelerationDeviceProfile(
     val totalRamBytes: Long,
+    val availableRamBytes: Long,
     val memoryClassMb: Int,
     val lowRamDevice: Boolean,
+    val systemLowMemory: Boolean,
 )
 
 data class RamAccelerationBudget(
@@ -31,29 +33,36 @@ object RamAccelerationPolicy {
     const val MAX_CUSTOM_MIB: Int = 512
 
     private const val LOW_RAM_TOTAL_MIB = 32L
-    private const val DEFAULT_MIN_TOTAL_MIB = 48L
-    private const val DEFAULT_MAX_TOTAL_MIB = 256L
+    private const val AUTOMATIC_MIN_TOTAL_MIB = 16L
+    private const val AUTOMATIC_MAX_TOTAL_MIB = 256L
     private const val SOURCE_SHARE_PERCENT = 75L
     private const val PRESSURE_NUMERATOR = 1L
     private const val PRESSURE_DENOMINATOR = 2L
 
     /**
-     * Conservative recommendation derived from both physical RAM and Android's per-process memory
-     * class. The smaller limit wins so devices with generous physical RAM but a tight app heap do
-     * not receive an unsafe recommendation.
+     * Conservative recommendation derived from physical RAM, Android's per-process memory class,
+     * and currently available system memory. The smallest limit wins so generous physical RAM can
+     * never hide a tight app heap or low current headroom.
      */
     fun recommendedTotalBytes(profile: RamAccelerationDeviceProfile): Long {
         if (profile.totalRamBytes <= 0L || profile.memoryClassMb <= 0) {
-            return DEFAULT_MIN_TOTAL_MIB * MIB
-        }
-        if (profile.lowRamDevice) {
-            return LOW_RAM_TOTAL_MIB * MIB
+            return AUTOMATIC_MIN_TOTAL_MIB * MIB
         }
 
         val physicalBudget = profile.totalRamBytes / 12L
         val heapBudget = profile.memoryClassMb.toLong() * MIB / 3L
-        val bounded = min(physicalBudget, heapBudget)
-        return bounded.coerceIn(DEFAULT_MIN_TOTAL_MIB * MIB, DEFAULT_MAX_TOTAL_MIB * MIB)
+        val headroomBudget = if (profile.availableRamBytes > 0L) {
+            profile.availableRamBytes / 8L
+        } else {
+            Long.MAX_VALUE
+        }
+        val deviceCeiling = if (profile.lowRamDevice) {
+            LOW_RAM_TOTAL_MIB * MIB
+        } else {
+            AUTOMATIC_MAX_TOTAL_MIB * MIB
+        }
+        val bounded = min(min(physicalBudget, heapBudget), min(headroomBudget, deviceCeiling))
+        return bounded.coerceAtLeast(AUTOMATIC_MIN_TOTAL_MIB * MIB)
     }
 
     fun resolve(
@@ -70,7 +79,8 @@ object RamAccelerationPolicy {
                 .coerceIn(MIN_CUSTOM_MIB, MAX_CUSTOM_MIB)
                 .toLong() * MIB
         }
-        val pressureAdjusted = if (underMemoryPressure && requested > 0L) {
+        val pressureActive = underMemoryPressure || profile.systemLowMemory
+        val pressureAdjusted = if (pressureActive && requested > 0L) {
             requested * PRESSURE_NUMERATOR / PRESSURE_DENOMINATOR
         } else {
             requested
@@ -82,7 +92,7 @@ object RamAccelerationPolicy {
             sourceCacheBytes = source,
             previewCacheBytes = preview,
             recommendedTotalBytes = recommended,
-            pressureReduced = underMemoryPressure && requested > 0L,
+            pressureReduced = pressureActive && requested > 0L,
         )
     }
 }
