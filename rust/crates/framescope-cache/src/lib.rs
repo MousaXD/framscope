@@ -23,9 +23,9 @@ pub use identity::{
     CacheDirectoryLayout, CacheStore, NoopCacheStore, SourceIdentity, SourceVideoIdentity,
 };
 pub use index::{
-    FRAME_INDEX_SCHEMA_VERSION, FrameId, FrameIndex, FrameIndexEntry, FrameIndexError,
-    FrameIndexLifecycle, FrameIndexOpenDisposition, FrameIndexStatus, FrameIndexStreamIdentity,
-    KeyframeAnchor,
+    FRAME_INDEX_SCHEMA_VERSION, FRAME_TIMELINE_CONTRACT_GENERATION, FrameId, FrameIndex,
+    FrameIndexEntry, FrameIndexError, FrameIndexLifecycle, FrameIndexOpenDisposition,
+    FrameIndexStatus, FrameIndexStreamIdentity, KeyframeAnchor, TimestampSeekSafety,
 };
 pub use storage_admin::{
     FRAME_INDEX_NAMESPACE, FrameScopeStorageStats, PREVIEW_PROXY_NAMESPACE, StorageAdmin,
