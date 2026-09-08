@@ -362,11 +362,12 @@ impl<W: Write> ExtractionManifestWriter<W> {
         self.finish(ManifestTerminalStatus::Complete, None, None)
     }
 
-    pub fn finish_cancelled(
-        &mut self,
-        message: Option<&str>,
-    ) -> Result<(), ManifestError> {
-        self.finish(ManifestTerminalStatus::Cancelled, Some("cancelled"), message)
+    pub fn finish_cancelled(&mut self, message: Option<&str>) -> Result<(), ManifestError> {
+        self.finish(
+            ManifestTerminalStatus::Cancelled,
+            Some("cancelled"),
+            message,
+        )
     }
 
     pub fn finish_failed(
