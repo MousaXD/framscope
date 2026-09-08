@@ -79,12 +79,7 @@ impl SourceIdentity {
         modified_time_ms: Option<u64>,
         provider_document_id: Option<String>,
     ) -> io::Result<Self> {
-        Self::from_seekable_cancellable(
-            reader,
-            modified_time_ms,
-            provider_document_id,
-            || Ok(()),
-        )
+        Self::from_seekable_cancellable(reader, modified_time_ms, provider_document_id, || Ok(()))
     }
 
     /// Whole-source identity hashing with a cooperative cancellation/check hook.
@@ -284,11 +279,7 @@ mod tests {
 
     #[test]
     fn legacy_sparse_sample_identity_is_not_reuse_safe() {
-        let id = SourceIdentity::new(
-            1234,
-            None,
-            Some("blake3-sample-v1:0123456789abcdef".into()),
-        );
+        let id = SourceIdentity::new(1234, None, Some("blake3-sample-v1:0123456789abcdef".into()));
         assert!(!id.is_reuse_safe());
     }
 
@@ -305,15 +296,15 @@ mod tests {
         cursor_a.seek(SeekFrom::Start(123)).unwrap();
         let id_a =
             SourceIdentity::from_seekable(&mut cursor_a, Some(7), Some("doc:7".into())).unwrap();
-        let id_b = SourceIdentity::from_seekable(&mut Cursor::new(b), Some(7), Some("doc:7".into()))
-            .unwrap();
+        let id_b =
+            SourceIdentity::from_seekable(&mut Cursor::new(b), Some(7), Some("doc:7".into()))
+                .unwrap();
 
         assert_eq!(cursor_a.stream_position().unwrap(), 123);
         assert_eq!(id_a.size_bytes, Some(400_000));
         assert!(id_a.is_reuse_safe());
         assert!(
-            id_a
-                .content_tag
+            id_a.content_tag
                 .as_deref()
                 .unwrap()
                 .starts_with(FULL_HASH_TAG_PREFIX)
@@ -337,19 +328,14 @@ mod tests {
         let mut cursor = Cursor::new(vec![0x5a_u8; FULL_HASH_BUFFER_BYTES * 4]);
         cursor.seek(SeekFrom::Start(77)).unwrap();
         let mut checks = 0_u32;
-        let error = SourceIdentity::from_seekable_cancellable(
-            &mut cursor,
-            None,
-            None,
-            || {
-                checks += 1;
-                if checks >= 3 {
-                    Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-                } else {
-                    Ok(())
-                }
-            },
-        )
+        let error = SourceIdentity::from_seekable_cancellable(&mut cursor, None, None, || {
+            checks += 1;
+            if checks >= 3 {
+                Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+            } else {
+                Ok(())
+            }
+        })
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(cursor.stream_position().unwrap(), 77);
