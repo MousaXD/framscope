@@ -29,6 +29,50 @@ internal object MicroscopeTimelineMath {
             .coerceIn(0L, lastFrameId)
     }
 
+    /** Map an indexed presentation timestamp onto a normalized visual timeline. */
+    fun fractionForTimestamp(
+        timestampUs: Long,
+        startUs: Long,
+        endUs: Long,
+    ): Float? {
+        if (endUs < startUs) return null
+        if (startUs == endUs) return 0f
+        val start = startUs.toDouble()
+        val span = endUs.toDouble() - start
+        if (!span.isFinite() || span <= 0.0) return null
+        return ((timestampUs.coerceIn(startUs, endUs).toDouble() - start) / span)
+            .toFloat()
+            .coerceIn(0f, 1f)
+    }
+
+    /**
+     * Map a transient slider fraction to presentation time without using nominal FPS.
+     *
+     * The returned timestamp is only a seek request. Rust still resolves the final authoritative
+     * frame through the persistent timestamp index, so VFR correctness does not depend on this
+     * interpolation landing on an existing frame timestamp.
+     */
+    fun timestampForFraction(
+        fraction: Float,
+        startUs: Long,
+        endUs: Long,
+    ): Long? {
+        if (fraction.isNaN() || endUs < startUs) return null
+        if (startUs == endUs) return startUs
+        val boundedFraction = fraction.coerceIn(0f, 1f).toDouble()
+        val start = startUs.toDouble()
+        val span = endUs.toDouble() - start
+        if (!span.isFinite() || span <= 0.0) return null
+        val value = start + (span * boundedFraction)
+        if (!value.isFinite()) return null
+        return value.roundToLong().coerceIn(startUs, endUs)
+    }
+
+    fun durationUs(startUs: Long, endUs: Long): Long? {
+        if (endUs < startUs) return null
+        return runCatching { Math.subtractExact(endUs, startUs) }.getOrNull()
+    }
+
     fun boundedStepTarget(
         currentFrameId: Long,
         frameCount: Long,

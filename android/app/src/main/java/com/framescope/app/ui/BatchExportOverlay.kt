@@ -15,6 +15,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,6 +42,7 @@ import com.framescope.app.data.BatchExportSelection
 import com.framescope.app.data.FrameExportFormat
 
 private enum class BatchSelectionMode {
+    SelectedTimeline,
     CurrentFrame,
     FrameRange,
     TimestampRange,
@@ -51,12 +53,16 @@ private enum class BatchSelectionMode {
 @Composable
 fun BatchExportOverlay(
     microscopeState: MicroscopeUiState,
+    selectedTimelineRange: TimelineRangeSelection?,
     exportState: BatchExportUiState,
     onRequestExport: (BatchExportRequest) -> Unit,
     onCancelExport: () -> Unit,
     onDismissStatus: () -> Unit,
 ) {
     val ready = microscopeState as? MicroscopeUiState.Ready ?: return
+    val selectedRange = selectedTimelineRange?.takeIf {
+        it.sessionId == ready.session.sessionId && it.endUs >= it.startUs
+    }
     var showDialog by remember(ready.session.sessionId) { mutableStateOf(false) }
 
     Box(
@@ -69,7 +75,7 @@ fun BatchExportOverlay(
             BatchExportUiState.Idle -> ExtendedFloatingActionButton(
                 onClick = { showDialog = true },
             ) {
-                Text("Export frames")
+                Text(if (selectedRange == null) "Export frames" else "Extract selected frames")
             }
 
             is BatchExportUiState.AwaitingDestination -> BatchExportStatusCard(
@@ -83,9 +89,9 @@ fun BatchExportOverlay(
                 val unique = exportState.pending.request.selection == BatchExportSelection.UniqueGroups
                 BatchExportStatusCard(
                     title = if (progress == null) {
-                        "Preparing batch export"
+                        "Preparing frame extraction"
                     } else {
-                        "Exporting ${progress.ordinal} / ${progress.total}"
+                        "Extracting ${progress.ordinal} / ${progress.total} frames"
                     },
                     detail = if (progress == null) {
                         if (unique) {
@@ -94,7 +100,12 @@ fun BatchExportOverlay(
                             "Opening the indexed source-quality extraction pipeline…"
                         }
                     } else {
-                        "Frame ${progress.frameId} · ${formatLabel(exportState.pending.request.format)}"
+                        val percent = ((progress.ordinal.toDouble() / progress.total.toDouble()) * 100.0)
+                            .coerceIn(0.0, 100.0)
+                        "%.0f%% · Frame ${progress.frameId} · %s".format(
+                            percent,
+                            formatLabel(exportState.pending.request.format),
+                        )
                     },
                     busy = true,
                     progress = progress,
@@ -103,7 +114,7 @@ fun BatchExportOverlay(
             }
 
             is BatchExportUiState.Success -> BatchExportStatusCard(
-                title = "Batch export complete",
+                title = "Frame extraction complete",
                 detail = buildString {
                     append("${exportState.document.export.committedFrames} frames")
                     append(" · ${formatBytes(exportState.document.export.encodedBytes)}")
@@ -113,7 +124,7 @@ fun BatchExportOverlay(
             )
 
             is BatchExportUiState.Error -> BatchExportStatusCard(
-                title = "Batch export failed",
+                title = "Frame extraction failed",
                 detail = buildString {
                     append(exportState.message)
                     exportState.code?.let { append(" ($it)") }
@@ -127,6 +138,7 @@ fun BatchExportOverlay(
         BatchExportDialog(
             currentFrameId = ready.session.currentFrame?.frameId,
             frameCount = ready.session.frameCount,
+            selectedTimelineRange = selectedRange,
             onDismiss = { showDialog = false },
             onConfirm = { request ->
                 showDialog = false
@@ -140,10 +152,19 @@ fun BatchExportOverlay(
 private fun BatchExportDialog(
     currentFrameId: Long?,
     frameCount: Long,
+    selectedTimelineRange: TimelineRangeSelection?,
     onDismiss: () -> Unit,
     onConfirm: (BatchExportRequest) -> Unit,
 ) {
-    var mode by remember { mutableStateOf(BatchSelectionMode.AllFrames) }
+    var mode by remember(selectedTimelineRange) {
+        mutableStateOf(
+            if (selectedTimelineRange == null) {
+                BatchSelectionMode.AllFrames
+            } else {
+                BatchSelectionMode.SelectedTimeline
+            },
+        )
+    }
     var startFrame by remember { mutableStateOf(currentFrameId?.toString() ?: "0") }
     var endFrame by remember {
         mutableStateOf(
@@ -160,6 +181,7 @@ private fun BatchExportDialog(
 
     val request = buildRequest(
         mode = mode,
+        selectedTimelineRange = selectedTimelineRange,
         currentFrameId = currentFrameId,
         startFrame = startFrame,
         endFrame = endFrame,
@@ -171,42 +193,85 @@ private fun BatchExportDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Export frames") },
+        title = { Text("Extract frames") },
         text = {
             Column(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    "Choose an indexed selection. Frame ranges use exact FrameIds and time ranges use indexed presentation timestamps.",
+                    "Selections resolve against the complete persistent frame index. Timestamp ranges are inclusive and use presentation timestamps, never nominal FPS.",
                     style = MaterialTheme.typography.bodySmall,
                 )
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ModeButton("Current", mode == BatchSelectionMode.CurrentFrame) {
-                        mode = BatchSelectionMode.CurrentFrame
+                if (selectedTimelineRange != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ModeButton("Selected", mode == BatchSelectionMode.SelectedTimeline) {
+                            mode = BatchSelectionMode.SelectedTimeline
+                        }
+                        ModeButton("Current", mode == BatchSelectionMode.CurrentFrame) {
+                            mode = BatchSelectionMode.CurrentFrame
+                        }
                     }
-                    ModeButton("Range", mode == BatchSelectionMode.FrameRange) {
-                        mode = BatchSelectionMode.FrameRange
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ModeButton("Current", mode == BatchSelectionMode.CurrentFrame) {
+                            mode = BatchSelectionMode.CurrentFrame
+                        }
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModeButton("Frames", mode == BatchSelectionMode.FrameRange) {
+                        mode = BatchSelectionMode.FrameRange
+                    }
                     ModeButton("Time µs", mode == BatchSelectionMode.TimestampRange) {
                         mode = BatchSelectionMode.TimestampRange
                     }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ModeButton("All", mode == BatchSelectionMode.AllFrames) {
                         mode = BatchSelectionMode.AllFrames
                     }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ModeButton("Unique groups", mode == BatchSelectionMode.UniqueGroups) {
                         mode = BatchSelectionMode.UniqueGroups
                     }
                 }
 
                 when (mode) {
+                    BatchSelectionMode.SelectedTimeline -> {
+                        val selection = selectedTimelineRange
+                        if (selection == null) {
+                            Text("No committed timeline range is available.")
+                        } else {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    "Start: ${MicroscopePreviewMath.formatTimestampUs(selection.startUs)}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                Text(
+                                    "End: ${MicroscopePreviewMath.formatTimestampUs(selection.endUs)}",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                                MicroscopeTimelineMath.durationUs(
+                                    selection.startUs,
+                                    selection.endUs,
+                                )?.let { durationUs ->
+                                    Text(
+                                        "Duration: ${MicroscopePreviewMath.formatTimestampUs(durationUs)}",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                }
+                                Text(
+                                    "Boundary rule: start ≤ indexed frame timestamp ≤ end.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+
                     BatchSelectionMode.CurrentFrame -> Text(
-                        text = currentFrameId?.let { "Frame $it" } ?: "No current frame",
+                        text = currentFrameId?.let { "Frame ${it + 1}" } ?: "No current frame",
                         style = MaterialTheme.typography.bodyMedium,
                     )
 
@@ -216,13 +281,13 @@ private fun BatchExportDialog(
                         NumberField(
                             value = startFrame,
                             onValueChange = { startFrame = it },
-                            label = "Start frame",
+                            label = "Start FrameId",
                             modifier = Modifier.weight(1f),
                         )
                         NumberField(
                             value = endFrame,
                             onValueChange = { endFrame = it },
-                            label = "End frame",
+                            label = "End FrameId",
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -259,7 +324,7 @@ private fun BatchExportDialog(
                     NumberField(
                         value = everyN,
                         onValueChange = { everyN = it },
-                        label = "Every N frames",
+                        label = "Every N frames (1 = every frame)",
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -373,6 +438,7 @@ private fun SignedNumberField(
 
 private fun buildRequest(
     mode: BatchSelectionMode,
+    selectedTimelineRange: TimelineRangeSelection?,
     currentFrameId: Long?,
     startFrame: String,
     endFrame: String,
@@ -387,6 +453,11 @@ private fun buildRequest(
         everyN.toLongOrNull()?.takeIf { it > 0L } ?: return null
     }
     val selection = when (mode) {
+        BatchSelectionMode.SelectedTimeline -> {
+            val range = selectedTimelineRange ?: return null
+            BatchExportSelection.TimestampRangeUsInclusive(range.startUs, range.endUs)
+        }
+
         BatchSelectionMode.CurrentFrame -> BatchExportSelection.CurrentFrame(
             currentFrameId ?: return null,
         )
@@ -443,7 +514,7 @@ private fun BatchExportStatusCard(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (busy) {
+                if (busy && progress == null) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(20.dp),
                         strokeWidth = 2.dp,
@@ -455,6 +526,12 @@ private fun BatchExportStatusCard(
                     fontWeight = FontWeight.SemiBold,
                 )
             }
+            progress?.takeIf(BatchExportProgress::isSane)?.let { value ->
+                LinearProgressIndicator(
+                    progress = { value.ordinal.toFloat() / value.total.toFloat() },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             Text(
                 text = detail,
                 style = MaterialTheme.typography.bodySmall,
@@ -462,7 +539,7 @@ private fun BatchExportStatusCard(
             )
             onCancel?.let { cancel ->
                 TextButton(onClick = cancel) {
-                    Text("Cancel export")
+                    Text("Cancel extraction")
                 }
             }
             onDismiss?.let { dismiss ->
@@ -479,7 +556,7 @@ private fun selectionLabel(selection: BatchExportSelection): String = when (sele
     is BatchExportSelection.FrameRangeInclusive ->
         "Frames ${selection.startFrameId}–${selection.endFrameId}"
     is BatchExportSelection.TimestampRangeUsInclusive ->
-        "${selection.startUs}–${selection.endUs} µs"
+        "${MicroscopePreviewMath.formatTimestampUs(selection.startUs)}–${MicroscopePreviewMath.formatTimestampUs(selection.endUs)} · inclusive indexed PTS"
     BatchExportSelection.AllFrames -> "All indexed frames"
     BatchExportSelection.UniqueGroups -> "Unique similarity-group representatives"
 }

@@ -6,8 +6,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -16,53 +18,91 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.framescope.app.data.MicroscopeSessionSnapshot
+
+internal const val TIMELINE_SLIDER_TAG = "microscope_timeline_slider"
+internal const val TIMELINE_RANGE_SLIDER_TAG = "microscope_timeline_range_slider"
 
 @Composable
 internal fun MicroscopeTimelineControls(
     session: MicroscopeSessionSnapshot,
+    timelineBounds: IndexedTimelineBounds?,
+    rangeSelection: TimelineRangeSelection?,
     enabled: Boolean,
     onJumpFrame: (Long) -> Unit,
+    onJumpTimestampUs: (Long) -> Unit,
+    onCommitRange: (Long, Long) -> Unit,
+    onClearRange: () -> Unit,
 ) {
     val currentFrame = session.currentFrame ?: return
+    val bounds = timelineBounds?.takeIf {
+        it.sessionId == session.sessionId && it.isSane()
+    }
+    val committedRange = rangeSelection?.takeIf { selection ->
+        bounds?.let(selection::isSaneFor) == true
+    }
+
+    val authoritativeFraction = bounds?.let { indexedBounds ->
+        currentFrame.timestampUs?.let { timestamp ->
+            MicroscopeTimelineMath.fractionForTimestamp(
+                timestampUs = timestamp,
+                startUs = indexedBounds.startUs,
+                endUs = indexedBounds.endUs,
+            )
+        }
+    } ?: MicroscopeTimelineMath.fractionForFrame(
+        frameId = currentFrame.frameId,
+        frameCount = session.frameCount,
+    )
+
     var scrubFraction by rememberSaveable(session.sessionId) {
-        mutableStateOf(
-            MicroscopeTimelineMath.fractionForFrame(
-                frameId = currentFrame.frameId,
-                frameCount = session.frameCount,
-            ),
-        )
+        mutableStateOf(authoritativeFraction)
     }
     // A drag gesture cannot survive disposal/recreation. Persisting this flag could suppress
-    // authoritative frame synchronization after recreation even though no gesture is active.
+    // authoritative synchronization even though no gesture is active anymore.
     var scrubbing by remember(session.sessionId) { mutableStateOf(false) }
 
-    LaunchedEffect(currentFrame.frameId, session.frameCount, scrubbing) {
+    LaunchedEffect(authoritativeFraction, scrubbing) {
         if (!scrubbing) {
-            scrubFraction = MicroscopeTimelineMath.fractionForFrame(
-                frameId = currentFrame.frameId,
-                frameCount = session.frameCount,
-            )
+            scrubFraction = authoritativeFraction
         }
     }
 
-    val previewFrameId = MicroscopeTimelineMath.frameForFraction(
-        fraction = scrubFraction,
-        frameCount = session.frameCount,
-    ) ?: currentFrame.frameId
-    val previewLabel = MicroscopeTimelineMath.framePositionLabel(
-        frameId = previewFrameId,
-        frameCount = session.frameCount,
-    ) ?: "Indexed frame unavailable"
+    val previewFrameId = if (bounds == null) {
+        MicroscopeTimelineMath.frameForFraction(
+            fraction = scrubFraction,
+            frameCount = session.frameCount,
+        )
+    } else {
+        null
+    }
+    val previewTimestampUs = bounds?.let { indexedBounds ->
+        MicroscopeTimelineMath.timestampForFraction(
+            fraction = scrubFraction,
+            startUs = indexedBounds.startUs,
+            endUs = indexedBounds.endUs,
+        )
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            text = "Presentation-order scrub",
+            text = if (bounds == null) {
+                "Presentation-order scrub"
+            } else {
+                "Indexed presentation timeline"
+            },
             style = MaterialTheme.typography.titleSmall,
         )
         Text(
-            text = previewLabel,
+            text = previewTimestampUs?.let { timestamp ->
+                "Seek preview ${MicroscopePreviewMath.formatTimestampUs(timestamp)}"
+            } ?: previewFrameId?.let { frameId ->
+                MicroscopeTimelineMath.framePositionLabel(frameId, session.frameCount)
+            } ?: "Indexed position unavailable",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -73,24 +113,82 @@ internal fun MicroscopeTimelineControls(
                 scrubFraction = fraction.coerceIn(0f, 1f)
             },
             onValueChangeFinished = {
-                val target = MicroscopeTimelineMath.frameForFraction(
-                    fraction = scrubFraction,
-                    frameCount = session.frameCount,
-                )
+                val indexedBounds = bounds
+                val targetTimestampUs = indexedBounds?.let {
+                    MicroscopeTimelineMath.timestampForFraction(
+                        fraction = scrubFraction,
+                        startUs = it.startUs,
+                        endUs = it.endUs,
+                    )
+                }
+                val targetFrameId = if (indexedBounds == null) {
+                    MicroscopeTimelineMath.frameForFraction(
+                        fraction = scrubFraction,
+                        frameCount = session.frameCount,
+                    )
+                } else {
+                    null
+                }
                 scrubbing = false
-                if (target != null && target != currentFrame.frameId) {
-                    onJumpFrame(target)
+                when {
+                    targetTimestampUs != null && targetTimestampUs != currentFrame.timestampUs -> {
+                        onJumpTimestampUs(targetTimestampUs)
+                    }
+                    targetFrameId != null && targetFrameId != currentFrame.frameId -> {
+                        onJumpFrame(targetFrameId)
+                    }
                 }
             },
             enabled = enabled && session.frameCount > 1L,
             valueRange = 0f..1f,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(TIMELINE_SLIDER_TAG)
+                .semantics { contentDescription = "Video timeline scrubber" },
         )
-        Text(
-            text = "Dragging is local. Releasing performs one indexed frame jump; FPS is never used to infer position.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+
+        if (bounds != null) {
+            val durationUs = MicroscopeTimelineMath.durationUs(bounds.startUs, bounds.endUs)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = MicroscopePreviewMath.formatTimestampUs(bounds.startUs),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Text(
+                    text = durationUs?.let {
+                        "Duration ${MicroscopePreviewMath.formatTimestampUs(it)}"
+                    } ?: "Duration unavailable",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = MicroscopePreviewMath.formatTimestampUs(bounds.endUs),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+            Text(
+                text = "Dragging updates only local UI state. Releasing requests one indexed timestamp seek; Rust resolves the final authoritative VFR-safe frame.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TimelineRangeControls(
+                sessionId = session.sessionId,
+                bounds = bounds,
+                committedRange = committedRange,
+                enabled = enabled,
+                onCommitRange = onCommitRange,
+                onClearRange = onClearRange,
+            )
+        } else {
+            Text(
+                text = "Indexed timestamps are unavailable for the timeline endpoints, so dragging stays presentation-order based and release performs one exact FrameId jump.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         Text(
             text = "Rapid indexed stepping",
@@ -133,6 +231,130 @@ internal fun MicroscopeTimelineControls(
                 modifier = Modifier.weight(1f),
             )
         }
+    }
+}
+
+@Composable
+private fun TimelineRangeControls(
+    sessionId: Long,
+    bounds: IndexedTimelineBounds,
+    committedRange: TimelineRangeSelection?,
+    enabled: Boolean,
+    onCommitRange: (Long, Long) -> Unit,
+    onClearRange: () -> Unit,
+) {
+    val committedStartFraction = committedRange?.let {
+        MicroscopeTimelineMath.fractionForTimestamp(it.startUs, bounds.startUs, bounds.endUs)
+    } ?: 0f
+    val committedEndFraction = committedRange?.let {
+        MicroscopeTimelineMath.fractionForTimestamp(it.endUs, bounds.startUs, bounds.endUs)
+    } ?: 1f
+
+    var rangeVisible by rememberSaveable(sessionId) { mutableStateOf(committedRange != null) }
+    var startFraction by rememberSaveable(sessionId) { mutableStateOf(committedStartFraction) }
+    var endFraction by rememberSaveable(sessionId) { mutableStateOf(committedEndFraction) }
+    var draggingRange by remember(sessionId) { mutableStateOf(false) }
+
+    LaunchedEffect(committedStartFraction, committedEndFraction, draggingRange) {
+        if (!draggingRange) {
+            startFraction = committedStartFraction
+            endFraction = committedEndFraction
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedButton(
+            onClick = { rangeVisible = !rangeVisible },
+            enabled = enabled,
+            modifier = Modifier.weight(1f),
+        ) {
+            Text(if (rangeVisible) "Hide range" else "Select range")
+        }
+        if (committedRange != null) {
+            TextButton(
+                onClick = {
+                    rangeVisible = false
+                    onClearRange()
+                },
+                enabled = enabled,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Clear range")
+            }
+        }
+    }
+
+    if (!rangeVisible) return
+
+    RangeSlider(
+        value = startFraction..endFraction,
+        onValueChange = { range ->
+            draggingRange = true
+            startFraction = range.start.coerceIn(0f, 1f)
+            endFraction = range.endInclusive.coerceIn(startFraction, 1f)
+        },
+        onValueChangeFinished = {
+            val startUs = MicroscopeTimelineMath.timestampForFraction(
+                fraction = startFraction,
+                startUs = bounds.startUs,
+                endUs = bounds.endUs,
+            )
+            val endUs = MicroscopeTimelineMath.timestampForFraction(
+                fraction = endFraction,
+                startUs = bounds.startUs,
+                endUs = bounds.endUs,
+            )
+            draggingRange = false
+            if (startUs != null && endUs != null && startUs <= endUs) {
+                onCommitRange(startUs, endUs)
+            }
+        },
+        enabled = enabled,
+        valueRange = 0f..1f,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(TIMELINE_RANGE_SLIDER_TAG)
+            .semantics { contentDescription = "Selected timeline range" },
+    )
+
+    val previewStartUs = MicroscopeTimelineMath.timestampForFraction(
+        fraction = startFraction,
+        startUs = bounds.startUs,
+        endUs = bounds.endUs,
+    )
+    val previewEndUs = MicroscopeTimelineMath.timestampForFraction(
+        fraction = endFraction,
+        startUs = bounds.startUs,
+        endUs = bounds.endUs,
+    )
+    val durationUs = if (previewStartUs != null && previewEndUs != null) {
+        MicroscopeTimelineMath.durationUs(previewStartUs, previewEndUs)
+    } else {
+        null
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Selected range", style = MaterialTheme.typography.titleSmall)
+        Text(
+            text = "Start: ${previewStartUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "unavailable"}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            text = "End: ${previewEndUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "unavailable"}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            text = "Duration: ${durationUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "unavailable"}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Text(
+            text = "Extraction uses inclusive indexed timestamps: start ≤ frame timestamp ≤ end.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

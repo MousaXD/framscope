@@ -133,6 +133,8 @@ class MainActivity : ComponentActivity() {
                             batchExportViewModel.cancelForMicroscopeChange()
                             viewModel.jumpMicroscopeTimestampUs(timestampUs)
                         },
+                        onCommitMicroscopeRange = viewModel::commitTimelineRange,
+                        onClearMicroscopeRange = viewModel::clearTimelineRange,
                     )
 
                     CurrentFrameExportOverlay(
@@ -157,6 +159,7 @@ class MainActivity : ComponentActivity() {
 
                     BatchExportOverlay(
                         microscopeState = state.microscopeState,
+                        selectedTimelineRange = state.timelineRange,
                         exportState = batchExportState,
                         onRequestExport = { request ->
                             val ready = state.microscopeState as? MicroscopeUiState.Ready

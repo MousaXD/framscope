@@ -56,6 +56,7 @@ android {
         targetSdk = 36
         versionCode = frameScopeVersionCode
         versionName = frameScopeVersionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
             abiFilters += setOf("arm64-v8a")
@@ -153,6 +154,7 @@ tasks.named("preBuild").configure {
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2026.06.00")
     implementation(composeBom)
+    androidTestImplementation(composeBom)
 
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
@@ -165,6 +167,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20260719")

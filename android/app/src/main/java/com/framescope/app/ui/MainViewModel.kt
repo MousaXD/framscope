@@ -87,6 +87,8 @@ data class FrameScopeUiState(
     val engineStatus: EngineStatus = EngineStatus.Checking,
     val videoState: VideoInspectionState = VideoInspectionState.Idle,
     val microscopeState: MicroscopeUiState = MicroscopeUiState.Idle,
+    val timelineBounds: IndexedTimelineBounds? = null,
+    val timelineRange: TimelineRangeSelection? = null,
 )
 
 class MainViewModel(
@@ -121,6 +123,8 @@ class MainViewModel(
             it.copy(
                 videoState = VideoInspectionState.Picking,
                 microscopeState = MicroscopeUiState.Idle,
+                timelineBounds = null,
+                timelineRange = null,
             )
         }
     }
@@ -129,6 +133,16 @@ class MainViewModel(
         val generation = inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
         invalidateMicroscopeWork(closeSession = false)
+        // Reflect the user's selection immediately. Native teardown/probing/indexing continues off
+        // the UI thread and updates this state as each stage becomes authoritative.
+        _uiState.update {
+            it.copy(
+                videoState = VideoInspectionState.Opening,
+                microscopeState = MicroscopeUiState.Idle,
+                timelineBounds = null,
+                timelineRange = null,
+            )
+        }
 
         inspectJob = viewModelScope.launch {
             try {
@@ -138,7 +152,6 @@ class MainViewModel(
                 repository.closeMicroscope()
                 if (generation != inspectionGeneration.get()) return@launch
 
-                publishIfCurrent(generation, VideoInspectionState.Opening)
                 repository.inspect(uri) { progress ->
                     val nextState = when (progress) {
                         InspectionProgress.Opening -> VideoInspectionState.Opening
@@ -165,6 +178,8 @@ class MainViewModel(
                                     diagnostic = bridgeError?.diagnostic,
                                 ),
                                 microscopeState = MicroscopeUiState.Idle,
+                                timelineBounds = null,
+                                timelineRange = null,
                             )
                         }
                     }
@@ -192,6 +207,35 @@ class MainViewModel(
         navigateMicroscope { repository.jumpMicroscopeTimestampUs(timestampUs, selection) }
     }
 
+    fun commitTimelineRange(startUs: Long, endUs: Long) {
+        val state = _uiState.value
+        val ready = state.microscopeState as? MicroscopeUiState.Ready ?: return
+        val bounds = state.timelineBounds?.takeIf {
+            it.sessionId == ready.session.sessionId && it.isSane()
+        } ?: return
+        val selection = TimelineRangeSelection(
+            sessionId = ready.session.sessionId,
+            startUs = startUs,
+            endUs = endUs,
+        )
+        if (!selection.isSaneFor(bounds)) return
+        _uiState.update { current ->
+            val currentReady = current.microscopeState as? MicroscopeUiState.Ready
+            if (
+                currentReady?.session?.sessionId == selection.sessionId &&
+                current.timelineBounds == bounds
+            ) {
+                current.copy(timelineRange = selection)
+            } else {
+                current
+            }
+        }
+    }
+
+    fun clearTimelineRange() {
+        _uiState.update { it.copy(timelineRange = null) }
+    }
+
     fun cancelInspection() {
         inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
@@ -200,6 +244,8 @@ class MainViewModel(
             it.copy(
                 videoState = VideoInspectionState.Cancelled,
                 microscopeState = MicroscopeUiState.Idle,
+                timelineBounds = null,
+                timelineRange = null,
             )
         }
     }
@@ -212,6 +258,8 @@ class MainViewModel(
             it.copy(
                 videoState = VideoInspectionState.Cancelled,
                 microscopeState = MicroscopeUiState.Idle,
+                timelineBounds = null,
+                timelineRange = null,
             )
         }
     }
@@ -241,6 +289,16 @@ class MainViewModel(
                 } else {
                     current.microscopeState
                 },
+                timelineBounds = if (current.microscopeState is MicroscopeUiState.Error) {
+                    null
+                } else {
+                    current.timelineBounds
+                },
+                timelineRange = if (current.microscopeState is MicroscopeUiState.Error) {
+                    null
+                } else {
+                    current.timelineRange
+                },
             )
         }
     }
@@ -255,7 +313,11 @@ class MainViewModel(
                 if (!isCurrent(inspectionRevision, microscopeRevision)) return@launch
                 _uiState.update { current ->
                     if (current.microscopeState == error) {
-                        current.copy(microscopeState = MicroscopeUiState.Idle)
+                        current.copy(
+                            microscopeState = MicroscopeUiState.Idle,
+                            timelineBounds = null,
+                            timelineRange = null,
+                        )
                     } else {
                         current
                     }
@@ -281,17 +343,27 @@ class MainViewModel(
                     MicroscopeUiState.Opening,
                 )
                 repository.openMicroscope(uri)
-                    .onSuccess { session ->
+                    .onSuccess { openedSession ->
                         if (!isCurrent(inspectionGenerationAtStart, microscopeRevision)) return@onSuccess
-                        if (session.currentFrame == null) {
+                        if (openedSession.currentFrame == null) {
+                            publishTimelineBoundsIfCurrent(
+                                inspectionGenerationAtStart,
+                                microscopeRevision,
+                                null,
+                            )
                             publishMicroscopeIfCurrent(
                                 inspectionGenerationAtStart,
                                 microscopeRevision,
-                                MicroscopeUiState.Empty(session),
+                                MicroscopeUiState.Empty(openedSession),
                             )
                         } else {
+                            val preparedSession = resolveIndexedTimelineBounds(
+                                session = openedSession,
+                                inspectionRevision = inspectionGenerationAtStart,
+                                microscopeRevision = microscopeRevision,
+                            ) ?: return@onSuccess
                             loadFrameForSession(
-                                session = session,
+                                session = preparedSession,
                                 inspectionGenerationAtStart = inspectionGenerationAtStart,
                                 microscopeRevision = microscopeRevision,
                             )
@@ -311,16 +383,141 @@ class MainViewModel(
         }
     }
 
+    /**
+     * Resolve exact timeline endpoints with indexed O(1) FrameId lookups before first presentation.
+     *
+     * The native session opens on FrameId 0. Jumping to the last FrameId and immediately restoring
+     * FrameId 0 touches only persistent navigation metadata; source-quality pixels are not decoded
+     * until [loadFrameForSession]. This avoids a new JNI ABI solely for endpoint metadata while
+     * preserving authoritative PTS, VFR, and non-zero-origin behavior.
+     */
+    private suspend fun resolveIndexedTimelineBounds(
+        session: MicroscopeSessionSnapshot,
+        inspectionRevision: Long,
+        microscopeRevision: Long,
+    ): MicroscopeSessionSnapshot? {
+        val first = session.currentFrame ?: return session
+        if (first.frameId != 0L || session.frameCount <= 0L) {
+            publishMicroscopeIfCurrent(
+                inspectionRevision,
+                microscopeRevision,
+                MicroscopeUiState.Error(
+                    message = "The complete microscope index did not open on its first presentation frame.",
+                    code = "timeline_identity_mismatch",
+                    session = session,
+                ),
+            )
+            return null
+        }
+
+        if (session.frameCount == 1L) {
+            val bounds = first.timestampUs?.let {
+                IndexedTimelineBounds(session.sessionId, it, it)
+            }?.takeIf(IndexedTimelineBounds::isSane)
+            publishTimelineBoundsIfCurrent(
+                inspectionRevision,
+                microscopeRevision,
+                bounds,
+            )
+            return session
+        }
+
+        val lastFrameId = session.frameCount - 1L
+        val lastResult = repository.jumpMicroscopeFrame(lastFrameId)
+        if (!isCurrent(inspectionRevision, microscopeRevision)) return null
+        val lastSession = lastResult.getOrElse { error ->
+            publishMicroscopeFailure(
+                inspectionRevision,
+                microscopeRevision,
+                error,
+                session,
+            )
+            return null
+        }
+        val last = lastSession.currentFrame
+        if (
+            lastSession.sessionId != session.sessionId ||
+            lastSession.frameCount != session.frameCount ||
+            last?.frameId != lastFrameId
+        ) {
+            publishMicroscopeIfCurrent(
+                inspectionRevision,
+                microscopeRevision,
+                MicroscopeUiState.Error(
+                    message = "FrameScope could not verify the indexed timeline endpoint identity.",
+                    code = "timeline_identity_mismatch",
+                    session = lastSession,
+                ),
+            )
+            return null
+        }
+
+        val restoreResult = repository.jumpMicroscopeFrame(first.frameId)
+        if (!isCurrent(inspectionRevision, microscopeRevision)) return null
+        val restored = restoreResult.getOrElse { error ->
+            publishMicroscopeFailure(
+                inspectionRevision,
+                microscopeRevision,
+                error,
+                lastSession,
+            )
+            return null
+        }
+        if (
+            restored.sessionId != session.sessionId ||
+            restored.frameCount != session.frameCount ||
+            restored.currentFrame?.frameId != first.frameId
+        ) {
+            publishMicroscopeIfCurrent(
+                inspectionRevision,
+                microscopeRevision,
+                MicroscopeUiState.Error(
+                    message = "FrameScope could not restore the first indexed frame after resolving timeline bounds.",
+                    code = "timeline_identity_mismatch",
+                    session = restored,
+                ),
+            )
+            return null
+        }
+
+        val bounds = if (first.timestampUs != null && last.timestampUs != null) {
+            IndexedTimelineBounds(
+                sessionId = session.sessionId,
+                startUs = first.timestampUs,
+                endUs = last.timestampUs,
+            ).takeIf(IndexedTimelineBounds::isSane)
+        } else {
+            null
+        }
+        publishTimelineBoundsIfCurrent(
+            inspectionRevision,
+            microscopeRevision,
+            bounds,
+        )
+        return restored
+    }
+
     private fun navigateMicroscope(
         operation: suspend () -> Result<MicroscopeSessionSnapshot>,
     ) {
         val current = _uiState.value.microscopeState
-        val session = when (current) {
-            is MicroscopeUiState.Ready -> current.session
-            is MicroscopeUiState.Empty -> current.session
+        val session: MicroscopeSessionSnapshot
+        val previousFrame: MicroscopeFrame?
+        when (current) {
+            is MicroscopeUiState.Ready -> {
+                session = current.session
+                previousFrame = current.frame
+            }
+            is MicroscopeUiState.Empty -> {
+                session = current.session
+                previousFrame = null
+            }
+            is MicroscopeUiState.Navigating -> {
+                session = current.session
+                previousFrame = current.previousFrame
+            }
             else -> return
         }
-        val previousFrame = (current as? MicroscopeUiState.Ready)?.frame
         val inspectionRevision = inspectionGeneration.get()
         val microscopeRevision = microscopeGeneration.incrementAndGet()
         microscopeJob?.cancel()
@@ -444,6 +641,21 @@ class MainViewModel(
     ) {
         if (isCurrent(inspectionRevision, microscopeRevision)) {
             _uiState.update { it.copy(microscopeState = state) }
+        }
+    }
+
+    private fun publishTimelineBoundsIfCurrent(
+        inspectionRevision: Long,
+        microscopeRevision: Long,
+        bounds: IndexedTimelineBounds?,
+    ) {
+        if (isCurrent(inspectionRevision, microscopeRevision)) {
+            _uiState.update {
+                it.copy(
+                    timelineBounds = bounds,
+                    timelineRange = null,
+                )
+            }
         }
     }
 

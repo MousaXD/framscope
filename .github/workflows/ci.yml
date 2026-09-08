@@ -178,6 +178,10 @@ jobs:
         working-directory: android
         run: gradle --no-daemon testDebugUnitTest
 
+      - name: Compile Compose semantic Android tests
+        working-directory: android
+        run: gradle --no-daemon assembleDebugAndroidTest
+
       - name: Android lint
         working-directory: android
         run: gradle --no-daemon lintDebug

@@ -68,8 +68,11 @@ class MicroscopeNavigationFrameRetentionTest {
 
             override suspend fun jumpMicroscopeFrame(
                 frameId: Long,
-            ): Result<MicroscopeSessionSnapshot> =
-                Result.failure(IllegalStateException("unused frame jump"))
+            ): Result<MicroscopeSessionSnapshot> = when (frameId) {
+                0L -> Result.success(firstSession)
+                1L -> Result.success(secondSession)
+                else -> Result.failure(IllegalArgumentException("frame out of range"))
+            }
 
             override suspend fun jumpMicroscopeTimestampUs(
                 timestampUs: Long,
