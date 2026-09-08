@@ -8,6 +8,14 @@ FrameScope uses semantic Android versions and a fail-closed signed GitHub Releas
 
 `versionName` must be exactly `MAJOR.MINOR.PATCH`. A release tag must be exactly `v<versionName>`.
 
+## Main snapshot releases
+
+Every successful canonical CI run for a real push to `main` publishes an installable testing pre-release.
+
+Snapshot tags use `main-<12-char-commit-sha>`. Each snapshot contains the exact arm64 debug APK produced and verified by that CI run plus a SHA-256 checksum. Failed `main` CI runs publish nothing.
+
+These snapshots are for testing and rapid access to the latest `main` build. They are not signed production releases and do not replace the physical-device acceptance or signing requirements below.
+
 ## Physical-device release evidence
 
 Before the first production release, an accepted Phase 7 physical-device report is required.
