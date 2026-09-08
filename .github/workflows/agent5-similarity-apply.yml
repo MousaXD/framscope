@@ -21,7 +21,9 @@ jobs:
           fetch-depth: 0
 
       - name: Apply audited similarity remediation
-        run: python3 .github/agent5_similarity_patch.py
+        run: |
+          python3 .github/agent5_similarity_patch.py
+          python3 .github/agent5_similarity_patch_fixes.py
 
       - name: Set up Rust
         run: |
