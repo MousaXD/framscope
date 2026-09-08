@@ -400,6 +400,13 @@ class AndroidFrameScopeRepository(
                                     sink = sink,
                                 )
                             }
+                            currentCoroutineContext().ensureActive()
+                            if (microscopeController.currentSnapshot()?.sessionId != snapshot.sessionId) {
+                                throw FrameExportException(
+                                    code = "stale_result",
+                                    message = "Batch export completed after the microscope source was replaced.",
+                                )
+                            }
 
                             when (nativeResult) {
                                 is NativeBatchExport.Success -> {
