@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -6,17 +7,55 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val versionPropertiesFile = rootProject.file("../version.properties")
+val frameScopeVersion = Properties().apply {
+    versionPropertiesFile.inputStream().use(::load)
+}
+val frameScopeVersionName = frameScopeVersion.getProperty("versionName")
+    ?.takeIf { value -> Regex("[0-9]+\\.[0-9]+\\.[0-9]+").matches(value) }
+    ?: error("version.properties must define semantic versionName MAJOR.MINOR.PATCH")
+val frameScopeVersionCode = frameScopeVersion.getProperty("versionCode")
+    ?.toIntOrNull()
+    ?.takeIf { value -> value > 0 }
+    ?: error("version.properties must define a positive integer versionCode")
+
+val releaseStorePath = providers.environmentVariable("FRAMESCOPE_SIGNING_STORE_FILE").orNull
+val releaseStorePassword = providers.environmentVariable("FRAMESCOPE_SIGNING_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("FRAMESCOPE_SIGNING_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("FRAMESCOPE_SIGNING_KEY_PASSWORD").orNull
+val releaseSigningValues = listOf(
+    releaseStorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+)
+val releaseSigningConfigured = releaseSigningValues.all { value -> !value.isNullOrBlank() }
+check(releaseSigningValues.none { value -> !value.isNullOrBlank() } || releaseSigningConfigured) {
+    "Release signing must provide store file, store password, key alias, and key password together."
+}
+
 android {
     namespace = "com.framescope.app"
     compileSdk = 36
     ndkVersion = "27.3.13750724"
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(requireNotNull(releaseStorePath))
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     defaultConfig {
         applicationId = "com.framescope.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-phase1"
+        versionCode = frameScopeVersionCode
+        versionName = frameScopeVersionName
 
         ndk {
             abiFilters += setOf("arm64-v8a")
@@ -26,6 +65,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -86,6 +128,7 @@ val buildRustArm64 by tasks.registering(Exec::class) {
     inputs.file(rootProject.file("../scripts/build-rust.sh"))
     inputs.file(rootProject.file("../scripts/build-ffmpeg-android.sh"))
     inputs.file(rootProject.file("../scripts/verify-ffmpeg-android.sh"))
+    inputs.file(versionPropertiesFile)
     outputs.dir(rustJniOutput)
     environment("CARGO_TARGET_DIR", rootProject.file("../rust/target").absolutePath)
     environment("FRAMESCOPE_FFMPEG_ROOT", ffmpegRoot.get())
