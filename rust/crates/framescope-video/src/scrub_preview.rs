@@ -22,24 +22,31 @@ pub struct ScrubPreviewCacheStats {
     pub resident_frames: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ScrubPreviewKey {
+    frame_id: FrameId,
+    max_edge: u32,
+}
+
 #[derive(Debug)]
 struct ScrubPreviewEntry {
     pixels: OwnedRgbaFrame,
     last_access: u64,
 }
 
-/// A small byte- and count-bounded cache for downscaled live-scrub RGBA frames.
+/// A byte- and count-bounded cache for downscaled live-scrub RGBA frames.
 ///
-/// This cache is intentionally separate from the source-quality frame cache. Its keys remain exact
-/// persistent [FrameId] values, while its payloads are disposable UI previews that must never feed
-/// extraction or authoritative microscope presentation.
+/// This cache is intentionally separate from the source-quality frame cache. Every entry is keyed
+/// by the exact persistent [FrameId] and the requested preview profile (`max_edge`). A smaller
+/// preview is therefore never allowed to satisfy a later larger-preview request. Payloads remain
+/// disposable UI previews and must never feed extraction or authoritative microscope presentation.
 #[derive(Debug)]
 pub struct ScrubPreviewCache {
     budget_bytes: usize,
     max_frames: usize,
     resident_bytes: usize,
     access_clock: u64,
-    entries: HashMap<FrameId, ScrubPreviewEntry>,
+    entries: HashMap<ScrubPreviewKey, ScrubPreviewEntry>,
     hits: u64,
     misses: u64,
     insertions: u64,
@@ -61,9 +68,10 @@ impl ScrubPreviewCache {
         }
     }
 
-    pub fn get(&mut self, frame_id: FrameId) -> Option<OwnedRgbaFrame> {
+    pub fn get(&mut self, frame_id: FrameId, max_edge: u32) -> Option<OwnedRgbaFrame> {
         self.access_clock = self.access_clock.saturating_add(1);
-        let Some(entry) = self.entries.get_mut(&frame_id) else {
+        let key = ScrubPreviewKey { frame_id, max_edge };
+        let Some(entry) = self.entries.get_mut(&key) else {
             self.misses = self.misses.saturating_add(1);
             return None;
         };
@@ -72,47 +80,50 @@ impl ScrubPreviewCache {
         Some(entry.pixels.clone())
     }
 
-    pub fn insert(&mut self, frame_id: FrameId, pixels: OwnedRgbaFrame) {
+    pub fn insert(&mut self, frame_id: FrameId, max_edge: u32, pixels: OwnedRgbaFrame) {
         if self.budget_bytes == 0 || self.max_frames == 0 || pixels.byte_len() > self.budget_bytes {
             return;
         }
 
-        if let Some(previous) = self.entries.remove(&frame_id) {
+        let key = ScrubPreviewKey { frame_id, max_edge };
+        if let Some(previous) = self.entries.remove(&key) {
             self.resident_bytes = self
                 .resident_bytes
                 .saturating_sub(previous.pixels.byte_len());
         }
 
-        while !self.entries.is_empty()
-            && (self.entries.len() >= self.max_frames
-                || self.resident_bytes.saturating_add(pixels.byte_len()) > self.budget_bytes)
-        {
-            let Some(lru) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_access)
-                .map(|(frame_id, _)| *frame_id)
-            else {
-                break;
-            };
-            if let Some(evicted) = self.entries.remove(&lru) {
-                self.resident_bytes = self
-                    .resident_bytes
-                    .saturating_sub(evicted.pixels.byte_len());
-                self.evictions = self.evictions.saturating_add(1);
-            }
-        }
+        self.evict_until_fits(pixels.byte_len(), true);
 
         self.access_clock = self.access_clock.saturating_add(1);
         self.resident_bytes = self.resident_bytes.saturating_add(pixels.byte_len());
         self.entries.insert(
-            frame_id,
+            key,
             ScrubPreviewEntry {
                 pixels,
                 last_access: self.access_clock,
             },
         );
         self.insertions = self.insertions.saturating_add(1);
+    }
+
+    /// Changes the byte ceiling and immediately evicts LRU entries until the new ceiling is met.
+    pub fn set_budget_bytes(&mut self, budget_bytes: usize) {
+        self.budget_bytes = budget_bytes;
+        self.evict_until_fits(0, false);
+    }
+
+    /// Changes the frame-count ceiling and immediately evicts LRU entries to comply.
+    pub fn set_max_frames(&mut self, max_frames: usize) {
+        self.max_frames = max_frames;
+        self.evict_until_fits(0, false);
+    }
+
+    pub fn clear(&mut self) {
+        self.evictions = self
+            .evictions
+            .saturating_add(u64::try_from(self.entries.len()).unwrap_or(u64::MAX));
+        self.entries.clear();
+        self.resident_bytes = 0;
     }
 
     pub fn stats(&self) -> ScrubPreviewCacheStats {
@@ -123,6 +134,32 @@ impl ScrubPreviewCache {
             evictions: self.evictions,
             resident_bytes: self.resident_bytes,
             resident_frames: self.entries.len(),
+        }
+    }
+
+    fn evict_until_fits(&mut self, additional_bytes: usize, inserting: bool) {
+        while !self.entries.is_empty()
+            && (self.resident_bytes.saturating_add(additional_bytes) > self.budget_bytes
+                || if inserting {
+                    self.entries.len() >= self.max_frames
+                } else {
+                    self.entries.len() > self.max_frames
+                })
+        {
+            let Some(lru) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&lru) {
+                self.resident_bytes = self
+                    .resident_bytes
+                    .saturating_sub(evicted.pixels.byte_len());
+                self.evictions = self.evictions.saturating_add(1);
+            }
         }
     }
 }
@@ -273,26 +310,65 @@ mod tests {
     #[test]
     fn preview_cache_is_bounded_by_frame_count_and_bytes() {
         let mut cache = ScrubPreviewCache::new(2 * 16, 2);
-        cache.insert(FrameId(1), rgba(2, 2, 1));
-        cache.insert(FrameId(2), rgba(2, 2, 2));
+        cache.insert(FrameId(1), 640, rgba(2, 2, 1));
+        cache.insert(FrameId(2), 640, rgba(2, 2, 2));
         assert_eq!(cache.stats().resident_frames, 2);
-        assert!(cache.get(FrameId(1)).is_some());
+        assert!(cache.get(FrameId(1), 640).is_some());
 
-        cache.insert(FrameId(3), rgba(2, 2, 3));
+        cache.insert(FrameId(3), 640, rgba(2, 2, 3));
         let stats = cache.stats();
         assert_eq!(stats.resident_frames, 2);
         assert_eq!(stats.resident_bytes, 32);
         assert_eq!(stats.evictions, 1);
-        assert!(cache.get(FrameId(1)).is_some());
-        assert!(cache.get(FrameId(2)).is_none());
-        assert!(cache.get(FrameId(3)).is_some());
+        assert!(cache.get(FrameId(1), 640).is_some());
+        assert!(cache.get(FrameId(2), 640).is_none());
+        assert!(cache.get(FrameId(3), 640).is_some());
+    }
+
+    #[test]
+    fn preview_profile_is_part_of_cache_identity() {
+        let mut cache = ScrubPreviewCache::new(1024, 4);
+        cache.insert(FrameId(9), 320, rgba(2, 2, 7));
+
+        assert!(cache.get(FrameId(9), 320).is_some());
+        assert!(cache.get(FrameId(9), 640).is_none());
+    }
+
+    #[test]
+    fn shrinking_budget_evicts_immediately() {
+        let mut cache = ScrubPreviewCache::new(64, 4);
+        cache.insert(FrameId(1), 320, rgba(2, 2, 1));
+        cache.insert(FrameId(2), 320, rgba(2, 2, 2));
+        assert_eq!(cache.stats().resident_bytes, 32);
+
+        cache.set_budget_bytes(16);
+        assert_eq!(cache.stats().resident_bytes, 16);
+        assert_eq!(cache.stats().resident_frames, 1);
+
+        cache.set_budget_bytes(0);
+        assert_eq!(cache.stats().resident_bytes, 0);
+        assert_eq!(cache.stats().resident_frames, 0);
+    }
+
+    #[test]
+    fn shrinking_frame_limit_evicts_immediately() {
+        let mut cache = ScrubPreviewCache::new(64, 4);
+        cache.insert(FrameId(1), 320, rgba(2, 2, 1));
+        cache.insert(FrameId(2), 320, rgba(2, 2, 2));
+
+        cache.set_max_frames(1);
+        assert_eq!(cache.stats().resident_frames, 1);
+        assert_eq!(cache.stats().resident_bytes, 16);
+
+        cache.set_max_frames(0);
+        assert_eq!(cache.stats().resident_frames, 0);
     }
 
     #[test]
     fn oversized_preview_is_not_cached() {
         let mut cache = ScrubPreviewCache::new(15, 4);
-        cache.insert(FrameId(1), rgba(2, 2, 1));
+        cache.insert(FrameId(1), 320, rgba(2, 2, 1));
         assert_eq!(cache.stats().resident_frames, 0);
-        assert!(cache.get(FrameId(1)).is_none());
+        assert!(cache.get(FrameId(1), 320).is_none());
     }
 }
