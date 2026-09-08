@@ -109,6 +109,10 @@ impl MicroscopeFailure {
     pub(crate) fn code(&self) -> &'static str {
         self.code
     }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 #[cfg(unix)]
@@ -583,6 +587,33 @@ pub(crate) fn copy_prepared_frame(
     Err(MicroscopeFailure::new(
         "bridge_error",
         "microscope frame presentation is unavailable on this platform",
+    ))
+}
+
+/// Execute a synchronous read-only extraction operation against an open microscope session.
+///
+/// The per-session mutex remains held for the duration of `operation`, so navigation cannot mutate
+/// the authoritative frame index or replace the source identity while a batch is decoding. The raw
+/// descriptor is borrowed only for this call and must not be retained by the operation after it
+/// returns. Decoder constructors are expected to duplicate it immediately, as the video engine does.
+#[cfg(unix)]
+pub(crate) fn with_extraction_context<T, E>(
+    session_id: i64,
+    operation: impl FnOnce(RawFd, &FrameIndex) -> Result<T, E>,
+) -> Result<Result<T, E>, MicroscopeFailure> {
+    with_session_mut(session_id, |session| {
+        Ok(operation(session._source_fd.as_raw_fd(), &session.index))
+    })
+}
+
+#[cfg(not(unix))]
+pub(crate) fn with_extraction_context<T, E>(
+    _session_id: i64,
+    _operation: impl FnOnce(i32, &FrameIndex) -> Result<T, E>,
+) -> Result<Result<T, E>, MicroscopeFailure> {
+    Err(MicroscopeFailure::new(
+        "bridge_error",
+        "microscope extraction sessions are unavailable on this platform",
     ))
 }
 
