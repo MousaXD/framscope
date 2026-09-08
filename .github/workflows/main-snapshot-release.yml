@@ -75,3 +75,30 @@ jobs:
 
           echo "error: timed out waiting for successful canonical CI for $HEAD_SHA" >&2
           exit 1
+
+      - name: Download exact verified APK artifact
+        run: |
+          set -euo pipefail
+          artifact="framescope-debug-$HEAD_SHA"
+          mkdir -p build/main-snapshot
+          gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir build/main-snapshot
+
+          apk_count="$(find build/main-snapshot -type f -name '*.apk' | wc -l | tr -d ' ')"
+          if [[ "$apk_count" != "1" ]]; then
+            echo "error: expected exactly one APK in $artifact, found $apk_count" >&2
+            exit 1
+          fi
+
+          apk="$(find build/main-snapshot -type f -name '*.apk' -print -quit)"
+          test -s "$apk"
+
+          short_sha="${HEAD_SHA:0:12}"
+          staged="build/FrameScope-main-${short_sha}-arm64-v8a-debug.apk"
+          cp "$apk" "$staged"
+          sha256sum "$staged" > "$staged.sha256"
+          sha256sum --check "$staged.sha256"
+
+          echo "SNAPSHOT_APK=$staged" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_SHA256=$staged.sha256" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_TAG=main-$short_sha" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_TITLE=FrameScope main $short_sha" >> "$GITHUB_ENV"
