@@ -86,6 +86,37 @@ class IndexingProgressEstimatorTest {
     }
 
     @Test
+    fun cachedIndexFinalizingDoesNotInventZeroPercent() {
+        val estimator = IndexingProgressEstimator(durationUs = 20_000_000L)
+        estimator.update(
+            progress(
+                frames = 8_000,
+                timestampUs = 19_800_000L,
+                elapsedMs = 25L,
+                stage = MicroscopeIndexingStage.ReusingExistingIndex,
+                reusedFrames = 8_000,
+                expectedReuseFrames = 8_000,
+                firstTimestampUs = 19_800_000L,
+            ),
+        )
+        val finalizing = estimator.update(
+            progress(
+                frames = 8_000,
+                timestampUs = 19_800_000L,
+                elapsedMs = 30L,
+                stage = MicroscopeIndexingStage.Finalizing,
+                reusedFrames = 8_000,
+                expectedReuseFrames = 8_000,
+                firstTimestampUs = 19_800_000L,
+            ),
+        )
+
+        assertNull(finalizing.framesPerSecond)
+        assertNull(finalizing.estimatedFraction)
+        assertNull(finalizing.estimatedRemainingSeconds)
+    }
+
+    @Test
     fun rebuildResetsPriorRateAndEtaHistory() {
         val estimator = IndexingProgressEstimator(durationUs = 10_000_000L)
         listOf(
