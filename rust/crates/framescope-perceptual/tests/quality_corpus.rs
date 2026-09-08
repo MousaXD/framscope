@@ -40,8 +40,8 @@ fn map_pixels(
 
 fn translated(input: &[(u8, u8, u8)], dx: usize, dy: usize) -> Vec<(u8, u8, u8)> {
     let mut out = vec![(0, 0, 0); 16 * 16];
-    for y in 0..16 {
-        for x in 0..16 {
+    for y in 0_usize..16 {
+        for x in 0_usize..16 {
             let sx = x.saturating_sub(dx);
             let sy = y.saturating_sub(dy);
             out[y * 16 + x] = input[sy * 16 + sx];
@@ -65,14 +65,26 @@ fn labeled_similarity_corpus_reports_quality_and_hash_gate_misses() {
     let base = base_pattern();
     let compression = map_pixels(&base, |x, y, (r, g, b)| {
         let q = if (x + y) % 2 == 0 { 1 } else { 0 };
-        (r.saturating_add(q), g.saturating_sub(q), b.saturating_add(q))
+        (
+            r.saturating_add(q),
+            g.saturating_sub(q),
+            b.saturating_add(q),
+        )
     });
     let brightness = map_pixels(&base, |_x, _y, (r, g, b)| {
-        (r.saturating_add(3), g.saturating_add(3), b.saturating_add(3))
+        (
+            r.saturating_add(3),
+            g.saturating_add(3),
+            b.saturating_add(3),
+        )
     });
     let exposure_flicker = map_pixels(&base, |x, _y, (r, g, b)| {
         let d = if x % 2 == 0 { 4 } else { 1 };
-        (r.saturating_add(d), g.saturating_add(d), b.saturating_add(d))
+        (
+            r.saturating_add(d),
+            g.saturating_add(d),
+            b.saturating_add(d),
+        )
     });
     let subtitle = map_pixels(&base, |x, y, px| {
         if (3..13).contains(&x) && (12..15).contains(&y) {
@@ -90,13 +102,12 @@ fn labeled_similarity_corpus_reports_quality_and_hash_gate_misses() {
     });
     let fade = map_pixels(&base, |_x, _y, (r, g, b)| (r / 2, g / 2, b / 2));
     let hard_cut = vec![(8, 220, 170); 16 * 16];
-    let animation = map_pixels(&base, |x, y, px| {
-        if (x + y) % 3 == 0 {
-            (20, 210, 240)
-        } else {
-            px
-        }
-    });
+    let animation = map_pixels(
+        &base,
+        |x, y, px| {
+            if (x + y) % 3 == 0 { (20, 210, 240) } else { px }
+        },
+    );
     let crop_rescaled = map_pixels(&base, |x, y, _| {
         let sx = 2 + x * 12 / 16;
         let sy = 2 + y * 12 / 16;

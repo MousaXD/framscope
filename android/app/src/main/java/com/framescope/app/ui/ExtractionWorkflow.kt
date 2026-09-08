@@ -207,14 +207,14 @@ private fun ExtractionSheet(
                     first = ExtractionMode.AllFrames,
                     firstLabel = "All frames",
                     second = ExtractionMode.UniqueGroups,
-                    secondLabel = "Unique groups",
+                    secondLabel = "Consecutive near-duplicates",
                     selected = mode,
                     onSelected = { modeName = it.name },
                 )
             } else {
                 SingleModeChip(
                     mode = ExtractionMode.UniqueGroups,
-                    label = "Unique groups",
+                    label = "Consecutive near-duplicates",
                     selected = mode,
                     onSelected = { modeName = it.name },
                 )
@@ -276,7 +276,7 @@ private fun ExtractionSheet(
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 ExtractionMode.UniqueGroups -> Text(
-                    "One source-quality representative from each validated similarity group.",
+                    "Exports one source-quality representative from each consecutive run of visually similar frames. Repeated similar frames later in the video are treated separately.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
