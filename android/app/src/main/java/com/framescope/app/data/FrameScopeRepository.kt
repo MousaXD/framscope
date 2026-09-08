@@ -46,6 +46,13 @@ interface FrameScopeRepository {
     ): Result<ExportedFrameDocument> =
         Result.failure(UnsupportedOperationException("Current-frame export is not supported."))
 
+    suspend fun exportFrames(
+        treeUri: String,
+        request: BatchExportRequest,
+        onProgress: (BatchExportProgress) -> Unit = {},
+    ): Result<ExportedBatchDocument> =
+        Result.failure(UnsupportedOperationException("Batch frame export is not supported."))
+
     suspend fun closeMicroscope(): Boolean = true
 
     fun cancelActiveInspection() {}
@@ -67,6 +74,8 @@ class AndroidFrameScopeRepository(
         MicroscopeSessionController(nativeBridge, frameBridge),
     private val exportDestinationFactory: FrameExportDestinationFactory =
         AndroidFrameExportDestinationFactory(contentResolver),
+    private val batchDocumentFactory: ExportDocumentFactory =
+        AndroidExportDocumentFactory(contentResolver),
 ) : FrameScopeRepository {
     private val nextOperationId = AtomicLong(1L)
     private val activeNativeOperationId = AtomicLong(NO_OPERATION)
@@ -319,6 +328,129 @@ class AndroidFrameScopeRepository(
         )
     }
 
+    override suspend fun exportFrames(
+        treeUri: String,
+        request: BatchExportRequest,
+        onProgress: (BatchExportProgress) -> Unit,
+    ): Result<ExportedBatchDocument> = try {
+        Result.success(
+            withContext(ioDispatcher) {
+                currentCoroutineContext().ensureActive()
+                if (!request.isSane()) {
+                    throw FrameExportException(
+                        code = "invalid_request",
+                        message = "Batch export selection, interval, or image format is invalid.",
+                    )
+                }
+                val snapshot = microscopeController.currentSnapshot()
+                    ?: throw FrameExportException(
+                        code = "session_not_found",
+                        message = "No microscope session is currently open.",
+                    )
+                validateBatchRequest(snapshot, request)
+
+                val operationId = nextExportOperationId()
+                if (!activeNativeOperationId.compareAndSet(NO_OPERATION, operationId)) {
+                    throw FrameExportException(
+                        code = "operation_busy",
+                        message = "Another native FrameScope operation is already active.",
+                    )
+                }
+                val manifestDisplayName = stableManifestFileName(snapshot.sessionId, operationId)
+                try {
+                    val manifest = try {
+                        batchDocumentFactory.create(
+                            treeUri = treeUri,
+                            displayName = manifestDisplayName,
+                            mimeType = MANIFEST_MIME_TYPE,
+                        )
+                    } catch (error: SecurityException) {
+                        throw error
+                    } catch (error: Exception) {
+                        throw FrameExportException(
+                            code = "destination_error",
+                            message = "Android could not create the batch export manifest.",
+                            cause = error,
+                        )
+                    }
+
+                    manifest.use { manifestOutput ->
+                        BatchSafFrameSink(
+                            treeUri = treeUri,
+                            documentFactory = batchDocumentFactory,
+                            onProgress = onProgress,
+                        ).use { sink ->
+                            currentCoroutineContext().ensureActive()
+                            val nativeResult = nativeBridge.exportMicroscopeBatch(
+                                sessionId = snapshot.sessionId,
+                                manifestFd = manifestOutput.fd,
+                                operationId = operationId,
+                                request = request,
+                                sink = sink,
+                            )
+
+                            when (nativeResult) {
+                                is NativeBatchExport.Success -> {
+                                    val export = nativeResult.export
+                                    if (
+                                        export.sessionId != snapshot.sessionId ||
+                                        export.format != request.format
+                                    ) {
+                                        throw FrameExportException(
+                                            code = "export_identity_mismatch",
+                                            message = "Batch export no longer matches the requested microscope session.",
+                                        )
+                                    }
+                                    manifestOutput.commit()
+                                    ExportedBatchDocument(
+                                        manifestUri = manifestOutput.uri,
+                                        manifestDisplayName = manifestDisplayName,
+                                        export = export,
+                                    )
+                                }
+
+                                is NativeBatchExport.Failure -> {
+                                    if (shouldPreserveFailureManifest(nativeResult.code)) {
+                                        manifestOutput.commit()
+                                    }
+                                    if (nativeResult.code in CANCELLATION_CODES) {
+                                        throw CancellationException(nativeResult.message)
+                                    }
+                                    throw FrameExportException(
+                                        code = nativeResult.code,
+                                        message = nativeResult.message,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } finally {
+                    activeNativeOperationId.compareAndSet(operationId, NO_OPERATION)
+                }
+            },
+        )
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: FrameExportException) {
+        Result.failure(error)
+    } catch (error: SecurityException) {
+        Result.failure(
+            FrameExportException(
+                code = "permission_revoked",
+                message = "FrameScope no longer has permission to write to this export folder.",
+                cause = error,
+            ),
+        )
+    } catch (error: Exception) {
+        Result.failure(
+            FrameExportException(
+                code = "destination_error",
+                message = "FrameScope could not write the batch export.",
+                cause = error,
+            ),
+        )
+    }
+
     override suspend fun closeMicroscope(): Boolean = withContext(ioDispatcher) {
         microscopeController.closeCurrent()
     }
@@ -350,6 +482,53 @@ class AndroidFrameScopeRepository(
                 MicroscopeOperationException(result.code, result.message),
             )
         }
+
+    private fun validateBatchRequest(
+        snapshot: MicroscopeSessionSnapshot,
+        request: BatchExportRequest,
+    ) {
+        if (snapshot.frameCount <= 0L) {
+            throw FrameExportException(
+                code = "no_frames",
+                message = "The current microscope session contains no indexed frames.",
+            )
+        }
+        when (val selection = request.selection) {
+            is BatchExportSelection.CurrentFrame -> {
+                if (snapshot.currentFrame?.frameId != selection.frameId) {
+                    throw FrameExportException(
+                        code = "stale_result",
+                        message = "Current-frame batch export no longer matches the microscope position.",
+                    )
+                }
+            }
+
+            is BatchExportSelection.FrameRangeInclusive -> {
+                if (selection.endFrameId >= snapshot.frameCount) {
+                    throw FrameExportException(
+                        code = "frame_out_of_range",
+                        message = "Batch frame range extends beyond the indexed video.",
+                    )
+                }
+            }
+
+            is BatchExportSelection.TimestampRangeUsInclusive -> Unit
+            BatchExportSelection.AllFrames -> Unit
+        }
+    }
+
+    private fun shouldPreserveFailureManifest(code: String): Boolean =
+        code !in NON_PERSISTABLE_MANIFEST_FAILURE_CODES
+
+    private fun stableManifestFileName(sessionId: Long, operationId: Long): String {
+        if (sessionId <= 0L || operationId <= 0L) {
+            throw FrameExportException(
+                code = "invalid_request",
+                message = "Batch manifest identity must be positive.",
+            )
+        }
+        return "framescope_manifest_${sessionId}_${operationId}.jsonl"
+    }
 
     private fun requireContentUri(uri: String): Uri {
         val parsedUri = Uri.parse(uri)
@@ -439,7 +618,17 @@ class AndroidFrameScopeRepository(
         const val TAG = "FrameScopeRepository"
         const val NO_OPERATION = 0L
         const val FRAME_ID_WIDTH = 20
+        const val MANIFEST_MIME_TYPE = "application/json"
         val CANCELLATION_CODES = setOf("cancelled", "cancellation")
+        val NON_PERSISTABLE_MANIFEST_FAILURE_CODES = setOf(
+            "invalid_request",
+            "session_not_found",
+            "selection_error",
+            "manifest_error",
+            "jni_error",
+            "native_library_unavailable",
+            "malformed_response",
+        )
     }
 }
 
