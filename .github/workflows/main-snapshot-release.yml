@@ -8,8 +8,29 @@ on:
     branches:
       - main
 
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: main-snapshot-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   validate-workflow:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: echo ok
+
+  publish-main-snapshot:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HEAD_SHA: ${{ github.sha }}
+    steps:
+      - run: echo publish
