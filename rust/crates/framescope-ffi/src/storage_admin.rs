@@ -58,23 +58,30 @@ enum StorageResponse {
     },
 }
 
-fn validate_cache_root(cache_root: &str) -> Result<(), StorageResponse> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InvalidCacheRoot;
+
+fn validate_cache_root(cache_root: &str) -> Result<(), InvalidCacheRoot> {
     if cache_root.is_empty()
         || cache_root.len() > MAX_CACHE_ROOT_LENGTH
         || cache_root.contains('\0')
     {
-        return Err(StorageResponse::Error {
-            engine: ENGINE_VERSION,
-            code: "invalid_cache_root",
-            message: "FrameScope cache root is invalid".into(),
-        });
+        return Err(InvalidCacheRoot);
     }
     Ok(())
 }
 
-fn admin(cache_root: &str) -> Result<StorageAdmin, StorageResponse> {
+fn admin(cache_root: &str) -> Result<StorageAdmin, InvalidCacheRoot> {
     validate_cache_root(cache_root)?;
     Ok(StorageAdmin::new(cache_root, PREVIEW_PROXY_ENABLED))
+}
+
+fn invalid_cache_root_response() -> StorageResponse {
+    StorageResponse::Error {
+        engine: ENGINE_VERSION,
+        code: "invalid_cache_root",
+        message: "FrameScope cache root is invalid".into(),
+    }
 }
 
 fn from_admin_error(error: StorageAdminError) -> StorageResponse {
@@ -118,7 +125,7 @@ fn stats_response(cache_root: &str) -> String {
             },
             Err(error) => from_admin_error(error),
         },
-        Err(response) => response,
+        Err(InvalidCacheRoot) => invalid_cache_root_response(),
     };
     serialize_response(response)
 }
@@ -160,7 +167,7 @@ fn clear_response(cache_root: &str, scope_code: i32) -> String {
             },
             Err(error) => from_admin_error(error),
         },
-        Err(response) => response,
+        Err(InvalidCacheRoot) => invalid_cache_root_response(),
     });
     serialize_response(response)
 }
@@ -188,7 +195,7 @@ fn clear_source_response(cache_root: &str, source_key: &str) -> String {
             },
             Err(error) => from_admin_error(error),
         },
-        Err(response) => response,
+        Err(InvalidCacheRoot) => invalid_cache_root_response(),
     });
     serialize_response(response)
 }
