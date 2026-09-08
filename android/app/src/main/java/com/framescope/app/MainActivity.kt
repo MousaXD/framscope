@@ -134,7 +134,9 @@ class MainActivity : ComponentActivity() {
                     videoState = state.videoState,
                     microscopeState = state.microscopeState,
                     history = recentVideoHistory,
-                    onResumeTimestampUs = viewModel::jumpMicroscopeTimestampUs,
+                    onResumeTimestampUs = { timestampUs ->
+                        viewModel.jumpMicroscopeTimestampUs(timestampUs)
+                    },
                 )
 
                 Box {
