@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(frame["record_type"], "frame");
         assert_eq!(frame["frame_id"], 2);
         assert_eq!(frame["ordinal"], 2);
-        assert_eq!(frame["presentation_timestamp"]["microseconds"], 40_000);
+        assert_eq!(frame["presentation_timestamp"]["microseconds"], 80_000);
 
         let terminal: serde_json::Value = serde_json::from_str(lines[4]).unwrap();
         assert_eq!(terminal["record_type"], "terminal");
