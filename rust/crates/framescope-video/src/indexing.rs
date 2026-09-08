@@ -89,9 +89,7 @@ pub fn with_indexing_progress_observer<R>(
     observer: impl FnMut(IndexingProgress) + 'static,
     operation: impl FnOnce() -> R,
 ) -> R {
-    let previous = INDEXING_PROGRESS_OBSERVER.with(|slot| {
-        slot.replace(Some(Box::new(observer)))
-    });
+    let previous = INDEXING_PROGRESS_OBSERVER.with(|slot| slot.replace(Some(Box::new(observer))));
     let _restore = ProgressObserverRestore { previous };
     operation()
 }
@@ -646,7 +644,13 @@ mod tests {
 
         let progress = Rc::new(RefCell::new(Vec::new()));
         let captured = Rc::clone(&progress);
-        let full = [(0, true), (40, false), (100, false), (180, false), (260, true)];
+        let full = [
+            (0, true),
+            (40, false),
+            (100, false),
+            (180, false),
+            (260, true),
+        ];
         with_indexing_progress_observer(
             move |event| captured.borrow_mut().push(event),
             || {
@@ -669,7 +673,10 @@ mod tests {
             event.stage == IndexingProgressStage::Indexing
                 && event.current_timestamp_us == Some(180_000)
         }));
-        assert_eq!(events.last().unwrap().stage, IndexingProgressStage::Finalizing);
+        assert_eq!(
+            events.last().unwrap().stage,
+            IndexingProgressStage::Finalizing
+        );
         assert_eq!(events.last().unwrap().indexed_frames, 5);
         let ordinary_counts = events
             .iter()
