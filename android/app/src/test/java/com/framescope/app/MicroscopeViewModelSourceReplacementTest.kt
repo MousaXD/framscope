@@ -110,6 +110,23 @@ class MicroscopeViewModelSourceReplacementTest {
         override suspend fun openMicroscope(uri: String): Result<MicroscopeSessionSnapshot> =
             Result.success(session)
 
+        override suspend fun jumpMicroscopeFrame(frameId: Long): Result<MicroscopeSessionSnapshot> = when (frameId) {
+            0L -> Result.success(session)
+            1L -> Result.success(
+                session.copy(
+                    currentFrame = session.currentFrame!!.copy(
+                        frameId = 1L,
+                        timestampTicks = 40L,
+                        timestampUs = 40_000L,
+                        keyframe = false,
+                    ),
+                    canStepPrevious = true,
+                    canStepNext = false,
+                ),
+            )
+            else -> Result.failure(IllegalArgumentException("frame out of range"))
+        }
+
         override suspend fun loadMicroscopeFrame(): Result<MicroscopeFrame> =
             Result.success(
                 MicroscopeFrame(
