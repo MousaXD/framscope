@@ -102,3 +102,14 @@ jobs:
           echo "SNAPSHOT_SHA256=$staged.sha256" >> "$GITHUB_ENV"
           echo "SNAPSHOT_TAG=main-$short_sha" >> "$GITHUB_ENV"
           echo "SNAPSHOT_TITLE=FrameScope main $short_sha" >> "$GITHUB_ENV"
+
+      - name: Publish immutable main snapshot pre-release
+        run: |
+          set -euo pipefail
+          notes="Automated installable debug snapshot from main commit $HEAD_SHA. Published only after canonical CI succeeded for this exact commit. The APK is the exact durable artifact produced and native-packaging-verified by that CI run. This is a testing pre-release, not the signed physically certified production release; production v* releases remain protected by the Phase 7 physical-device and signing gates."
+
+          if gh release view "$SNAPSHOT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$SNAPSHOT_TAG" "$SNAPSHOT_APK" "$SNAPSHOT_SHA256" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$SNAPSHOT_TAG" "$SNAPSHOT_APK" "$SNAPSHOT_SHA256" --repo "$GITHUB_REPOSITORY" --target "$HEAD_SHA" --prerelease --title "$SNAPSHOT_TITLE" --notes "$notes"
+          fi
