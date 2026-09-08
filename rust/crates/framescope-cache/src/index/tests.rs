@@ -236,8 +236,7 @@ fn unverifiable_source_is_rebuilt_on_reopen() {
 fn duplicate_keyframe_pts_persist_ambiguous_seek_safety_and_truncation_recovers() {
     let path = temp_db("seek-safety");
     let bound_source = source("seek-safety");
-    let (mut index, _) =
-        FrameIndex::open_or_create(&path, bound_source.clone(), stream()).unwrap();
+    let (mut index, _) = FrameIndex::open_or_create(&path, bound_source.clone(), stream()).unwrap();
     index
         .append_batch(&[
             entry(0, 0, true, 0, 0),
@@ -279,8 +278,7 @@ fn duplicate_keyframe_pts_persist_ambiguous_seek_safety_and_truncation_recovers(
 fn legacy_timeline_contract_binding_forces_rebuild() {
     let path = temp_db("timeline-contract");
     let bound_source = source("timeline-contract");
-    let (mut index, _) =
-        FrameIndex::open_or_create(&path, bound_source.clone(), stream()).unwrap();
+    let (mut index, _) = FrameIndex::open_or_create(&path, bound_source.clone(), stream()).unwrap();
     index.append_batch(&[entry(0, 0, true, 0, 0)]).unwrap();
     index.mark_complete().unwrap();
     drop(index);
@@ -296,8 +294,7 @@ fn legacy_timeline_contract_binding_forces_rebuild() {
         .unwrap();
     drop(connection);
 
-    let (index, disposition) =
-        FrameIndex::open_or_create(&path, bound_source, stream()).unwrap();
+    let (index, disposition) = FrameIndex::open_or_create(&path, bound_source, stream()).unwrap();
     assert_eq!(
         disposition,
         FrameIndexOpenDisposition::RebuiltIncompatibleTimelineContract
