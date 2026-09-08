@@ -7,12 +7,18 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.framescope.app.data.AndroidFrameScopeRepository
 import com.framescope.app.data.AndroidRecentVideoAccessChecker
 import com.framescope.app.data.RecentVideoHistoryRepository
 import com.framescope.app.data.SharedPreferencesRecentVideoStore
+import com.framescope.app.data.VideoInspectionState
+import com.framescope.app.data.VideoUriPermissionStatus
 import com.framescope.app.platform.LocalExportTree
 import com.framescope.app.platform.LocalVideoOpenDocument
 import com.framescope.app.platform.VideoUriPermissionManager
@@ -26,6 +32,7 @@ import com.framescope.app.ui.FrameScopeScreen
 import com.framescope.app.ui.MainViewModel
 import com.framescope.app.ui.MainViewModelFactory
 import com.framescope.app.ui.MicroscopeUiState
+import com.framescope.app.ui.VideoInspectionState
 import com.framescope.app.ui.theme.FrameScopeTheme
 
 class MainActivity : ComponentActivity() {
@@ -48,7 +55,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private val viewModel: MainViewModel by viewModels {
-        MainViewModelFactory(repository, recentVideoHistory)
+        MainViewModelFactory(repository)
     }
 
     private val exportViewModel: FrameExportViewModel by viewModels {
@@ -66,6 +73,7 @@ class MainActivity : ComponentActivity() {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
                 val exportState by exportViewModel.state.collectAsStateWithLifecycle()
                 val batchExportState by batchExportViewModel.state.collectAsStateWithLifecycle()
+                var selectedSource by remember { mutableStateOf<SelectedHistorySource?>(null) }
                 val videoPicker = rememberLauncherForActivityResult(
                     contract = LocalVideoOpenDocument(),
                 ) { uri ->
@@ -73,7 +81,8 @@ class MainActivity : ComponentActivity() {
                         viewModel.onPickerCancelled()
                     } else {
                         val permissionStatus = videoUriPermissionManager.persistReadAccess(uri)
-                        viewModel.onVideoSelected(uri.toString(), permissionStatus)
+                        selectedSource = SelectedHistorySource(uri.toString(), permissionStatus)
+                        viewModel.onVideoSelected(uri.toString())
                     }
                 }
                 val exportTreePicker = rememberLauncherForActivityResult(
@@ -115,6 +124,30 @@ class MainActivity : ComponentActivity() {
                             treeUri = uri.toString(),
                             currentSessionId = ready?.session?.sessionId,
                             currentFrameId = ready?.session?.currentFrame?.frameId,
+                        )
+                    }
+                }
+
+                LaunchedEffect(state.videoState, selectedSource) {
+                    val source = selectedSource ?: return@LaunchedEffect
+                    val ready = state.videoState as? VideoInspectionState.Ready ?: return@LaunchedEffect
+                    runCatching {
+                        recentVideoHistory.recordOpened(
+                            contentUri = source.contentUri,
+                            video = ready.video,
+                            permissionStatus = source.permissionStatus,
+                        )
+                    }
+                }
+
+                LaunchedEffect(state.microscopeState, selectedSource) {
+                    val source = selectedSource ?: return@LaunchedEffect
+                    val ready = state.microscopeState as? MicroscopeUiState.Ready ?: return@LaunchedEffect
+                    runCatching {
+                        recentVideoHistory.updatePosition(
+                            contentUri = source.contentUri,
+                            frameId = ready.session.currentFrame?.frameId,
+                            timestampUs = ready.session.currentFrame?.timestampUs,
                         )
                     }
                 }
@@ -195,4 +228,9 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    private data class SelectedHistorySource(
+        val contentUri: String,
+        val permissionStatus: VideoUriPermissionStatus,
+    )
 }
