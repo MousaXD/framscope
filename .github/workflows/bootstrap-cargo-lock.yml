@@ -1,0 +1,36 @@
+name: Bootstrap Cargo lockfile
+
+on:
+  push:
+    branches:
+      - 'phase7/adversarial-media-supply-chain'
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap-lock:
+    name: bootstrap-lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: phase7/adversarial-media-supply-chain
+
+      - name: Set up Cargo 1.85.1
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal
+          rustup default 1.85.1
+
+      - name: Generate and commit lockfile
+        run: |
+          test ! -e rust/Cargo.lock
+          cargo generate-lockfile --manifest-path rust/Cargo.toml
+          git add rust/Cargo.lock
+          git diff --cached --check
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'Commit reproducible Rust lockfile'
+          git push origin HEAD:phase7/adversarial-media-supply-chain
