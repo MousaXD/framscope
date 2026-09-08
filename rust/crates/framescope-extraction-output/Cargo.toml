@@ -16,3 +16,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 framescope-core = { path = "../framescope-core" }
+serde_json.workspace = true
