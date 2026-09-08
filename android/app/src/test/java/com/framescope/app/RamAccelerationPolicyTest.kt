@@ -7,15 +7,26 @@ import org.junit.Test
 class RamAccelerationPolicyTest {
     private val normalDevice = RamAccelerationDeviceProfile(
         totalRamBytes = 8L * 1024L * RamAccelerationPolicy.MIB,
+        availableRamBytes = 4L * 1024L * RamAccelerationPolicy.MIB,
         memoryClassMb = 256,
         lowRamDevice = false,
+        systemLowMemory = false,
     )
 
     @Test
-    fun automaticRecommendationUsesTheSmallerPhysicalOrHeapLimit() {
+    fun automaticRecommendationUsesTheSmallerPhysicalHeapOrHeadroomLimit() {
         val recommended = RamAccelerationPolicy.recommendedTotalBytes(normalDevice)
 
         assertEquals(85L * RamAccelerationPolicy.MIB + 349_525L, recommended)
+    }
+
+    @Test
+    fun lowCurrentHeadroomReducesAutomaticRecommendation() {
+        val recommended = RamAccelerationPolicy.recommendedTotalBytes(
+            normalDevice.copy(availableRamBytes = 128L * RamAccelerationPolicy.MIB),
+        )
+
+        assertEquals(16L * RamAccelerationPolicy.MIB, recommended)
     }
 
     @Test
@@ -23,8 +34,10 @@ class RamAccelerationPolicyTest {
         val recommended = RamAccelerationPolicy.recommendedTotalBytes(
             RamAccelerationDeviceProfile(
                 totalRamBytes = 3L * 1024L * RamAccelerationPolicy.MIB,
+                availableRamBytes = 1L * 1024L * RamAccelerationPolicy.MIB,
                 memoryClassMb = 256,
                 lowRamDevice = true,
+                systemLowMemory = false,
             ),
         )
 
@@ -75,5 +88,18 @@ class RamAccelerationPolicyTest {
 
         assertEquals(normal.totalBytes / 2L, pressured.totalBytes)
         assertTrue(pressured.pressureReduced)
+    }
+
+    @Test
+    fun systemLowMemoryAtStartupAlsoActivatesPressureReduction() {
+        val budget = RamAccelerationPolicy.resolve(
+            mode = RamAccelerationMode.Custom,
+            profile = normalDevice.copy(systemLowMemory = true),
+            customTotalMiB = 128,
+            underMemoryPressure = false,
+        )
+
+        assertEquals(64L * RamAccelerationPolicy.MIB, budget.totalBytes)
+        assertTrue(budget.pressureReduced)
     }
 }
