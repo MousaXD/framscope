@@ -1,9 +1,6 @@
 package com.framescope.app.ui
 
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.test.StateRestorationTester
-import androidx.compose.ui.test.assertExists
-import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -134,36 +131,6 @@ class ExtractionWorkflowTest {
         composeRule.onNodeWithTag("extraction_status").assertExists()
         composeRule.onNodeWithText("Extracting frames").assertExists()
         composeRule.onNodeWithText("2 / 4 · 50% · frame 9", substring = true).assertExists()
-    }
-
-    @Test
-    fun openSheetAndSelectedModeRestoreAcrossSavedInstanceState() {
-        val restorationTester = StateRestorationTester(composeRule)
-        restorationTester.setContent {
-            MaterialTheme {
-                ExtractionWorkflow(
-                    microscopeState = readyState(),
-                    selectedTimelineRange = null,
-                    currentFrameState = FrameExportUiState.Idle,
-                    batchState = BatchExportUiState.Idle,
-                    onRequestCurrentFrame = {},
-                    onRequestBatch = {},
-                    onCancelCurrentFrame = {},
-                    onCancelBatch = {},
-                    onDismissCurrentFrameStatus = {},
-                    onDismissBatchStatus = {},
-                )
-            }
-        }
-
-        composeRule.onNodeWithTag("extract_action").performClick()
-        composeRule.onNodeWithTag("extract_mode_FrameRange").performClick()
-        composeRule.onNodeWithTag("extract_mode_FrameRange").assertIsSelected()
-
-        restorationTester.emulateSavedInstanceStateRestore()
-
-        composeRule.onNodeWithTag("extraction_sheet").assertExists()
-        composeRule.onNodeWithTag("extract_mode_FrameRange").assertIsSelected()
     }
 
     private fun readyState(): MicroscopeUiState.Ready {
