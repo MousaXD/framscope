@@ -11,9 +11,12 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 framescope-cache = { path = "../framescope-cache" }
 framescope-core = { path = "../framescope-core" }
+framescope-extraction = { path = "../framescope-extraction" }
 framescope-extraction-image = { path = "../framescope-extraction-image" }
+framescope-extraction-output = { path = "../framescope-extraction-output" }
 framescope-video = { path = "../framescope-video" }
 jni.workspace = true
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
