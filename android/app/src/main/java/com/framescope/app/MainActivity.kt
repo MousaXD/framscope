@@ -10,8 +10,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.framescope.app.data.AndroidFrameScopeRepository
+import com.framescope.app.data.AndroidRecentVideoAccessChecker
+import com.framescope.app.data.RecentVideoHistoryRepository
+import com.framescope.app.data.SharedPreferencesRecentVideoStore
 import com.framescope.app.platform.LocalExportTree
 import com.framescope.app.platform.LocalVideoOpenDocument
+import com.framescope.app.platform.VideoUriPermissionManager
 import com.framescope.app.ui.BatchExportOverlay
 import com.framescope.app.ui.BatchExportViewModel
 import com.framescope.app.ui.BatchExportViewModelFactory
@@ -32,8 +36,19 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private val recentVideoHistory by lazy {
+        RecentVideoHistoryRepository(
+            store = SharedPreferencesRecentVideoStore(applicationContext),
+            accessChecker = AndroidRecentVideoAccessChecker(applicationContext.contentResolver),
+        )
+    }
+
+    private val videoUriPermissionManager by lazy {
+        VideoUriPermissionManager(applicationContext.contentResolver)
+    }
+
     private val viewModel: MainViewModel by viewModels {
-        MainViewModelFactory(repository)
+        MainViewModelFactory(repository, recentVideoHistory)
     }
 
     private val exportViewModel: FrameExportViewModel by viewModels {
@@ -57,7 +72,8 @@ class MainActivity : ComponentActivity() {
                     if (uri == null) {
                         viewModel.onPickerCancelled()
                     } else {
-                        viewModel.onVideoSelected(uri.toString())
+                        val permissionStatus = videoUriPermissionManager.persistReadAccess(uri)
+                        viewModel.onVideoSelected(uri.toString(), permissionStatus)
                     }
                 }
                 val exportTreePicker = rememberLauncherForActivityResult(
