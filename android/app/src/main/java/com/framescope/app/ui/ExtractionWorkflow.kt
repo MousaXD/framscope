@@ -7,7 +7,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -156,6 +158,7 @@ private fun ExtractionSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
@@ -197,14 +200,23 @@ private fun ExtractionSheet(
                 selected = mode,
                 onSelected = { modeName = it.name },
             )
-            ModeRow(
-                first = ExtractionMode.AllFrames,
-                firstLabel = "All frames",
-                second = ExtractionMode.UniqueGroups,
-                secondLabel = "Unique groups",
-                selected = mode,
-                onSelected = { modeName = it.name },
-            )
+            if (selectedTimelineRange != null) {
+                ModeRow(
+                    first = ExtractionMode.AllFrames,
+                    firstLabel = "All frames",
+                    second = ExtractionMode.UniqueGroups,
+                    secondLabel = "Unique groups",
+                    selected = mode,
+                    onSelected = { modeName = it.name },
+                )
+            } else {
+                SingleModeChip(
+                    mode = ExtractionMode.UniqueGroups,
+                    label = "Unique groups",
+                    selected = mode,
+                    onSelected = { modeName = it.name },
+                )
+            }
 
             when (mode) {
                 ExtractionMode.SelectedTimeline -> selectedTimelineRange?.let { range ->
@@ -362,6 +374,23 @@ private fun ModeRow(
 }
 
 @Composable
+private fun SingleModeChip(
+    mode: ExtractionMode,
+    label: String,
+    selected: ExtractionMode,
+    onSelected: (ExtractionMode) -> Unit,
+) {
+    FilterChip(
+        selected = selected == mode,
+        onClick = { onSelected(mode) },
+        label = { Text(label) },
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("extract_mode_${mode.name}"),
+    )
+}
+
+@Composable
 private fun FormatChip(
     label: String,
     value: FrameExportFormat,
@@ -428,12 +457,16 @@ private fun CurrentFrameStatus(
             detail = "Pick a folder for frame ${state.request.frameId + 1}.",
             onCancel = onCancel,
         )
-        is FrameExportUiState.Exporting -> ExtractionStatusCard(
-            title = "Exporting current frame",
-            detail = "Frame ${state.request.frameId + 1} · ${formatLabel(state.request.format)}",
-            indeterminate = true,
-            onCancel = onCancel,
-        )
+        is FrameExportUiState.Exporting -> {
+            val elapsedMs = rememberElapsedMillis(state.request)
+            ExtractionStatusCard(
+                title = "Exporting current frame",
+                detail = "Frame ${state.request.frameId + 1} · ${formatLabel(state.request.format)} · " +
+                    "${formatElapsed(elapsedMs)} elapsed",
+                indeterminate = true,
+                onCancel = onCancel,
+            )
+        }
         is FrameExportUiState.Success -> ExtractionStatusCard(
             title = "Extraction complete",
             detail = buildString {
@@ -505,7 +538,7 @@ private fun BatchStatus(
 @Composable
 private fun rememberElapsedMillis(key: Any): Long {
     val startedAt = remember(key) { SystemClock.elapsedRealtime() }
-    val elapsed by produceState(initialValue = 0L, key) {
+    val elapsed by produceState(initialValue = 0L, key1 = key) {
         while (true) {
             value = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
             delay(500L)
