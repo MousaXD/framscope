@@ -71,6 +71,7 @@ fun StorageSummaryContent(
                 fontWeight = FontWeight.SemiBold,
             )
             val storage = state.storage
+            val error = state.error
             when {
                 state.loading && storage == null -> Text(
                     text = "Calculating FrameScope cache usage…",
@@ -99,8 +100,8 @@ fun StorageSummaryContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                state.error != null -> Text(
-                    text = state.error,
+                error != null -> Text(
+                    text = error,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
