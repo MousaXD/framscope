@@ -300,6 +300,9 @@ class BatchSafFrameSink(
 
     internal fun failureCause(): Throwable? = firstFailure
 
+    override fun failureCode(): String? =
+        firstFailure?.let(ExportStorageFailureClassifier::classify)?.code
+
     override fun openFrame(
         fileName: String,
         mimeType: String,
