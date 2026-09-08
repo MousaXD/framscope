@@ -8,7 +8,9 @@ use serde::Serialize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
-use crate::{ENGINE_VERSION, to_jstring};
+use crate::{
+    ENGINE_VERSION, active_microscope_sessions, storage_session_lifecycle_lock, to_jstring,
+};
 
 const MAX_CACHE_ROOT_LENGTH: usize = 4_096;
 const MAX_SOURCE_KEY_LENGTH: usize = 256;
@@ -90,6 +92,22 @@ fn from_admin_error(error: StorageAdminError) -> StorageResponse {
     }
 }
 
+fn lifecycle_unavailable() -> StorageResponse {
+    StorageResponse::Error {
+        engine: ENGINE_VERSION,
+        code: "storage_busy",
+        message: "FrameScope storage/session lifecycle state is unavailable".into(),
+    }
+}
+
+fn active_session_error() -> StorageResponse {
+    StorageResponse::Error {
+        engine: ENGINE_VERSION,
+        code: "active_session",
+        message: "Close the current video before clearing FrameScope index or cache data".into(),
+    }
+}
+
 fn stats_response(cache_root: &str) -> String {
     let response = match admin(cache_root) {
         Ok(admin) => match admin.stats() {
@@ -103,6 +121,17 @@ fn stats_response(cache_root: &str) -> String {
         Err(response) => response,
     };
     serialize_response(response)
+}
+
+fn with_destructive_access(operation: impl FnOnce() -> StorageResponse) -> StorageResponse {
+    let _lifecycle = match storage_session_lifecycle_lock() {
+        Ok(guard) => guard,
+        Err(()) => return lifecycle_unavailable(),
+    };
+    if active_microscope_sessions() > 0 {
+        return active_session_error();
+    }
+    operation()
 }
 
 fn clear_response(cache_root: &str, scope_code: i32) -> String {
@@ -119,7 +148,7 @@ fn clear_response(cache_root: &str, scope_code: i32) -> String {
             });
         }
     };
-    let response = match admin(cache_root) {
+    let response = with_destructive_access(|| match admin(cache_root) {
         Ok(admin) => match admin.clear(scope) {
             Ok(report) => match admin.stats() {
                 Ok(storage) => StorageResponse::Ok {
@@ -132,7 +161,7 @@ fn clear_response(cache_root: &str, scope_code: i32) -> String {
             Err(error) => from_admin_error(error),
         },
         Err(response) => response,
-    };
+    });
     serialize_response(response)
 }
 
@@ -144,7 +173,7 @@ fn clear_source_response(cache_root: &str, source_key: &str) -> String {
             message: "frame-index source key is invalid".into(),
         });
     }
-    let response = match admin(cache_root) {
+    let response = with_destructive_access(|| match admin(cache_root) {
         Ok(admin) => match admin.clear_source_indexes(source_key) {
             Ok(report) => match admin.stats() {
                 Ok(storage) => StorageResponse::Ok {
@@ -160,7 +189,7 @@ fn clear_source_response(cache_root: &str, source_key: &str) -> String {
             Err(error) => from_admin_error(error),
         },
         Err(response) => response,
-    };
+    });
     serialize_response(response)
 }
 
@@ -259,5 +288,14 @@ mod tests {
     fn traversal_source_key_is_rejected() {
         let json = clear_source_response("/tmp/framescope-storage-ffi", "../outside");
         assert!(json.contains("invalid_source_key"));
+    }
+
+    #[test]
+    fn destructive_access_rejects_active_native_session() {
+        ACTIVE_MICROSCOPE_SESSIONS.fetch_add(1, Ordering::AcqRel);
+        let response = with_destructive_access(|| panic!("clear must not run while active"));
+        ACTIVE_MICROSCOPE_SESSIONS.fetch_sub(1, Ordering::AcqRel);
+        let json = serialize_response(response);
+        assert!(json.contains("active_session"));
     }
 }
