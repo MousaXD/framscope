@@ -78,7 +78,9 @@ impl ScrubPreviewCache {
         }
 
         if let Some(previous) = self.entries.remove(&frame_id) {
-            self.resident_bytes = self.resident_bytes.saturating_sub(previous.pixels.byte_len());
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(previous.pixels.byte_len());
         }
 
         while !self.entries.is_empty()
@@ -94,7 +96,9 @@ impl ScrubPreviewCache {
                 break;
             };
             if let Some(evicted) = self.entries.remove(&lru) {
-                self.resident_bytes = self.resident_bytes.saturating_sub(evicted.pixels.byte_len());
+                self.resident_bytes = self
+                    .resident_bytes
+                    .saturating_sub(evicted.pixels.byte_len());
                 self.evictions = self.evictions.saturating_add(1);
             }
         }
