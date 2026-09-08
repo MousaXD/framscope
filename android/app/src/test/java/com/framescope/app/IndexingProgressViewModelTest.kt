@@ -98,7 +98,7 @@ class IndexingProgressViewModelTest {
             awaitCancellation()
         }
 
-        override suspend fun closeMicroscope(): Result<Unit> = Result.success(Unit)
+        override suspend fun closeMicroscope(): Boolean = true
     }
 
     companion object {
