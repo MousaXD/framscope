@@ -58,14 +58,20 @@ private sealed interface MicroscopePreviewState {
 @Composable
 internal fun MicroscopePanel(
     state: MicroscopeUiState,
+    timelineBounds: IndexedTimelineBounds?,
+    rangeSelection: TimelineRangeSelection?,
     onStep: (Int) -> Unit,
     onJumpFrame: (Long) -> Unit,
     onJumpTimestampUs: (Long) -> Unit,
+    onCommitRange: (Long, Long) -> Unit,
+    onClearRange: () -> Unit,
     onDismissError: () -> Unit,
 ) {
     when (state) {
         MicroscopeUiState.Idle -> Unit
-        MicroscopeUiState.Opening -> MicroscopeBusyCard("Building frame index…")
+        MicroscopeUiState.Opening -> MicroscopeBusyCard(
+            "Indexing presentation timestamps in Rust… Exact timeline navigation unlocks when the complete index is ready.",
+        )
         is MicroscopeUiState.LoadingFrame -> MicroscopeBusyCard("Decoding source-quality frame…")
         is MicroscopeUiState.Navigating -> {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -73,22 +79,30 @@ internal fun MicroscopePanel(
                     MicroscopeFrameCard(
                         session = state.session,
                         frame = frame,
+                        timelineBounds = timelineBounds,
+                        rangeSelection = rangeSelection,
                         controlsEnabled = false,
                         onStep = onStep,
                         onJumpFrame = onJumpFrame,
                         onJumpTimestampUs = onJumpTimestampUs,
+                        onCommitRange = onCommitRange,
+                        onClearRange = onClearRange,
                     )
                 }
-                MicroscopeBusyCard("Navigating indexed timeline…")
+                MicroscopeBusyCard("Resolving the requested indexed frame…")
             }
         }
         is MicroscopeUiState.Ready -> MicroscopeFrameCard(
             session = state.session,
             frame = state.frame,
+            timelineBounds = timelineBounds,
+            rangeSelection = rangeSelection,
             controlsEnabled = true,
             onStep = onStep,
             onJumpFrame = onJumpFrame,
             onJumpTimestampUs = onJumpTimestampUs,
+            onCommitRange = onCommitRange,
+            onClearRange = onClearRange,
         )
         is MicroscopeUiState.Empty -> MicroscopeStatusCard(
             "The selected video has no indexed presentation frames.",
@@ -105,10 +119,14 @@ internal fun MicroscopePanel(
 private fun MicroscopeFrameCard(
     session: MicroscopeSessionSnapshot,
     frame: MicroscopeFrame,
+    timelineBounds: IndexedTimelineBounds?,
+    rangeSelection: TimelineRangeSelection?,
     controlsEnabled: Boolean,
     onStep: (Int) -> Unit,
     onJumpFrame: (Long) -> Unit,
     onJumpTimestampUs: (Long) -> Unit,
+    onCommitRange: (Long, Long) -> Unit,
+    onClearRange: () -> Unit,
 ) {
     val descriptor = frame.descriptor
     val preview by key(frame) {
@@ -198,8 +216,13 @@ private fun MicroscopeFrameCard(
 
             MicroscopeTimelineControls(
                 session = session,
+                timelineBounds = timelineBounds,
+                rangeSelection = rangeSelection,
                 enabled = controlsEnabled,
                 onJumpFrame = onJumpFrame,
+                onJumpTimestampUs = onJumpTimestampUs,
+                onCommitRange = onCommitRange,
+                onClearRange = onClearRange,
             )
 
             Row(
@@ -211,14 +234,14 @@ private fun MicroscopeFrameCard(
                     enabled = controlsEnabled && session.canStepPrevious,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Previous")
+                    Text("Previous frame")
                 }
                 Button(
                     onClick = { onStep(1) },
                     enabled = controlsEnabled && session.canStepNext,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Next")
+                    Text("Next frame")
                 }
             }
 
