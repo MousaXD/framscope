@@ -8,8 +8,8 @@
 
 use framescope_cache::{FrameIndex, FrameIndexEntry, OwnedRgbaFrame};
 use framescope_extraction::{
-    ExtractionPlan, ExtractionPlanError, ExtractionRequest, ExtractionSampling, ExtractionSelection,
-    ExtractionProgress, plan_extraction,
+    ExtractionPlan, ExtractionPlanError, ExtractionProgress, ExtractionRequest,
+    ExtractionSelection, plan_extraction,
 };
 use framescope_extraction_image::{EncodedImageReport, ExtractionImageFormat, frame_file_name};
 use framescope_extraction_manifest::{
@@ -43,10 +43,7 @@ pub struct FrameOutput<'a> {
 pub trait FrameOutputSink {
     type Error: Error + 'static;
 
-    fn write_frame(
-        &mut self,
-        output: FrameOutput<'_>,
-    ) -> Result<EncodedImageReport, Self::Error>;
+    fn write_frame(&mut self, output: FrameOutput<'_>) -> Result<EncodedImageReport, Self::Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,11 +450,19 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.committed_frames, 3);
-        assert_eq!(report.encoded_bytes, report.batch.selected_frames * sink.outputs[0].1.len() as u64);
+        let expected_bytes: u64 = sink
+            .outputs
+            .iter()
+            .map(|(_, bytes)| bytes.len() as u64)
+            .sum();
+        assert_eq!(report.encoded_bytes, expected_bytes);
         assert_eq!(counters.opens.get(), 1);
         assert_eq!(counters.nexts.get(), 5);
         assert_eq!(
-            sink.outputs.iter().map(|output| output.0.as_str()).collect::<Vec<_>>(),
+            sink.outputs
+                .iter()
+                .map(|output| output.0.as_str())
+                .collect::<Vec<_>>(),
             vec![
                 "frame_00000000000000000000.png",
                 "frame_00000000000000000002.png",
@@ -510,7 +515,10 @@ mod tests {
             &mut manifest,
         );
 
-        assert!(matches!(result, Err(StreamingExtractionError::Output(SinkError::Forced))));
+        assert!(matches!(
+            result,
+            Err(StreamingExtractionError::Output(SinkError::Forced))
+        ));
         assert_eq!(committed.get(), 1);
         assert_eq!(sink.outputs.len(), 1);
         let text = String::from_utf8(manifest).unwrap();
@@ -602,7 +610,10 @@ mod tests {
             &mut manifest,
         );
 
-        assert!(matches!(result, Err(StreamingExtractionError::SinkContract(_))));
+        assert!(matches!(
+            result,
+            Err(StreamingExtractionError::SinkContract(_))
+        ));
         let text = String::from_utf8(manifest).unwrap();
         let terminal: serde_json::Value =
             serde_json::from_str(text.lines().last().unwrap()).unwrap();
