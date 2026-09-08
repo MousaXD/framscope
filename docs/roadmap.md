@@ -44,21 +44,34 @@ Performance acceptance is structural rather than a device-specific latency promi
 
 ## Phase 6: Frame extraction
 
-**Next phase.**
+**Complete.**
 
-- Current-frame export.
-- Selected frame/time-range export.
+Accepted capabilities:
+
+- Current-frame source-quality export.
+- Inclusive persistent FrameId-range export.
+- Inclusive indexed timestamp-range export.
 - All-frame export.
-- Interval sampling.
-- Unique/group-representative export.
-- PNG/JPEG/WebP output.
-- Streaming output, cancellation, progress, manifest, and storage-space/error handling.
+- Exact every-N sampling for ordinary batch selections.
+- One source-quality representative per validated similarity group.
+- PNG, JPEG, and lossless WebP output.
+- Streaming forward decode and bounded per-frame encoding.
+- Android SAF destinations with isolated rollback-safe batch workspaces.
+- Append-only JSONL manifests.
+- Per-frame progress and cooperative cancellation.
+- Stale-session/coroutine revalidation before destination commit.
+- Transactional storage/provider failure handling without inventing successful artifacts.
+- Canonical Rust, FFmpeg, Android, native arm64, APK packaging, Phase 3, and Phase 4 gates passing on the final functional integration path.
+
+See `docs/phase6-acceptance.md` for the full extraction invariants and deferred production-hardening work.
 
 ## Phase 7: Production hardening and releases
 
-- Device/codec compatibility review.
-- Performance and memory profiling.
-- Malformed-media and low-storage hardening.
+**Next phase.**
+
+- Physical-device and codec/document-provider compatibility review.
+- Performance and peak-memory profiling on representative hardware and large media.
+- Malformed-media and adversarial low-storage/provider-failure hardening.
 - Dependency/security/license review.
 - Accessibility and UI polish.
 - Reproducible release build/signing path where credentials are available.
