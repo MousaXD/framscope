@@ -42,8 +42,21 @@ jobs:
           rustup toolchain install "$RUST_HOST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_HOST_TOOLCHAIN"
 
-      - name: Verify Cargo.lock is synchronized
+      - name: Verify Cargo.lock is committed and synchronized
         run: |
+          if ! git ls-files --error-unmatch rust/Cargo.lock >/dev/null 2>&1; then
+            cargo generate-lockfile --manifest-path rust/Cargo.toml
+            python3 - <<'PY'
+          import base64
+          import gzip
+          from pathlib import Path
+
+          payload = gzip.compress(Path("rust/Cargo.lock").read_bytes(), mtime=0)
+          print("FRAMESCOPE_CARGO_LOCK_GZIP_BASE64=" + base64.b64encode(payload).decode("ascii"))
+          PY
+            echo "error: rust/Cargo.lock is not committed; commit the emitted Cargo 1.85.1 candidate" >&2
+            exit 1
+          fi
           cargo metadata --format-version 1 --manifest-path rust/Cargo.toml >/dev/null
           git diff -- rust/Cargo.lock
           git diff --exit-code -- rust/Cargo.lock
