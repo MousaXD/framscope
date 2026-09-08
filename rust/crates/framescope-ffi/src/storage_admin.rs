@@ -271,6 +271,7 @@ pub extern "system" fn Java_com_framescope_app_data_FrameScopeStorageBridge_nati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn invalid_scope_fails_closed() {
@@ -292,9 +293,9 @@ mod tests {
 
     #[test]
     fn destructive_access_rejects_active_native_session() {
-        ACTIVE_MICROSCOPE_SESSIONS.fetch_add(1, Ordering::AcqRel);
+        crate::ACTIVE_MICROSCOPE_SESSIONS.fetch_add(1, Ordering::AcqRel);
         let response = with_destructive_access(|| panic!("clear must not run while active"));
-        ACTIVE_MICROSCOPE_SESSIONS.fetch_sub(1, Ordering::AcqRel);
+        crate::ACTIVE_MICROSCOPE_SESSIONS.fetch_sub(1, Ordering::AcqRel);
         let json = serialize_response(response);
         assert!(json.contains("active_session"));
     }
