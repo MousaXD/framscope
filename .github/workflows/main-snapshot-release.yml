@@ -1,0 +1,84 @@
+name: Main snapshot release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: main-snapshot-release-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish-main-snapshot:
+    name: publish-main-snapshot
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      ARTIFACT_NAME: framescope-debug-${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Download verified main APK artifact
+        run: |
+          set -euo pipefail
+          mkdir -p build/main-snapshot
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$ARTIFACT_NAME" \
+            --dir build/main-snapshot
+
+          count="$(find build/main-snapshot -type f -name '*.apk' | wc -l | tr -d ' ')"
+          test "$count" = "1" || {
+            echo "error: expected exactly one APK in $ARTIFACT_NAME, found $count" >&2
+            exit 1
+          }
+
+          apk="$(find build/main-snapshot -type f -name '*.apk' -print -quit)"
+          short_sha="${HEAD_SHA:0:12}"
+          staged="build/FrameScope-main-${short_sha}-arm64-v8a-debug.apk"
+          cp "$apk" "$staged"
+          sha256sum "$staged" > "$staged.sha256"
+
+          echo "SNAPSHOT_APK=$staged" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_SHA256=$staged.sha256" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_TAG=main-$short_sha" >> "$GITHUB_ENV"
+          echo "SNAPSHOT_TITLE=FrameScope main $short_sha" >> "$GITHUB_ENV"
+
+      - name: Publish immutable main snapshot pre-release
+        run: |
+          set -euo pipefail
+          notes="Automated installable debug snapshot from main commit $HEAD_SHA.
+
+This snapshot was published only after the canonical CI workflow completed successfully for the same commit. It is intended for testing and is not the signed, physically certified production release. Production v* releases remain protected by the Phase 7 physical-device and signing gates."
+
+          if gh release view "$SNAPSHOT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$SNAPSHOT_TAG" \
+              "$SNAPSHOT_APK" \
+              "$SNAPSHOT_SHA256" \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$SNAPSHOT_TAG" \
+              "$SNAPSHOT_APK" \
+              "$SNAPSHOT_SHA256" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$HEAD_SHA" \
+              --prerelease \
+              --title "$SNAPSHOT_TITLE" \
+              --notes "$notes"
+          fi
