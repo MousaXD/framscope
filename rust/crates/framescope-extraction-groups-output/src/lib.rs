@@ -331,13 +331,7 @@ mod tests {
             committed: Vec::new(),
         };
 
-        write_representative(
-            frame,
-            ExtractionImageFormat::Png,
-            &mut sink,
-            &mut manifest,
-        )
-        .unwrap();
+        write_representative(frame, ExtractionImageFormat::Png, &mut sink, &mut manifest).unwrap();
         assert_eq!(sink.committed.len(), 1);
         assert_eq!(sink.committed[0].0, FrameId(7));
         assert_eq!(sink.committed[0].1, "frame_00000000000000000007.png");
