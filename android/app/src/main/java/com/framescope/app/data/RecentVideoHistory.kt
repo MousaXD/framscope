@@ -303,7 +303,7 @@ class RecentVideoHistoryRepository(
     }
 
     private fun requireContentUri(contentUri: String) {
-        require(Uri.parse(contentUri).scheme == ContentResolver.SCHEME_CONTENT) {
+        require(isContentUri(contentUri)) {
             "Recent-video history accepts only content:// URIs."
         }
     }
@@ -384,7 +384,7 @@ internal object RecentVideoJsonCodec {
     private fun decodeRecord(json: JSONObject): RecentVideoRecord? = runCatching {
         val id = json.getString("id").takeIf { it.isNotBlank() } ?: return@runCatching null
         val contentUri = json.getString("contentUri")
-        if (Uri.parse(contentUri).scheme != ContentResolver.SCHEME_CONTENT) return@runCatching null
+        if (!isContentUri(contentUri)) return@runCatching null
         val displayName = json.getString("displayName").takeIf { it.isNotBlank() } ?: "Selected video"
         RecentVideoRecord(
             id = id,
@@ -430,3 +430,6 @@ internal object RecentVideoJsonCodec {
     private fun JSONObject.optNullableString(name: String): String? =
         if (!has(name) || isNull(name)) null else getString(name)
 }
+
+private fun isContentUri(value: String): Boolean =
+    value.startsWith("content://") && value.length > "content://".length
