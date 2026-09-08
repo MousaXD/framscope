@@ -1,0 +1,1037 @@
+name: Agent 5 similarity correctness patch
+
+on:
+  push:
+    branches:
+      - perf/similarity-correctness
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    if: ${{ !contains(github.event.head_commit.message, '[agent5-patch]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout implementation branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: perf/similarity-correctness
+          fetch-depth: 0
+
+      - name: Apply audited similarity remediation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
+              actual = text.count(old)
+              if actual != count:
+                  raise SystemExit(f"{path}: expected {count} occurrences, found {actual}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, count))
+
+          # framescope-perceptual: replace luma-only final confirmation with deterministic RGB
+          # confirmation while preserving the production dHash gate. Add a diagnostic path that
+          # runs confirmation for hash rejects so the false-negative mode is measurable without
+          # silently changing production recall policy.
+          p = Path('rust/crates/framescope-perceptual/src/lib.rs')
+          text = p.read_text()
+          text = text.replace(
+              'use framescope_similarity::{SimilarityEngine, SimilarityError, SimilarityMode, SimilarityScore};',
+              'use framescope_similarity::{SIMILARITY_SCALE, SimilarityError, SimilarityScore};'
+          )
+          text = text.replace(
+              'pub const DHASH_BITS: u32 = 64;\n',
+              'pub const DHASH_BITS: u32 = 64;\n/// Persisted derived-group semantics generation for the hybrid metric.\n///\n/// Bump this whenever hash sampling, confirmation color semantics, or score normalization changes.\npub const HYBRID_SIMILARITY_ALGORITHM_VERSION: u32 = 2;\n'
+          )
+          old = '''/// Two-stage policy: dHash may reject obvious differences cheaply, but only the full visible-pixel
+/// luma metric is allowed to accept a pair as similar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridSimilarityPolicy {
+    pub max_hash_distance: u8,
+    pub minimum_luma_similarity: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HybridDecision {
+    RejectedByHash {
+        perceptual: PerceptualScore,
+    },
+    RejectedByLuma {
+        perceptual: PerceptualScore,
+        luma: SimilarityScore,
+    },
+    Accepted {
+        perceptual: PerceptualScore,
+        luma: SimilarityScore,
+    },
+}
+
+impl HybridDecision {
+    pub fn accepted(self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+}
+'''
+          new = '''/// Two-stage policy: dHash may reject obvious differences cheaply, but only the full visible-pixel
+/// color confirmation is allowed to accept a pair as similar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridSimilarityPolicy {
+    pub max_hash_distance: u8,
+    /// Minimum deterministic RGB confirmation score on the 0..=10_000 scale.
+    ///
+    /// The field name is retained for source compatibility with the Phase 4 API. Persisted hybrid
+    /// results are separately fenced by `HYBRID_SIMILARITY_ALGORITHM_VERSION`.
+    pub minimum_luma_similarity: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HybridDecision {
+    RejectedByHash {
+        perceptual: PerceptualScore,
+    },
+    RejectedByConfirmation {
+        perceptual: PerceptualScore,
+        confirmation: SimilarityScore,
+    },
+    Accepted {
+        perceptual: PerceptualScore,
+        confirmation: SimilarityScore,
+    },
+}
+
+impl HybridDecision {
+    pub fn accepted(self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+}
+
+/// Diagnostic result that intentionally runs the stronger confirmation even when the production
+/// dHash gate rejects the pair. This is for corpus/benchmark measurement, not a second production
+/// acceptance path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridAnalysis {
+    pub decision: HybridDecision,
+    pub confirmation: SimilarityScore,
+    pub hash_rejected_but_confirmation_accepted: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SimilarityQualityCounters {
+    pub compared_pairs: u64,
+    pub true_positive: u64,
+    pub false_positive: u64,
+    pub true_negative: u64,
+    pub false_negative: u64,
+    pub rejected_by_hash: u64,
+    pub hash_reject_confirmation_accepts: u64,
+}
+
+impl SimilarityQualityCounters {
+    pub fn record(&mut self, expected_similar: bool, analysis: HybridAnalysis) {
+        self.compared_pairs = self.compared_pairs.saturating_add(1);
+        let accepted = analysis.decision.accepted();
+        match (expected_similar, accepted) {
+            (true, true) => self.true_positive = self.true_positive.saturating_add(1),
+            (false, true) => self.false_positive = self.false_positive.saturating_add(1),
+            (false, false) => self.true_negative = self.true_negative.saturating_add(1),
+            (true, false) => self.false_negative = self.false_negative.saturating_add(1),
+        }
+        if matches!(analysis.decision, HybridDecision::RejectedByHash { .. }) {
+            self.rejected_by_hash = self.rejected_by_hash.saturating_add(1);
+        }
+        if analysis.hash_rejected_but_confirmation_accepted {
+            self.hash_reject_confirmation_accepts =
+                self.hash_reject_confirmation_accepts.saturating_add(1);
+        }
+    }
+
+    pub fn precision_basis_points(self) -> Option<u16> {
+        ratio_basis_points(self.true_positive, self.true_positive + self.false_positive)
+    }
+
+    pub fn recall_basis_points(self) -> Option<u16> {
+        ratio_basis_points(self.true_positive, self.true_positive + self.false_negative)
+    }
+
+    pub fn f1_basis_points(self) -> Option<u16> {
+        let denominator = self
+            .true_positive
+            .saturating_mul(2)
+            .saturating_add(self.false_positive)
+            .saturating_add(self.false_negative);
+        ratio_basis_points(self.true_positive.saturating_mul(2), denominator)
+    }
+}
+'''
+          if old not in text:
+              raise SystemExit('perceptual decision block drifted')
+          text = text.replace(old, new, 1)
+
+          old = '''#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridSimilarityEngine {
+    policy: HybridSimilarityPolicy,
+    confirmation: SimilarityEngine,
+}
+
+impl HybridSimilarityEngine {
+    pub fn new(policy: HybridSimilarityPolicy) -> Result<Self, HybridSimilarityError> {
+        if u32::from(policy.max_hash_distance) > DHASH_BITS {
+            return Err(HybridSimilarityError::InvalidHashDistance(
+                policy.max_hash_distance,
+            ));
+        }
+        let confirmation = SimilarityEngine::new(SimilarityMode::LumaMeanAbsolute {
+            minimum_similarity: policy.minimum_luma_similarity,
+        })?;
+        Ok(Self {
+            policy,
+            confirmation,
+        })
+    }
+
+    pub fn policy(&self) -> HybridSimilarityPolicy {
+        self.policy
+    }
+
+    pub fn compare(
+        &self,
+        left: &OwnedRgbaFrame,
+        right: &OwnedRgbaFrame,
+    ) -> Result<HybridDecision, HybridSimilarityError> {
+        if (left.width, left.height) != (right.width, right.height) {
+            return Err(SimilarityError::DimensionMismatch {
+                left: (left.width, left.height),
+                right: (right.width, right.height),
+            }
+            .into());
+        }
+
+        let perceptual = DHashEngine::compare(left, right);
+        if perceptual.hamming_distance > self.policy.max_hash_distance {
+            return Ok(HybridDecision::RejectedByHash { perceptual });
+        }
+
+        let luma = self.confirmation.compare(left, right)?;
+        if self.confirmation.accepts(luma) {
+            Ok(HybridDecision::Accepted { perceptual, luma })
+        } else {
+            Ok(HybridDecision::RejectedByLuma { perceptual, luma })
+        }
+    }
+}
+'''
+          new = '''#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridSimilarityEngine {
+    policy: HybridSimilarityPolicy,
+}
+
+impl HybridSimilarityEngine {
+    pub fn new(policy: HybridSimilarityPolicy) -> Result<Self, HybridSimilarityError> {
+        if u32::from(policy.max_hash_distance) > DHASH_BITS {
+            return Err(HybridSimilarityError::InvalidHashDistance(
+                policy.max_hash_distance,
+            ));
+        }
+        if policy.minimum_luma_similarity > SIMILARITY_SCALE {
+            return Err(SimilarityError::InvalidThreshold(policy.minimum_luma_similarity).into());
+        }
+        Ok(Self { policy })
+    }
+
+    pub fn policy(&self) -> HybridSimilarityPolicy {
+        self.policy
+    }
+
+    pub fn compare(
+        &self,
+        left: &OwnedRgbaFrame,
+        right: &OwnedRgbaFrame,
+    ) -> Result<HybridDecision, HybridSimilarityError> {
+        validate_dimensions(left, right)?;
+        let perceptual = DHashEngine::compare(left, right);
+        if perceptual.hamming_distance > self.policy.max_hash_distance {
+            return Ok(HybridDecision::RejectedByHash { perceptual });
+        }
+
+        let confirmation = rgb_mean_absolute_similarity(left, right)?;
+        if confirmation.basis_points >= self.policy.minimum_luma_similarity {
+            Ok(HybridDecision::Accepted {
+                perceptual,
+                confirmation,
+            })
+        } else {
+            Ok(HybridDecision::RejectedByConfirmation {
+                perceptual,
+                confirmation,
+            })
+        }
+    }
+
+    /// Run full confirmation even for a dHash reject so corpus/benchmark code can quantify the
+    /// hard-gate recall cost without changing the production decision.
+    pub fn analyze(
+        &self,
+        left: &OwnedRgbaFrame,
+        right: &OwnedRgbaFrame,
+    ) -> Result<HybridAnalysis, HybridSimilarityError> {
+        validate_dimensions(left, right)?;
+        let perceptual = DHashEngine::compare(left, right);
+        let confirmation = rgb_mean_absolute_similarity(left, right)?;
+        let confirmation_accepted = confirmation.basis_points >= self.policy.minimum_luma_similarity;
+        let decision = if perceptual.hamming_distance > self.policy.max_hash_distance {
+            HybridDecision::RejectedByHash { perceptual }
+        } else if confirmation_accepted {
+            HybridDecision::Accepted {
+                perceptual,
+                confirmation,
+            }
+        } else {
+            HybridDecision::RejectedByConfirmation {
+                perceptual,
+                confirmation,
+            }
+        };
+        Ok(HybridAnalysis {
+            decision,
+            confirmation,
+            hash_rejected_but_confirmation_accepted: matches!(
+                decision,
+                HybridDecision::RejectedByHash { .. }
+            ) && confirmation_accepted,
+        })
+    }
+}
+
+fn validate_dimensions(
+    left: &OwnedRgbaFrame,
+    right: &OwnedRgbaFrame,
+) -> Result<(), SimilarityError> {
+    if (left.width, left.height) != (right.width, right.height) {
+        return Err(SimilarityError::DimensionMismatch {
+            left: (left.width, left.height),
+            right: (right.width, right.height),
+        });
+    }
+    Ok(())
+}
+
+fn rgb_mean_absolute_similarity(
+    left: &OwnedRgbaFrame,
+    right: &OwnedRgbaFrame,
+) -> Result<SimilarityScore, SimilarityError> {
+    let width_bytes = usize::try_from(left.width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(SimilarityError::FrameLayoutOverflow)?;
+    let height = usize::try_from(left.height).map_err(|_| SimilarityError::FrameLayoutOverflow)?;
+
+    let visible_pixels_identical = (0..height).all(|y| {
+        let left_start = y * left.stride_bytes;
+        let right_start = y * right.stride_bytes;
+        left.pixels()[left_start..left_start + width_bytes]
+            == right.pixels()[right_start..right_start + width_bytes]
+    });
+    if visible_pixels_identical {
+        return Ok(SimilarityScore::IDENTICAL);
+    }
+
+    let mut total_difference: u128 = 0;
+    for y in 0..height {
+        let left_start = y * left.stride_bytes;
+        let right_start = y * right.stride_bytes;
+        let left_row = &left.pixels()[left_start..left_start + width_bytes];
+        let right_row = &right.pixels()[right_start..right_start + width_bytes];
+        for (left_px, right_px) in left_row.chunks_exact(4).zip(right_row.chunks_exact(4)) {
+            total_difference += u128::from(left_px[0].abs_diff(right_px[0]));
+            total_difference += u128::from(left_px[1].abs_diff(right_px[1]));
+            total_difference += u128::from(left_px[2].abs_diff(right_px[2]));
+        }
+    }
+
+    let pixel_count = u128::from(left.width) * u128::from(left.height);
+    let max_difference = pixel_count * 3 * 255;
+    let difference_bps = if max_difference == 0 {
+        0
+    } else {
+        ((total_difference * u128::from(SIMILARITY_SCALE) + max_difference / 2)
+            / max_difference)
+            .min(u128::from(SIMILARITY_SCALE)) as u16
+    };
+    Ok(SimilarityScore {
+        basis_points: SIMILARITY_SCALE - difference_bps,
+        exact: false,
+    })
+}
+
+fn ratio_basis_points(numerator: u64, denominator: u64) -> Option<u16> {
+    if denominator == 0 {
+        return None;
+    }
+    let scaled = (u128::from(numerator) * u128::from(SIMILARITY_SCALE)
+        + u128::from(denominator) / 2)
+        / u128::from(denominator);
+    Some(scaled.min(u128::from(SIMILARITY_SCALE)) as u16)
+}
+'''
+          if old not in text:
+              raise SystemExit('perceptual engine block drifted')
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              'fn brightness_hash_collision_is_rejected_by_luma_confirmation()',
+              'fn brightness_hash_collision_is_rejected_by_color_confirmation()'
+          )
+          text = text.replace(
+              'assert!(matches!(decision, HybridDecision::RejectedByLuma { .. }));',
+              'assert!(matches!(decision, HybridDecision::RejectedByConfirmation { .. }));'
+          )
+          marker = '''    #[test]
+    fn obvious_structure_change_is_rejected_before_full_confirmation() {'''
+          insert = '''    #[test]
+    fn equal_luma_different_hue_is_rejected_by_color_confirmation() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 8,
+            minimum_luma_similarity: 9_700,
+        })
+        .unwrap();
+        let red = frame(9, 8, 36, [255_u8, 0, 0, 255].repeat(9 * 8));
+        let green = frame(9, 8, 36, [0_u8, 131, 0, 255].repeat(9 * 8));
+        assert_eq!(DHashEngine::hash(&red), DHashEngine::hash(&green));
+        assert_eq!(integer_luma(255, 0, 0), integer_luma(0, 131, 0));
+        let analysis = engine.analyze(&red, &green).unwrap();
+        assert!(matches!(
+            analysis.decision,
+            HybridDecision::RejectedByConfirmation { .. }
+        ));
+        assert!(analysis.confirmation.basis_points < 9_700);
+    }
+
+    #[test]
+    fn alpha_only_difference_has_explicit_rgb_confirmation_policy() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 8,
+            minimum_luma_similarity: 9_700,
+        })
+        .unwrap();
+        let opaque = frame(9, 8, 36, [40_u8, 80, 120, 255].repeat(9 * 8));
+        let translucent = frame(9, 8, 36, [40_u8, 80, 120, 64].repeat(9 * 8));
+        let analysis = engine.analyze(&opaque, &translucent).unwrap();
+        assert!(!analysis.confirmation.exact);
+        assert_eq!(analysis.confirmation.basis_points, SIMILARITY_SCALE);
+        assert!(analysis.decision.accepted());
+    }
+
+    #[test]
+    fn hard_dhash_gate_false_negative_is_measurable_without_policy_tuning() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 8,
+            minimum_luma_similarity: 9_700,
+        })
+        .unwrap();
+        let mut left = Vec::with_capacity(9 * 8 * 4);
+        let mut right = Vec::with_capacity(9 * 8 * 4);
+        for _y in 0..8 {
+            for x in 0..9 {
+                let a = if x % 2 == 0 { 101_u8 } else { 100_u8 };
+                let b = if x % 2 == 0 { 100_u8 } else { 101_u8 };
+                left.extend_from_slice(&[a, a, a, 255]);
+                right.extend_from_slice(&[b, b, b, 255]);
+            }
+        }
+        let analysis = engine
+            .analyze(&frame(9, 8, 36, left), &frame(9, 8, 36, right))
+            .unwrap();
+        assert!(matches!(analysis.decision, HybridDecision::RejectedByHash { .. }));
+        assert!(analysis.confirmation.basis_points >= 9_700);
+        assert!(analysis.hash_rejected_but_confirmation_accepted);
+
+        let mut counters = SimilarityQualityCounters::default();
+        counters.record(true, analysis);
+        assert_eq!(counters.false_negative, 1);
+        assert_eq!(counters.rejected_by_hash, 1);
+        assert_eq!(counters.hash_reject_confirmation_accepts, 1);
+        assert_eq!(counters.recall_basis_points(), Some(0));
+    }
+
+'''
+          if marker not in text:
+              raise SystemExit('perceptual test insertion marker drifted')
+          text = text.replace(marker, insert + marker, 1)
+          p.write_text(text)
+
+          # framescope-grouping: update semantics naming and add color/A-B-A regressions.
+          p = Path('rust/crates/framescope-grouping/src/lib.rs')
+          text = p.read_text()
+          text = text.replace(
+              '/// Bounded streaming grouper using dHash as a rejection prefilter and full luma confirmation.',
+              '/// Bounded streaming grouper using dHash as a rejection prefilter and full color confirmation.'
+          )
+          text = text.replace('if accepted_luma(previous).is_none() {', 'if accepted_confirmation(previous).is_none() {')
+          text = text.replace('let Some(representative_luma) = accepted_luma(representative) else {', 'let Some(representative_confirmation) = accepted_confirmation(representative) else {')
+          text = text.replace('.min(representative_luma.basis_points);', '.min(representative_confirmation.basis_points);')
+          old = '''fn accepted_luma(decision: HybridDecision) -> Option<SimilarityScore> {
+    match decision {
+        HybridDecision::Accepted { luma, .. } => Some(luma),
+        HybridDecision::RejectedByHash { .. } | HybridDecision::RejectedByLuma { .. } => None,
+    }
+}
+'''
+          new = '''fn accepted_confirmation(decision: HybridDecision) -> Option<SimilarityScore> {
+    match decision {
+        HybridDecision::Accepted { confirmation, .. } => Some(confirmation),
+        HybridDecision::RejectedByHash { .. }
+        | HybridDecision::RejectedByConfirmation { .. } => None,
+    }
+}
+'''
+          if old not in text:
+              raise SystemExit('grouping accepted_luma block drifted')
+          text = text.replace(old, new, 1)
+          marker = '''    #[test]
+    fn perceptual_rejection_creates_boundary_without_deleting_frames() {'''
+          insert = '''    fn solid_rgb(r: u8, g: u8, b: u8) -> OwnedRgbaFrame {
+        let mut pixels = Vec::with_capacity(9 * 8 * 4);
+        for _ in 0..(9 * 8) {
+            pixels.extend_from_slice(&[r, g, b, 255]);
+        }
+        OwnedRgbaFrame::new(9, 8, 36, pixels).unwrap()
+    }
+
+    #[test]
+    fn equal_luma_different_hue_frames_do_not_group() {
+        let mut grouper = HybridFrameGrouper::new(policy()).unwrap();
+        assert!(
+            grouper
+                .push(&entry(0, 0, 40), solid_rgb(255, 0, 0))
+                .unwrap()
+                .is_none()
+        );
+        let completed = grouper
+            .push(&entry(1, 40, 40), solid_rgb(0, 131, 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.first_frame, FrameId(0));
+        assert_eq!(completed.last_frame, FrameId(0));
+        assert_eq!(grouper.finish().unwrap().first_frame, FrameId(1));
+    }
+
+    #[test]
+    fn a_b_a_remains_three_consecutive_runs_not_a_global_cluster() {
+        let mut grouper = HybridFrameGrouper::new(policy()).unwrap();
+        assert!(grouper.push(&entry(0, 0, 40), solid(10)).unwrap().is_none());
+        let first = grouper.push(&entry(1, 40, 40), solid(220)).unwrap().unwrap();
+        let second = grouper.push(&entry(2, 80, 40), solid(10)).unwrap().unwrap();
+        let third = grouper.finish().unwrap();
+        assert_eq!((first.first_frame.0, first.last_frame.0), (0, 0));
+        assert_eq!((second.first_frame.0, second.last_frame.0), (1, 1));
+        assert_eq!((third.first_frame.0, third.last_frame.0), (2, 2));
+    }
+
+'''
+          if marker not in text:
+              raise SystemExit('grouping insertion marker drifted')
+          text = text.replace(marker, insert + marker, 1)
+          p.write_text(text)
+
+          # framescope-similarity-store: fence the changed metric generation and add an authoritative
+          # frame-count-aware reuse validator that proves first=0, no gaps/overlaps, and final reach.
+          p = Path('rust/crates/framescope-similarity-store/src/lib.rs')
+          text = p.read_text()
+          text = text.replace(
+              'use framescope_perceptual::{HybridSimilarityEngine, HybridSimilarityPolicy};',
+              'use framescope_perceptual::{\n    HYBRID_SIMILARITY_ALGORITHM_VERSION, HybridSimilarityEngine, HybridSimilarityPolicy,\n};'
+          )
+          text = text.replace(
+              'pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 3;',
+              'pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 4;'
+          )
+          old = '''            SimilarityStoreConfig::Hybrid(HybridSimilarityPolicy {
+                max_hash_distance,
+                minimum_luma_similarity,
+            }) => format!("hybrid-h{max_hash_distance}-l{minimum_luma_similarity}"),
+'''
+          new = '''            SimilarityStoreConfig::Hybrid(HybridSimilarityPolicy {
+                max_hash_distance,
+                minimum_luma_similarity,
+            }) => format!(
+                "hybrid-a{HYBRID_SIMILARITY_ALGORITHM_VERSION}-h{max_hash_distance}-l{minimum_luma_similarity}"
+            ),
+'''
+          if old not in text:
+              raise SystemExit('store filename block drifted')
+          text = text.replace(old, new, 1)
+          old = '''    Hybrid {
+        max_hash_distance: u8,
+        minimum_luma_similarity: u16,
+    },
+'''
+          new = '''    Hybrid {
+        algorithm_version: u32,
+        max_hash_distance: u8,
+        minimum_luma_similarity: u16,
+    },
+'''
+          if old not in text:
+              raise SystemExit('persisted config block drifted')
+          text = text.replace(old, new, 1)
+          old = '''            SimilarityStoreConfig::Hybrid(HybridSimilarityPolicy {
+                max_hash_distance,
+                minimum_luma_similarity,
+            }) => Self::Hybrid {
+                max_hash_distance,
+                minimum_luma_similarity,
+            },
+'''
+          new = '''            SimilarityStoreConfig::Hybrid(HybridSimilarityPolicy {
+                max_hash_distance,
+                minimum_luma_similarity,
+            }) => Self::Hybrid {
+                algorithm_version: HYBRID_SIMILARITY_ALGORITHM_VERSION,
+                max_hash_distance,
+                minimum_luma_similarity,
+            },
+'''
+          if old not in text:
+              raise SystemExit('persisted config conversion block drifted')
+          text = text.replace(old, new, 1)
+
+          old = '''    pub fn visit_groups<F>(
+        &self,
+        expected: &SimilarityStoreKey,
+        mut visitor: F,
+    ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
+    where
+        F: FnMut(FrameGroup),
+    {
+        let path = self.path_for(expected);
+'''
+          new = '''    pub fn visit_groups<F>(
+        &self,
+        expected: &SimilarityStoreKey,
+        visitor: F,
+    ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
+    where
+        F: FnMut(FrameGroup),
+    {
+        self.visit_groups_with_frame_count(expected, None, visitor)
+    }
+
+    /// Validate a reusable contiguous grouping result against the authoritative completed frame
+    /// count. Derived state with a missing first frame, a gap, an overlap, or an early/late final
+    /// frame is invalidated rather than repaired optimistically.
+    pub fn visit_groups_for_frame_count<F>(
+        &self,
+        expected: &SimilarityStoreKey,
+        expected_frame_count: u64,
+        visitor: F,
+    ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
+    where
+        F: FnMut(FrameGroup),
+    {
+        self.visit_groups_with_frame_count(expected, Some(expected_frame_count), visitor)
+    }
+
+    fn visit_groups_with_frame_count<F>(
+        &self,
+        expected: &SimilarityStoreKey,
+        expected_frame_count: Option<u64>,
+        mut visitor: F,
+    ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
+    where
+        F: FnMut(FrameGroup),
+    {
+        let path = self.path_for(expected);
+'''
+          if old not in text:
+              raise SystemExit('store visit_groups header drifted')
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              'if !quick_check_ok(&connection)? || !validate_rows(&connection, group_count)? {',
+              'if !quick_check_ok(&connection)?\n            || !validate_rows(&connection, group_count, expected_frame_count)?\n        {'
+          )
+          old = '''fn validate_rows(
+    connection: &Connection,
+    expected_count: u64,
+) -> Result<bool, SimilarityStoreError> {
+'''
+          new = '''fn validate_rows(
+    connection: &Connection,
+    expected_count: u64,
+    expected_frame_count: Option<u64>,
+) -> Result<bool, SimilarityStoreError> {
+'''
+          if old not in text:
+              raise SystemExit('validate_rows signature drifted')
+          text = text.replace(old, new, 1)
+          old = '''    let rows = statement.query_map([], decode_group)?;
+    for row in rows {
+        let group = row?;
+        if invalid_group(&group) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+'''
+          new = '''    let rows = statement.query_map([], decode_group)?;
+    let mut previous_last = None;
+    let mut observed_groups = 0_u64;
+    for row in rows {
+        let group = row?;
+        if invalid_group(&group) {
+            return Ok(false);
+        }
+        if expected_frame_count.is_some() {
+            if observed_groups == 0 && group.first_frame != FrameId(0) {
+                return Ok(false);
+            }
+            if let Some(previous_last) = previous_last {
+                if previous_last.checked_add(1) != Some(group.first_frame.0) {
+                    return Ok(false);
+                }
+            }
+        }
+        previous_last = Some(group.last_frame.0);
+        observed_groups = observed_groups.saturating_add(1);
+    }
+
+    if let Some(expected_frame_count) = expected_frame_count {
+        if expected_frame_count == 0 {
+            return Ok(expected_count == 0 && observed_groups == 0);
+        }
+        if expected_count == 0
+            || observed_groups != expected_count
+            || previous_last != Some(expected_frame_count - 1)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+'''
+          if old not in text:
+              raise SystemExit('validate_rows body drifted')
+          text = text.replace(old, new, 1)
+
+          # Add strict coverage and algorithm-generation regressions to the existing store tests.
+          insert = r'''
+
+    fn assert_strict_coverage_invalid(tag: &str, groups: &[FrameGroup], frame_count: u64) {
+        let root = root(tag);
+        let store = SimilarityStore::new(&root);
+        let key = SimilarityStoreKey::new_hybrid(source("coverage"), stream(), hybrid(8, 9_700))
+            .unwrap();
+        let mut writer = store.begin(&key).unwrap();
+        for group in groups {
+            writer.append(group).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(
+            store
+                .visit_groups_for_frame_count(&key, frame_count, |_| {})
+                .unwrap(),
+            SimilarityStoreLoad::InvalidatedCorrupt
+        );
+        assert!(!store.path_for(&key).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strict_coverage_accepts_complete_contiguous_groups() {
+        let root = root("strict-complete");
+        let store = SimilarityStore::new(&root);
+        let key = SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
+        let mut writer = store.begin(&key).unwrap();
+        writer.append(&group(0, 1, 0)).unwrap();
+        writer.append(&group(2, 2, 80)).unwrap();
+        writer.finish().unwrap();
+        assert_eq!(
+            store
+                .visit_groups_for_frame_count(&key, 3, |_| {})
+                .unwrap(),
+            SimilarityStoreLoad::Reused { group_count: 2 }
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_gap() {
+        assert_strict_coverage_invalid(
+            "strict-gap",
+            &[group(0, 0, 0), group(2, 2, 80)],
+            3,
+        );
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_overlap() {
+        assert_strict_coverage_invalid(
+            "strict-overlap",
+            &[group(0, 1, 0), group(1, 2, 40)],
+            3,
+        );
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_first_group_not_at_zero() {
+        assert_strict_coverage_invalid("strict-first", &[group(1, 2, 40)], 3);
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_final_group_ending_early() {
+        assert_strict_coverage_invalid("strict-final", &[group(0, 1, 0)], 3);
+    }
+
+    #[test]
+    fn hybrid_store_namespace_fences_metric_algorithm_generation() {
+        let store = SimilarityStore::new(root("metric-version"));
+        let key = SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
+        let path = store.path_for(&key).to_string_lossy().into_owned();
+        assert!(path.contains("/v4/"));
+        assert!(path.contains(&format!(
+            "hybrid-a{HYBRID_SIMILARITY_ALGORITHM_VERSION}-h8-l9700"
+        )));
+    }
+'''
+          idx = text.rfind('\n}')
+          if idx < 0:
+              raise SystemExit('store test module closing brace not found')
+          text = text[:idx] + insert + text[idx:]
+          p.write_text(text)
+
+          # Product reuse path must request authoritative full-frame coverage validation.
+          p = Path('rust/crates/framescope-group-navigation/src/lib.rs')
+          text = p.read_text()
+          needle = 'store.visit_groups(&key, |_| {})?'
+          if text.count(needle) != 2:
+              raise SystemExit(f'group navigation expected 2 store validations, got {text.count(needle)}')
+          text = text.replace(
+              needle,
+              'store.visit_groups_for_frame_count(&key, frame_count, |_| {})?'
+          )
+          p.write_text(text)
+
+          # Android terminology: keep the stable enum/test tag but stop presenting contiguous runs
+          # as global uniqueness/similarity.
+          p = Path('android/app/src/main/java/com/framescope/app/ui/ExtractionWorkflow.kt')
+          text = p.read_text()
+          if text.count('secondLabel = "Unique groups"') != 1:
+              raise SystemExit('expected one Unique groups row label')
+          text = text.replace(
+              'secondLabel = "Unique groups"',
+              'secondLabel = "Consecutive near-duplicates"'
+          )
+          if text.count('label = "Unique groups"') != 1:
+              raise SystemExit('expected one Unique groups chip label')
+          text = text.replace(
+              'label = "Unique groups"',
+              'label = "Consecutive near-duplicates"'
+          )
+          old_copy = '"One source-quality representative from each validated similarity group."'
+          new_copy = '"Exports one source-quality representative from each consecutive run of visually similar frames. Repeated similar frames later in the video are treated separately."'
+          if text.count(old_copy) != 1:
+              raise SystemExit('unique group explanatory copy drifted')
+          text = text.replace(old_copy, new_copy)
+          p.write_text(text)
+
+          # Deterministic labeled corpus. This measures production decisions and the hard-gate
+          # false-negative signal; it deliberately does not retune thresholds in this patch.
+          corpus = Path('rust/crates/framescope-perceptual/tests/quality_corpus.rs')
+          corpus.parent.mkdir(parents=True, exist_ok=True)
+          corpus.write_text(r'''use framescope_cache::OwnedRgbaFrame;
+use framescope_perceptual::{
+    HybridSimilarityEngine, HybridSimilarityPolicy, SimilarityQualityCounters,
+};
+
+fn frame_from_rgb(width: u32, height: u32, rgb: &[(u8, u8, u8)]) -> OwnedRgbaFrame {
+    assert_eq!(rgb.len(), (width * height) as usize);
+    let mut pixels = Vec::with_capacity(rgb.len() * 4);
+    for &(r, g, b) in rgb {
+        pixels.extend_from_slice(&[r, g, b, 255]);
+    }
+    OwnedRgbaFrame::new(width, height, width as usize * 4, pixels).unwrap()
+}
+
+fn base_pattern() -> Vec<(u8, u8, u8)> {
+    let mut out = Vec::with_capacity(16 * 16);
+    for y in 0..16_u8 {
+        for x in 0..16_u8 {
+            out.push((
+                24_u8.saturating_add(x.saturating_mul(9)),
+                18_u8.saturating_add(y.saturating_mul(10)),
+                12_u8.saturating_add(x.saturating_mul(4).saturating_add(y.saturating_mul(3))),
+            ));
+        }
+    }
+    out
+}
+
+fn map_pixels(
+    input: &[(u8, u8, u8)],
+    f: impl Fn(usize, usize, (u8, u8, u8)) -> (u8, u8, u8),
+) -> Vec<(u8, u8, u8)> {
+    input
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, px)| f(i % 16, i / 16, px))
+        .collect()
+}
+
+fn translated(input: &[(u8, u8, u8)], dx: usize, dy: usize) -> Vec<(u8, u8, u8)> {
+    let mut out = vec![(0, 0, 0); 16 * 16];
+    for y in 0..16 {
+        for x in 0..16 {
+            let sx = x.saturating_sub(dx);
+            let sy = y.saturating_sub(dy);
+            out[y * 16 + x] = input[sy * 16 + sx];
+        }
+    }
+    out
+}
+
+fn rotated_180(input: &[(u8, u8, u8)]) -> Vec<(u8, u8, u8)> {
+    input.iter().copied().rev().collect()
+}
+
+struct Case {
+    name: &'static str,
+    expected_similar: bool,
+    right: Vec<(u8, u8, u8)>,
+}
+
+#[test]
+fn labeled_similarity_corpus_reports_tp_fp_tn_fn_and_gate_misses() {
+    let base = base_pattern();
+    let compression = map_pixels(&base, |x, y, (r, g, b)| {
+        let q = if (x + y) % 2 == 0 { 1 } else { 0 };
+        (r.saturating_add(q), g.saturating_sub(q), b.saturating_add(q))
+    });
+    let brightness = map_pixels(&base, |_x, _y, (r, g, b)| {
+        (r.saturating_add(3), g.saturating_add(3), b.saturating_add(3))
+    });
+    let exposure_flicker = map_pixels(&base, |x, _y, (r, g, b)| {
+        let d = if x % 2 == 0 { 4 } else { 1 };
+        (r.saturating_add(d), g.saturating_add(d), b.saturating_add(d))
+    });
+    let subtitle = map_pixels(&base, |x, y, px| {
+        if (3..13).contains(&x) && (12..15).contains(&y) {
+            (250, 250, 250)
+        } else {
+            px
+        }
+    });
+    let moving_foreground = map_pixels(&base, |x, y, px| {
+        if (4..12).contains(&x) && (4..12).contains(&y) {
+            (220, 35, 35)
+        } else {
+            px
+        }
+    });
+    let fade = map_pixels(&base, |_x, _y, (r, g, b)| (r / 2, g / 2, b / 2));
+    let hard_cut = vec![(8, 220, 170); 16 * 16];
+    let animation = map_pixels(&base, |x, y, px| {
+        if (x + y) % 3 == 0 { (20, 210, 240) } else { px }
+    });
+    let crop_rescaled = map_pixels(&base, |x, y, _| {
+        let sx = 2 + x * 12 / 16;
+        let sy = 2 + y * 12 / 16;
+        base[sy * 16 + sx]
+    });
+    let scaled = map_pixels(&base, |x, y, _| {
+        let sx = x / 2 * 2;
+        let sy = y / 2 * 2;
+        base[sy * 16 + sx]
+    });
+    let hue_collision = vec![(0, 131, 0); 16 * 16];
+    let red_reference = vec![(255, 0, 0); 16 * 16];
+
+    let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+        max_hash_distance: 8,
+        minimum_luma_similarity: 9_700,
+    })
+    .unwrap();
+    let left = frame_from_rgb(16, 16, &base);
+    let cases = vec![
+        Case { name: "exact_duplicate", expected_similar: true, right: base.clone() },
+        Case { name: "compression_difference", expected_similar: true, right: compression },
+        Case { name: "brightness_shift", expected_similar: true, right: brightness },
+        Case { name: "exposure_flicker", expected_similar: true, right: exposure_flicker },
+        Case { name: "small_translation", expected_similar: true, right: translated(&base, 1, 0) },
+        Case { name: "camera_shake", expected_similar: true, right: translated(&base, 1, 1) },
+        Case { name: "crop", expected_similar: true, right: crop_rescaled },
+        Case { name: "scale", expected_similar: true, right: scaled },
+        Case { name: "rotation", expected_similar: false, right: rotated_180(&base) },
+        Case { name: "subtitle_change", expected_similar: false, right: subtitle },
+        Case { name: "moving_foreground", expected_similar: false, right: moving_foreground },
+        Case { name: "fade", expected_similar: false, right: fade },
+        Case { name: "hard_cut", expected_similar: false, right: hard_cut },
+        Case { name: "animation", expected_similar: false, right: animation },
+    ];
+
+    let mut counters = SimilarityQualityCounters::default();
+    for case in &cases {
+        let right = frame_from_rgb(16, 16, &case.right);
+        let analysis = engine.analyze(&left, &right).unwrap();
+        eprintln!(
+            "{}: expected={} accepted={} confirmation={} gate_false_negative={}",
+            case.name,
+            case.expected_similar,
+            analysis.decision.accepted(),
+            analysis.confirmation.basis_points,
+            analysis.hash_rejected_but_confirmation_accepted,
+        );
+        counters.record(case.expected_similar, analysis);
+    }
+
+    // Equal-luma hue collision uses its own reference so the corpus guards the proven defect.
+    let hue_analysis = engine
+        .analyze(
+            &frame_from_rgb(16, 16, &red_reference),
+            &frame_from_rgb(16, 16, &hue_collision),
+        )
+        .unwrap();
+    counters.record(false, hue_analysis);
+    assert!(!hue_analysis.decision.accepted());
+
+    assert_eq!(
+        counters.true_positive + counters.false_positive + counters.true_negative + counters.false_negative,
+        counters.compared_pairs
+    );
+    assert_eq!(counters.compared_pairs, cases.len() as u64 + 1);
+    assert!(counters.precision_basis_points().is_some());
+    assert!(counters.recall_basis_points().is_some());
+    assert!(counters.f1_basis_points().is_some());
+}
+''')
+          PY
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.85.1
+
+      - name: Format and verify focused similarity contracts
+        working-directory: rust
+        run: |
+          cargo fmt --all
+          cargo clippy -p framescope-similarity -p framescope-perceptual -p framescope-grouping -p framescope-grouping-session -p framescope-similarity-store -p framescope-group-navigation --all-targets -- -D warnings
+          cargo test -p framescope-similarity
+          cargo test -p framescope-perceptual
+          cargo test -p framescope-grouping
+          cargo test -p framescope-grouping-session
+          cargo test -p framescope-similarity-store
+          cargo test -p framescope-group-navigation
+
+      - name: Commit verified implementation
+        shell: bash
+        run: |
+          git config user.name "FrameScope Agent 5"
+          git config user.email "101021011+MousaXD@users.noreply.github.com"
+          git add rust/crates/framescope-perceptual rust/crates/framescope-grouping rust/crates/framescope-similarity-store rust/crates/framescope-group-navigation android/app/src/main/java/com/framescope/app/ui/ExtractionWorkflow.kt
+          git commit -m "fix(similarity): make consecutive grouping color-aware and persistence-safe [agent5-patch]"
+          git push origin HEAD:perf/similarity-correctness
