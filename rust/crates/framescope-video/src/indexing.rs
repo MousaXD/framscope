@@ -4,9 +4,17 @@ use framescope_cache::{
     FrameIndexStreamIdentity, KeyframeAnchor,
 };
 use framescope_core::{DecodedFrame, FrameScopeError, StreamInfo};
+use std::cell::RefCell;
 use thiserror::Error;
 
 const DEFAULT_BATCH_SIZE: usize = 256;
+const PROGRESS_FRAME_INTERVAL: u64 = 64;
+
+type IndexingProgressObserver = Box<dyn FnMut(IndexingProgress)>;
+
+thread_local! {
+    static INDEXING_PROGRESS_OBSERVER: RefCell<Option<IndexingProgressObserver>> = RefCell::new(None);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexingOptions {
@@ -34,6 +42,66 @@ impl IndexingOptions {
     pub fn batch_size(self) -> usize {
         self.batch_size
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexingProgressStage {
+    CheckingExistingIndex,
+    ReusingExistingIndex,
+    ValidatingExistingIndex,
+    RebuildingIndex,
+    Indexing,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexingProgress {
+    pub stage: IndexingProgressStage,
+    /// Number of frames represented by the current index attempt.
+    ///
+    /// During validation this remains at the persisted frame count while `reused_frames` advances,
+    /// so ordinary resume progress never appears to move backwards.
+    pub indexed_frames: u64,
+    pub reused_frames: u64,
+    pub expected_reuse_frames: u64,
+    pub current_timestamp_us: Option<i64>,
+}
+
+struct ProgressObserverRestore {
+    previous: Option<IndexingProgressObserver>,
+}
+
+impl Drop for ProgressObserverRestore {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        INDEXING_PROGRESS_OBSERVER.with(|slot| {
+            slot.replace(previous);
+        });
+    }
+}
+
+/// Run an indexing operation with a thread-scoped observer.
+///
+/// Microscope session opening is synchronous today. Keeping the observer thread-local lets the FFI
+/// layer publish operation-scoped progress concurrently without adding callbacks to every existing
+/// index API or introducing a process-global source identity. Nested observers are restored safely.
+pub fn with_indexing_progress_observer<R>(
+    observer: impl FnMut(IndexingProgress) + 'static,
+    operation: impl FnOnce() -> R,
+) -> R {
+    let previous = INDEXING_PROGRESS_OBSERVER.with(|slot| {
+        slot.replace(Some(Box::new(observer)))
+    });
+    let _restore = ProgressObserverRestore { previous };
+    operation()
+}
+
+fn emit_progress(progress: IndexingProgress) {
+    INDEXING_PROGRESS_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow_mut().as_mut() {
+            observer(progress);
+        }
+    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +167,34 @@ where
     }
 
     let initial_status = index.status()?;
+    emit_progress(IndexingProgress {
+        stage: IndexingProgressStage::CheckingExistingIndex,
+        indexed_frames: initial_status.indexed_frames,
+        reused_frames: 0,
+        expected_reuse_frames: initial_status.indexed_frames,
+        current_timestamp_us: initial_status
+            .last_presentation_timestamp
+            .and_then(|timestamp| timestamp.to_microseconds()),
+    });
     if initial_status.lifecycle == FrameIndexLifecycle::Complete {
+        emit_progress(IndexingProgress {
+            stage: IndexingProgressStage::ReusingExistingIndex,
+            indexed_frames: initial_status.indexed_frames,
+            reused_frames: initial_status.indexed_frames,
+            expected_reuse_frames: initial_status.indexed_frames,
+            current_timestamp_us: initial_status
+                .last_presentation_timestamp
+                .and_then(|timestamp| timestamp.to_microseconds()),
+        });
+        emit_progress(IndexingProgress {
+            stage: IndexingProgressStage::Finalizing,
+            indexed_frames: initial_status.indexed_frames,
+            reused_frames: initial_status.indexed_frames,
+            expected_reuse_frames: initial_status.indexed_frames,
+            current_timestamp_us: initial_status
+                .last_presentation_timestamp
+                .and_then(|timestamp| timestamp.to_microseconds()),
+        });
         return Ok(IndexingReport {
             status: initial_status,
             reused_existing_frames: 0,
@@ -134,6 +229,25 @@ where
         let mut batch = Vec::with_capacity(options.batch_size);
         let mut reused = 0_u64;
         let mut added = 0_u64;
+        let mut last_timestamp_us = None;
+
+        if expected_existing > 0 {
+            emit_progress(IndexingProgress {
+                stage: IndexingProgressStage::ValidatingExistingIndex,
+                indexed_frames: expected_existing,
+                reused_frames: 0,
+                expected_reuse_frames: expected_existing,
+                current_timestamp_us: None,
+            });
+        } else {
+            emit_progress(IndexingProgress {
+                stage: IndexingProgressStage::Indexing,
+                indexed_frames: 0,
+                reused_frames: 0,
+                expected_reuse_frames: 0,
+                current_timestamp_us: None,
+            });
+        }
 
         loop {
             let decoded = match decoder.next_frame_for_index() {
@@ -158,6 +272,13 @@ where
                     break;
                 }
                 flush_batch(index, &mut batch, &mut added)?;
+                emit_progress(IndexingProgress {
+                    stage: IndexingProgressStage::Finalizing,
+                    indexed_frames: reused.saturating_add(added),
+                    reused_frames: reused,
+                    expected_reuse_frames: expected_existing,
+                    current_timestamp_us: last_timestamp_us,
+                });
                 index.mark_complete()?;
                 return Ok(IndexingReport {
                     status: index.status()?,
@@ -168,6 +289,7 @@ where
                 });
             };
 
+            last_timestamp_us = decoded.timestamp_us();
             let entry = entry_from_decoded(frame_id, &decoded, &mut anchor);
             entry.validate(index.stream_identity())?;
 
@@ -186,6 +308,32 @@ where
                 }
             }
 
+            let processed = frame_id.0.saturating_add(1);
+            let stage = if processed <= expected_existing {
+                IndexingProgressStage::ValidatingExistingIndex
+            } else {
+                IndexingProgressStage::Indexing
+            };
+            if processed == 1
+                || processed == expected_existing
+                || processed == expected_existing.saturating_add(1)
+                || processed % PROGRESS_FRAME_INTERVAL == 0
+            {
+                emit_progress(IndexingProgress {
+                    stage,
+                    indexed_frames: if stage == IndexingProgressStage::ValidatingExistingIndex {
+                        expected_existing
+                    } else {
+                        reused
+                            .saturating_add(added)
+                            .saturating_add(batch.len() as u64)
+                    },
+                    reused_frames: reused,
+                    expected_reuse_frames: expected_existing,
+                    current_timestamp_us: last_timestamp_us,
+                });
+            }
+
             frame_id = FrameId(
                 frame_id
                     .0
@@ -198,6 +346,13 @@ where
             let _ = index.mark_failed_recoverable("partial index reconciliation failed");
             return Err(IndexingError::PartialIndexMismatch);
         }
+        emit_progress(IndexingProgress {
+            stage: IndexingProgressStage::RebuildingIndex,
+            indexed_frames: 0,
+            reused_frames: 0,
+            expected_reuse_frames: 0,
+            current_timestamp_us: None,
+        });
         index.clear_for_rebuild()?;
         expected_existing = 0;
         restarted = true;
@@ -250,8 +405,10 @@ mod tests {
     use super::*;
     use framescope_cache::{FrameIndexOpenDisposition, SourceIdentity};
     use framescope_core::{CodecInfo, MediaDuration, MediaKind, MediaTimestamp, TimeBase};
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
@@ -464,6 +621,100 @@ mod tests {
                 .unwrap()
                 .ticks,
             50
+        );
+    }
+
+    #[test]
+    fn progress_observer_reports_resume_and_exact_vfr_timestamps() {
+        let path = temp_db("progress-resume");
+        let mut index = open_index(&path);
+        let _ = build_or_resume_frame_index(
+            &mut index,
+            || {
+                Ok(FakeDecoder {
+                    stream: stream(),
+                    frames: VecDeque::from(vec![
+                        Ok(frame(0, 0, true)),
+                        Ok(frame(1, 40, false)),
+                        Ok(frame(2, 100, false)),
+                        Err(FrameScopeError::Cancelled),
+                    ]),
+                })
+            },
+            IndexingOptions::with_batch_size(2).unwrap(),
+        );
+
+        let progress = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&progress);
+        let full = [(0, true), (40, false), (100, false), (180, false), (260, true)];
+        with_indexing_progress_observer(
+            move |event| captured.borrow_mut().push(event),
+            || {
+                build_or_resume_frame_index(
+                    &mut index,
+                    || Ok(decoder(&full)),
+                    IndexingOptions::with_batch_size(2).unwrap(),
+                )
+                .unwrap();
+            },
+        );
+
+        let events = progress.borrow();
+        assert!(events.iter().any(|event| {
+            event.stage == IndexingProgressStage::ValidatingExistingIndex
+                && event.reused_frames == 3
+                && event.expected_reuse_frames == 3
+        }));
+        assert!(events.iter().any(|event| {
+            event.stage == IndexingProgressStage::Indexing
+                && event.current_timestamp_us == Some(180_000)
+        }));
+        assert_eq!(events.last().unwrap().stage, IndexingProgressStage::Finalizing);
+        assert_eq!(events.last().unwrap().indexed_frames, 5);
+        let ordinary_counts = events
+            .iter()
+            .filter(|event| event.stage != IndexingProgressStage::RebuildingIndex)
+            .map(|event| event.indexed_frames)
+            .collect::<Vec<_>>();
+        assert!(ordinary_counts.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn progress_reports_partial_mismatch_rebuild_without_hiding_it() {
+        let path = temp_db("progress-rebuild");
+        let mut index = open_index(&path);
+        let _ = build_or_resume_frame_index(
+            &mut index,
+            || {
+                Ok(FakeDecoder {
+                    stream: stream(),
+                    frames: VecDeque::from(vec![
+                        Ok(frame(0, 0, true)),
+                        Ok(frame(1, 40, false)),
+                        Err(FrameScopeError::Cancelled),
+                    ]),
+                })
+            },
+            IndexingOptions::with_batch_size(8).unwrap(),
+        );
+        let progress = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&progress);
+        let changed = [(0, true), (50, false), (100, false)];
+        with_indexing_progress_observer(
+            move |event| captured.borrow_mut().push(event.stage),
+            || {
+                build_or_resume_frame_index(
+                    &mut index,
+                    || Ok(decoder(&changed)),
+                    IndexingOptions::with_batch_size(2).unwrap(),
+                )
+                .unwrap();
+            },
+        );
+        assert!(
+            progress
+                .borrow()
+                .contains(&IndexingProgressStage::RebuildingIndex)
         );
     }
 
