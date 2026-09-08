@@ -64,6 +64,7 @@ where
     Cancelled,
 }
 
+#[derive(Debug)]
 enum VisitorError<E> {
     Output(E),
     Manifest(ManifestError),
@@ -292,7 +293,7 @@ mod tests {
             }),
             keyframe: false,
             corrupt: false,
-            anchor: KeyframeAnchor::Unknown,
+            anchor: KeyframeAnchor::StreamStart,
         };
         let group = GroupNavigationTarget {
             ordinal: 2,
