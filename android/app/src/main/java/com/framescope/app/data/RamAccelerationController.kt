@@ -1,6 +1,7 @@
 package com.framescope.app.data
 
 import android.app.ActivityManager
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,7 +33,7 @@ class RamAccelerationController internal constructor(
 ) {
     private val activityManager = context.getSystemService(ActivityManager::class.java)
     private val profile = readDeviceProfile(activityManager)
-    private var underMemoryPressure = false
+    private var underMemoryPressure = profile.systemLowMemory
 
     private val _state = MutableStateFlow(resolveAndApply(readMode(), readCustomMiB()))
     val state: StateFlow<RamAccelerationState> = _state.asStateFlow()
@@ -52,10 +53,8 @@ class RamAccelerationController internal constructor(
     }
 
     /**
-     * Android memory pressure is treated as a one-way safety signal for the current process. Once
-     * pressure is observed we keep the reduced budget until restart, or until the user explicitly
-     * changes the mode/budget and Android has not reported further pressure. This avoids oscillating
-     * allocations while the system is actively reclaiming memory.
+     * Memory pressure is sticky for this process. Avoiding automatic re-growth prevents allocation
+     * oscillation while Android is reclaiming memory; a process restart re-evaluates live headroom.
      */
     fun onTrimMemory(level: Int) {
         if (!isMemoryPressureLevel(level)) return
@@ -105,13 +104,14 @@ class RamAccelerationController internal constructor(
         .getInt(KEY_CUSTOM_MIB, DEFAULT_CUSTOM_MIB)
         .coerceIn(RamAccelerationPolicy.MIN_CUSTOM_MIB, RamAccelerationPolicy.MAX_CUSTOM_MIB)
 
+    @Suppress("DEPRECATION")
     private fun isMemoryPressureLevel(level: Int): Boolean = when (level) {
-        android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
-        android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
-        android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
-        android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
-        android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE,
-        android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE,
+        ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
+        ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+        ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+        ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
+        ComponentCallbacks2.TRIM_MEMORY_MODERATE,
+        ComponentCallbacks2.TRIM_MEMORY_COMPLETE,
         -> true
         else -> false
     }
@@ -121,16 +121,20 @@ private fun readDeviceProfile(activityManager: ActivityManager?): RamAcceleratio
     if (activityManager == null) {
         return RamAccelerationDeviceProfile(
             totalRamBytes = 0L,
+            availableRamBytes = 0L,
             memoryClassMb = 0,
             lowRamDevice = false,
+            systemLowMemory = false,
         )
     }
     val memoryInfo = ActivityManager.MemoryInfo()
     activityManager.getMemoryInfo(memoryInfo)
     return RamAccelerationDeviceProfile(
         totalRamBytes = memoryInfo.totalMem,
+        availableRamBytes = memoryInfo.availMem,
         memoryClassMb = activityManager.memoryClass,
         lowRamDevice = activityManager.isLowRamDevice,
+        systemLowMemory = memoryInfo.lowMemory,
     )
 }
 
