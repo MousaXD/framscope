@@ -22,7 +22,7 @@ class StorageOperationException(
     message: String,
 ) : IllegalStateException(message)
 
-class AndroidFrameScopeStorageRepository(
+internal class AndroidFrameScopeStorageRepository(
     private val cacheRoot: String,
     private val microscopeController: MicroscopeSessionController,
     private val nativeBridge: NativeFrameScopeStorageBridge = FrameScopeStorageBridge,
@@ -62,25 +62,27 @@ class AndroidFrameScopeStorageRepository(
 
     private fun NativeStorageResponse.toMutationResult(
         expectedScope: StorageClearScope,
-    ): Result<StorageMutationResult> = when (this) {
-        is NativeStorageResponse.Failure -> Result.failure(toException())
-        is NativeStorageResponse.Success -> {
-            val receipt = cleared
-                ?: return Result.failure(
-                    StorageOperationException(
-                        code = "bridge_error",
-                        message = "Native clear succeeded without a clear receipt.",
-                    ),
-                )
-            if (receipt.scope != expectedScope) {
-                return Result.failure(
-                    StorageOperationException(
-                        code = "bridge_error",
-                        message = "Native clear response did not match the requested scope.",
-                    ),
-                )
+    ): Result<StorageMutationResult> {
+        return when (this) {
+            is NativeStorageResponse.Failure -> Result.failure(toException())
+            is NativeStorageResponse.Success -> {
+                val receipt = cleared
+                    ?: return Result.failure(
+                        StorageOperationException(
+                            code = "bridge_error",
+                            message = "Native clear succeeded without a clear receipt.",
+                        ),
+                    )
+                if (receipt.scope != expectedScope) {
+                    return Result.failure(
+                        StorageOperationException(
+                            code = "bridge_error",
+                            message = "Native clear response did not match the requested scope.",
+                        ),
+                    )
+                }
+                Result.success(StorageMutationResult(storage = storage, receipt = receipt))
             }
-            Result.success(StorageMutationResult(storage = storage, receipt = receipt))
         }
     }
 
