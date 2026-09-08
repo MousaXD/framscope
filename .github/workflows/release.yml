@@ -92,6 +92,19 @@ jobs:
             exit 1
           fi
 
+          acceptance_contract_paths=(
+            acceptance/phase7/device-report.template.json
+            scripts/verify-phase7-device-report.py
+            scripts/generate-video-fixtures.sh
+            scripts/verify-video-fixtures.py
+            .github/workflows/phase7-device-report.yml
+          )
+          if ! git diff --quiet "$tested_commit" "$GITHUB_SHA" -- "${acceptance_contract_paths[@]}"; then
+            echo "error: physical acceptance contract changed after device testing; retest the current contract" >&2
+            git diff --name-only "$tested_commit" "$GITHUB_SHA" -- "${acceptance_contract_paths[@]}" >&2
+            exit 1
+          fi
+
       - name: Require complete release signing material
         run: |
           test -n "$SIGNING_KEYSTORE_B64" || { echo "error: FRAMESCOPE_SIGNING_KEYSTORE_B64 is not configured" >&2; exit 1; }
