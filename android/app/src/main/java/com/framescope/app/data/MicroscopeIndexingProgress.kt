@@ -28,40 +28,101 @@ data class MicroscopeIndexingProgress(
     val expectedReuseFrames: Long,
     val firstTimestampUs: Long?,
     val currentTimestampUs: Long?,
+    /** Compatibility alias for operation age. Throughput estimation must not use this field. */
     val elapsedMs: Long,
+    /** Monotonic identity of the native progress event. Re-reading one event preserves this value. */
+    val sequence: Long = elapsedMs,
+    /** Native operation age captured at the instant this progress event was emitted. */
+    val sampleElapsedMs: Long = elapsedMs,
+    /** Current operation age at the time Android read this snapshot. */
+    val operationElapsedMs: Long = elapsedMs,
+    /** Native operation age of the most recent genuine work advancement. */
+    val lastWorkAdvanceElapsedMs: Long = sampleElapsedMs,
+    /** Monotonic presentation coverage, distinct from the exact latest frame timestamp. */
+    val maxPresentationTimestampUs: Long? = currentTimestampUs,
+    /** False means the values are the last known sample after progress telemetry became unavailable. */
+    val telemetryAvailable: Boolean = true,
 ) {
     fun isSane(): Boolean =
         operationId > 0L &&
+            sequence >= 0L &&
             indexedFrames >= 0L &&
             reusedFrames >= 0L &&
             expectedReuseFrames >= 0L &&
             reusedFrames <= maxOf(indexedFrames, expectedReuseFrames) &&
             elapsedMs >= 0L &&
-            (firstTimestampUs == null || currentTimestampUs == null || currentTimestampUs >= firstTimestampUs)
+            sampleElapsedMs >= 0L &&
+            operationElapsedMs >= sampleElapsedMs &&
+            lastWorkAdvanceElapsedMs in 0L..operationElapsedMs &&
+            (firstTimestampUs == null || maxPresentationTimestampUs == null ||
+                maxPresentationTimestampUs >= firstTimestampUs) &&
+            (currentTimestampUs == null || maxPresentationTimestampUs == null ||
+                maxPresentationTimestampUs >= currentTimestampUs)
 }
 
 interface MicroscopeIndexingProgressSource {
     fun read(operationId: Long): Result<MicroscopeIndexingProgress?>
 }
 
+/**
+ * Keeps at most one operation's last native sample so telemetry loss can be represented explicitly
+ * without letting a prior source leak into a replacement operation.
+ */
+internal class MicroscopeIndexingProgressFreshness {
+    private var latest: MicroscopeIndexingProgress? = null
+
+    fun beginOperation(operationId: Long) {
+        if (latest?.operationId != operationId) {
+            latest = null
+        }
+    }
+
+    fun onSuccess(
+        operationId: Long,
+        progress: MicroscopeIndexingProgress?,
+    ): MicroscopeIndexingProgress? {
+        require(progress == null || progress.operationId == operationId) {
+            "Indexing progress operation identity changed."
+        }
+        latest = progress?.copy(telemetryAvailable = true)
+        return latest
+    }
+
+    fun onFailure(operationId: Long): MicroscopeIndexingProgress? {
+        val current = latest?.takeIf { it.operationId == operationId } ?: return null
+        return current.copy(telemetryAvailable = false).also { latest = it }
+    }
+}
+
 object RustMicroscopeIndexingProgressSource : MicroscopeIndexingProgressSource {
     private val loadFailure: Throwable? = runCatching {
         System.loadLibrary("framescope_ffi")
     }.exceptionOrNull()
+    private val freshness = MicroscopeIndexingProgressFreshness()
 
     @JvmStatic
     private external fun nativeMicroscopeIndexingProgress(operationId: Long): String?
 
+    @Synchronized
     override fun read(operationId: Long): Result<MicroscopeIndexingProgress?> {
         if (operationId <= 0L) {
             return Result.failure(IllegalArgumentException("Indexing progress operation id must be positive."))
         }
-        loadFailure?.let { return Result.failure(it) }
-        return runCatching {
+        freshness.beginOperation(operationId)
+        loadFailure?.let { error ->
+            val stale = freshness.onFailure(operationId)
+            return if (stale != null) Result.success(stale) else Result.failure(error)
+        }
+
+        return try {
             val raw = requireNotNull(nativeMicroscopeIndexingProgress(operationId)) {
                 "Rust engine returned a null indexing progress response."
             }
-            parseResponse(raw, operationId)
+            val parsed = parseResponse(raw, operationId)
+            Result.success(freshness.onSuccess(operationId, parsed))
+        } catch (error: Throwable) {
+            val stale = freshness.onFailure(operationId)
+            if (stale != null) Result.success(stale) else Result.failure(error)
         }
     }
 
@@ -78,6 +139,7 @@ object RustMicroscopeIndexingProgressSource : MicroscopeIndexingProgressSource {
                 require(operationId == expectedOperationId) {
                     "Rust indexing progress operation identity changed."
                 }
+                val operationElapsedMs = progress.getLong("operation_elapsed_ms")
                 val parsed = MicroscopeIndexingProgress(
                     operationId = operationId,
                     stage = requireNotNull(
@@ -88,7 +150,13 @@ object RustMicroscopeIndexingProgressSource : MicroscopeIndexingProgressSource {
                     expectedReuseFrames = progress.getLong("expected_reuse_frames"),
                     firstTimestampUs = progress.optionalLong("first_timestamp_us"),
                     currentTimestampUs = progress.optionalLong("current_timestamp_us"),
-                    elapsedMs = progress.getLong("elapsed_ms"),
+                    elapsedMs = operationElapsedMs,
+                    sequence = progress.getLong("sequence"),
+                    sampleElapsedMs = progress.getLong("sample_elapsed_ms"),
+                    operationElapsedMs = operationElapsedMs,
+                    lastWorkAdvanceElapsedMs = progress.getLong("last_work_advance_elapsed_ms"),
+                    maxPresentationTimestampUs = progress.optionalLong("max_presentation_timestamp_us"),
+                    telemetryAvailable = true,
                 )
                 require(parsed.isSane()) { "Rust indexing progress values are invalid." }
                 parsed
