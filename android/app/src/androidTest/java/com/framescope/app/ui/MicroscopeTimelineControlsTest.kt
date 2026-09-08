@@ -1,14 +1,17 @@
 package com.framescope.app.ui
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import com.framescope.app.data.FrameDetails
 import com.framescope.app.data.MicroscopeSessionSnapshot
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -32,6 +35,10 @@ class MicroscopeTimelineControlsTest {
                     enabled = true,
                     onJumpFrame = {},
                     onJumpTimestampUs = {},
+                    onPreviewFrame = {},
+                    onPreviewTimestampUs = {},
+                    onFinishScrubFrame = {},
+                    onFinishScrubTimestampUs = {},
                     onCommitRange = { _, _ -> },
                     onClearRange = {},
                 )
@@ -42,6 +49,9 @@ class MicroscopeTimelineControlsTest {
         composeRule.onNodeWithTag(TIMELINE_SLIDER_TAG)
             .assertExists()
             .assert(hasContentDescription("Video timeline scrubber"))
+        composeRule.onNodeWithText(
+            "Drag to preview indexed frames. Release to settle on the exact frame.",
+        ).assertExists()
 
         composeRule.onNodeWithText("Select range").performClick()
         composeRule.onNodeWithTag(TIMELINE_RANGE_SLIDER_TAG)
@@ -50,6 +60,44 @@ class MicroscopeTimelineControlsTest {
         composeRule.onNodeWithText(
             "Extraction uses inclusive indexed timestamps: start ≤ frame timestamp ≤ end.",
         ).assertExists()
+    }
+
+    @Test
+    fun indexedProgressChangeDispatchesPreviewWithoutAuthoritativeRelease() {
+        val previewTimestamps = mutableListOf<Long>()
+        val finishedTimestamps = mutableListOf<Long>()
+        composeRule.setContent {
+            MaterialTheme {
+                MicroscopeTimelineControls(
+                    session = session(frameId = 1L),
+                    timelineBounds = IndexedTimelineBounds(
+                        sessionId = SESSION_ID,
+                        startUs = 100_000L,
+                        endUs = 500_000L,
+                    ),
+                    rangeSelection = null,
+                    enabled = true,
+                    onJumpFrame = {},
+                    onJumpTimestampUs = {},
+                    onPreviewFrame = {},
+                    onPreviewTimestampUs = { previewTimestamps += it },
+                    onFinishScrubFrame = {},
+                    onFinishScrubTimestampUs = { finishedTimestamps += it },
+                    onCommitRange = { _, _ -> },
+                    onClearRange = {},
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(TIMELINE_SLIDER_TAG)
+            .performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->
+                setProgress(0.75f)
+            }
+
+        composeRule.runOnIdle {
+            assertEquals(listOf(400_000L), previewTimestamps)
+            assertTrue(finishedTimestamps.isEmpty())
+        }
     }
 
     @Test
@@ -72,6 +120,10 @@ class MicroscopeTimelineControlsTest {
                     enabled = true,
                     onJumpFrame = {},
                     onJumpTimestampUs = {},
+                    onPreviewFrame = {},
+                    onPreviewTimestampUs = {},
+                    onFinishScrubFrame = {},
+                    onFinishScrubTimestampUs = {},
                     onCommitRange = { _, _ -> },
                     onClearRange = { cleared = true },
                 )
@@ -94,6 +146,10 @@ class MicroscopeTimelineControlsTest {
                     enabled = true,
                     onJumpFrame = {},
                     onJumpTimestampUs = {},
+                    onPreviewFrame = {},
+                    onPreviewTimestampUs = {},
+                    onFinishScrubFrame = {},
+                    onFinishScrubTimestampUs = {},
                     onCommitRange = { _, _ -> },
                     onClearRange = {},
                 )
@@ -102,6 +158,9 @@ class MicroscopeTimelineControlsTest {
 
         composeRule.onNodeWithText("Presentation-order scrub").assertExists()
         composeRule.onNodeWithTag(TIMELINE_SLIDER_TAG).assertExists()
+        composeRule.onNodeWithText(
+            "Drag to preview by presentation order. Release to settle on the exact indexed frame.",
+        ).assertExists()
         composeRule.onNodeWithText("Select range").assertDoesNotExist()
         composeRule.onNodeWithTag(TIMELINE_RANGE_SLIDER_TAG).assertDoesNotExist()
     }
