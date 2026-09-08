@@ -1,6 +1,3 @@
-#[path = "storage_admin.rs"]
-mod storage_admin;
-
 use framescope_video::MicroscopeFramePresentation;
 use std::fmt;
 
