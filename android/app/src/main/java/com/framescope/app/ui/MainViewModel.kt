@@ -8,8 +8,11 @@ import com.framescope.app.data.InspectedVideo
 import com.framescope.app.data.InspectionProgress
 import com.framescope.app.data.MicroscopeFrame
 import com.framescope.app.data.MicroscopeOperationException
+import com.framescope.app.data.MicroscopeScrubPreview
+import com.framescope.app.data.MicroscopeScrubPreviewSource
 import com.framescope.app.data.MicroscopeSessionSnapshot
 import com.framescope.app.data.TimestampSelectionPolicy
+import com.framescope.app.data.UnsupportedMicroscopeScrubPreviewSource
 import com.framescope.app.data.VideoOpenException
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -18,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -89,18 +93,23 @@ data class FrameScopeUiState(
     val microscopeState: MicroscopeUiState = MicroscopeUiState.Idle,
     val timelineBounds: IndexedTimelineBounds? = null,
     val timelineRange: TimelineRangeSelection? = null,
+    val scrubPreview: MicroscopeScrubPreview? = null,
 )
 
 class MainViewModel(
     private val repository: FrameScopeRepository,
+    private val scrubPreviewSource: MicroscopeScrubPreviewSource = UnsupportedMicroscopeScrubPreviewSource,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(FrameScopeUiState())
     val uiState: StateFlow<FrameScopeUiState> = _uiState.asStateFlow()
 
     private var inspectJob: Job? = null
     private var microscopeJob: Job? = null
+    private var scrubWorkerJob: Job? = null
     private val inspectionGeneration = AtomicLong(0)
     private val microscopeGeneration = AtomicLong(0)
+    private val scrubGate = LiveScrubRequestGate()
+    private val scrubSignal = Channel<Unit>(capacity = Channel.CONFLATED)
     private val lifecycleCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
@@ -113,11 +122,19 @@ class MainViewModel(
                     )
                 }
         }
+        scrubWorkerJob = viewModelScope.launch {
+            for (ignored in scrubSignal) {
+                drainLiveScrubRequests()
+            }
+        }
     }
 
     fun onPickerStarted() {
+        val previousSessionId = currentMicroscopeSessionId()
         inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
+        invalidateLiveScrub(clearPreview = true)
+        forgetPreviewSession(previousSessionId)
         invalidateMicroscopeWork(closeSession = true)
         _uiState.update {
             it.copy(
@@ -125,13 +142,17 @@ class MainViewModel(
                 microscopeState = MicroscopeUiState.Idle,
                 timelineBounds = null,
                 timelineRange = null,
+                scrubPreview = null,
             )
         }
     }
 
     fun onVideoSelected(uri: String) {
+        val previousSessionId = currentMicroscopeSessionId()
         val generation = inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
+        invalidateLiveScrub(clearPreview = true)
+        forgetPreviewSession(previousSessionId)
         invalidateMicroscopeWork(closeSession = false)
         // Reflect the user's selection immediately. Native teardown/probing/indexing continues off
         // the UI thread and updates this state as each stage becomes authoritative.
@@ -141,6 +162,7 @@ class MainViewModel(
                 microscopeState = MicroscopeUiState.Idle,
                 timelineBounds = null,
                 timelineRange = null,
+                scrubPreview = null,
             )
         }
 
@@ -180,6 +202,7 @@ class MainViewModel(
                                 microscopeState = MicroscopeUiState.Idle,
                                 timelineBounds = null,
                                 timelineRange = null,
+                                scrubPreview = null,
                             )
                         }
                     }
@@ -192,11 +215,13 @@ class MainViewModel(
 
     fun stepMicroscope(delta: Int) {
         if (delta !in setOf(-1, 1)) return
+        invalidateLiveScrub(clearPreview = true)
         navigateMicroscope { repository.stepMicroscope(delta) }
     }
 
     fun jumpMicroscopeFrame(frameId: Long) {
         if (frameId < 0L) return
+        invalidateLiveScrub(clearPreview = true)
         navigateMicroscope { repository.jumpMicroscopeFrame(frameId) }
     }
 
@@ -204,7 +229,34 @@ class MainViewModel(
         timestampUs: Long,
         selection: TimestampSelectionPolicy = TimestampSelectionPolicy.Nearest,
     ) {
+        invalidateLiveScrub(clearPreview = true)
         navigateMicroscope { repository.jumpMicroscopeTimestampUs(timestampUs, selection) }
+    }
+
+    /** Submit a cheap, replaceable preview request while the slider is actively moving. */
+    fun previewMicroscopeTimestampUs(timestampUs: Long) {
+        enqueueLiveScrub(LiveScrubTarget.Timestamp(timestampUs))
+    }
+
+    /** FrameId fallback for indexed sources whose presentation timestamps cannot form slider bounds. */
+    fun previewMicroscopeFrame(frameId: Long) {
+        if (frameId < 0L) return
+        enqueueLiveScrub(LiveScrubTarget.Frame(frameId))
+    }
+
+    /** Release active scrub and resolve the exact authoritative indexed timestamp frame. */
+    fun finishMicroscopeScrubTimestampUs(timestampUs: Long) {
+        invalidateLiveScrub(clearPreview = false)
+        navigateMicroscope {
+            repository.jumpMicroscopeTimestampUs(timestampUs, TimestampSelectionPolicy.Nearest)
+        }
+    }
+
+    /** Release fallback frame scrubbing and resolve the exact authoritative FrameId. */
+    fun finishMicroscopeScrubFrame(frameId: Long) {
+        if (frameId < 0L) return
+        invalidateLiveScrub(clearPreview = false)
+        navigateMicroscope { repository.jumpMicroscopeFrame(frameId) }
     }
 
     fun commitTimelineRange(startUs: Long, endUs: Long) {
@@ -237,8 +289,11 @@ class MainViewModel(
     }
 
     fun cancelInspection() {
+        val previousSessionId = currentMicroscopeSessionId()
         inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
+        invalidateLiveScrub(clearPreview = true)
+        forgetPreviewSession(previousSessionId)
         invalidateMicroscopeWork(closeSession = true)
         _uiState.update {
             it.copy(
@@ -246,13 +301,17 @@ class MainViewModel(
                 microscopeState = MicroscopeUiState.Idle,
                 timelineBounds = null,
                 timelineRange = null,
+                scrubPreview = null,
             )
         }
     }
 
     fun onPickerCancelled() {
+        val previousSessionId = currentMicroscopeSessionId()
         inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
+        invalidateLiveScrub(clearPreview = true)
+        forgetPreviewSession(previousSessionId)
         invalidateMicroscopeWork(closeSession = true)
         _uiState.update {
             it.copy(
@@ -260,6 +319,7 @@ class MainViewModel(
                 microscopeState = MicroscopeUiState.Idle,
                 timelineBounds = null,
                 timelineRange = null,
+                scrubPreview = null,
             )
         }
     }
@@ -299,6 +359,11 @@ class MainViewModel(
                 } else {
                     current.timelineRange
                 },
+                scrubPreview = if (current.microscopeState is MicroscopeUiState.Error) {
+                    null
+                } else {
+                    current.scrubPreview
+                },
             )
         }
     }
@@ -306,10 +371,13 @@ class MainViewModel(
     private fun closeMicroscopeErrorBeforeClearing(error: MicroscopeUiState.Error) {
         val inspectionRevision = inspectionGeneration.get()
         val microscopeRevision = microscopeGeneration.incrementAndGet()
+        val sessionId = error.session?.sessionId
+        invalidateLiveScrub(clearPreview = true)
         microscopeJob?.cancel()
         microscopeJob = viewModelScope.launch {
             try {
                 repository.closeMicroscope()
+                scrubPreviewSource.forgetSession(sessionId ?: -1L)
                 if (!isCurrent(inspectionRevision, microscopeRevision)) return@launch
                 _uiState.update { current ->
                     if (current.microscopeState == error) {
@@ -317,6 +385,7 @@ class MainViewModel(
                             microscopeState = MicroscopeUiState.Idle,
                             timelineBounds = null,
                             timelineRange = null,
+                            scrubPreview = null,
                         )
                     } else {
                         current
@@ -333,6 +402,7 @@ class MainViewModel(
         inspectionGenerationAtStart: Long,
     ) {
         val microscopeRevision = microscopeGeneration.incrementAndGet()
+        invalidateLiveScrub(clearPreview = true)
         microscopeJob?.cancel()
         microscopeJob = viewModelScope.launch {
             try {
@@ -497,6 +567,77 @@ class MainViewModel(
         return restored
     }
 
+    private fun enqueueLiveScrub(target: LiveScrubTarget) {
+        val ready = _uiState.value.microscopeState as? MicroscopeUiState.Ready ?: return
+        scrubGate.submit(ready.session.sessionId, target)
+        scrubSignal.trySend(Unit)
+    }
+
+    /** Sequentially drains at most one active request plus the gate's one replaceable pending slot. */
+    private suspend fun drainLiveScrubRequests() {
+        while (true) {
+            val request = scrubGate.beginNext() ?: return
+            val result = try {
+                when (val target = request.target) {
+                    is LiveScrubTarget.Timestamp -> scrubPreviewSource.renderTimestamp(
+                        sessionId = request.sessionId,
+                        timestampUs = target.timestampUs,
+                        selection = TimestampSelectionPolicy.Nearest,
+                    )
+                    is LiveScrubTarget.Frame -> scrubPreviewSource.renderFrame(
+                        sessionId = request.sessionId,
+                        frameId = target.frameId,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                scrubGate.finish(request)
+                throw cancelled
+            } catch (error: Exception) {
+                Result.failure(error)
+            }
+
+            val publishable = scrubGate.finish(request)
+            if (publishable) {
+                result.onSuccess { preview ->
+                    if (preview.descriptor.sessionId == request.sessionId) {
+                        _uiState.update { current ->
+                            val ready = current.microscopeState as? MicroscopeUiState.Ready
+                            if (ready?.session?.sessionId == request.sessionId) {
+                                current.copy(scrubPreview = preview)
+                            } else {
+                                current
+                            }
+                        }
+                    }
+                }
+            }
+            if (!scrubGate.hasPendingWork()) return
+        }
+    }
+
+    private fun invalidateLiveScrub(clearPreview: Boolean) {
+        scrubGate.invalidate()
+        if (clearPreview) {
+            _uiState.update { it.copy(scrubPreview = null) }
+        }
+    }
+
+    private fun forgetPreviewSession(sessionId: Long?) {
+        if (sessionId == null || sessionId <= 0L) return
+        viewModelScope.launch {
+            scrubPreviewSource.forgetSession(sessionId)
+        }
+    }
+
+    private fun currentMicroscopeSessionId(): Long? = when (val state = _uiState.value.microscopeState) {
+        is MicroscopeUiState.Ready -> state.session.sessionId
+        is MicroscopeUiState.Navigating -> state.session.sessionId
+        is MicroscopeUiState.LoadingFrame -> state.session.sessionId
+        is MicroscopeUiState.Empty -> state.session.sessionId
+        is MicroscopeUiState.Error -> state.session?.sessionId
+        MicroscopeUiState.Idle, MicroscopeUiState.Opening -> null
+    }
+
     private fun navigateMicroscope(
         operation: suspend () -> Result<MicroscopeSessionSnapshot>,
     ) {
@@ -592,7 +733,7 @@ class MainViewModel(
                         ),
                     )
                 } else {
-                    publishMicroscopeIfCurrent(
+                    publishAuthoritativeFrameIfCurrent(
                         inspectionGenerationAtStart,
                         microscopeRevision,
                         MicroscopeUiState.Ready(session, frame),
@@ -616,15 +757,18 @@ class MainViewModel(
         session: MicroscopeSessionSnapshot?,
     ) {
         val nativeError = error as? MicroscopeOperationException
-        publishMicroscopeIfCurrent(
-            inspectionRevision,
-            microscopeRevision,
-            MicroscopeUiState.Error(
-                message = error.message ?: "Microscope operation failed.",
-                code = nativeError?.code,
-                session = session,
-            ),
-        )
+        if (isCurrent(inspectionRevision, microscopeRevision)) {
+            _uiState.update {
+                it.copy(
+                    microscopeState = MicroscopeUiState.Error(
+                        message = error.message ?: "Microscope operation failed.",
+                        code = nativeError?.code,
+                        session = session,
+                    ),
+                    scrubPreview = null,
+                )
+            }
+        }
     }
 
     private fun isCurrent(
@@ -640,7 +784,25 @@ class MainViewModel(
         state: MicroscopeUiState,
     ) {
         if (isCurrent(inspectionRevision, microscopeRevision)) {
-            _uiState.update { it.copy(microscopeState = state) }
+            _uiState.update { current ->
+                current.copy(
+                    microscopeState = state,
+                    scrubPreview = when (state) {
+                        is MicroscopeUiState.Navigating -> current.scrubPreview
+                        else -> null
+                    },
+                )
+            }
+        }
+    }
+
+    private fun publishAuthoritativeFrameIfCurrent(
+        inspectionRevision: Long,
+        microscopeRevision: Long,
+        state: MicroscopeUiState.Ready,
+    ) {
+        if (isCurrent(inspectionRevision, microscopeRevision)) {
+            _uiState.update { it.copy(microscopeState = state, scrubPreview = null) }
         }
     }
 
@@ -697,13 +859,21 @@ class MainViewModel(
     }
 
     override fun onCleared() {
+        val sessionId = currentMicroscopeSessionId()
         inspectionGeneration.incrementAndGet()
         cancelRunningInspection()
         microscopeGeneration.incrementAndGet()
+        scrubGate.invalidate()
+        scrubSignal.close()
+        scrubWorkerJob?.cancel()
+        scrubWorkerJob = null
         microscopeJob?.cancel()
         microscopeJob = null
         lifecycleCleanupScope.launch {
             try {
+                if (sessionId != null) {
+                    scrubPreviewSource.forgetSession(sessionId)
+                }
                 repository.closeMicroscope()
             } finally {
                 lifecycleCleanupScope.cancel()
@@ -715,10 +885,11 @@ class MainViewModel(
 
 class MainViewModelFactory(
     private val repository: FrameScopeRepository,
+    private val scrubPreviewSource: MicroscopeScrubPreviewSource = UnsupportedMicroscopeScrubPreviewSource,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(MainViewModel::class.java))
-        return MainViewModel(repository) as T
+        return MainViewModel(repository, scrubPreviewSource) as T
     }
 }
