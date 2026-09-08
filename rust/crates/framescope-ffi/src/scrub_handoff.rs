@@ -111,12 +111,11 @@ impl Drop for PreviewOperationGuard {
         let Ok(mut registry) = preview_cancellation_registry().lock() else {
             return;
         };
-        let should_remove = registry
+        if registry
             .active
             .get(&self.session_id)
-            .map(|operation| operation.generation == self.generation)
-            .unwrap_or(false);
-        if should_remove {
+            .is_some_and(|operation| operation.generation == self.generation)
+        {
             registry.active.remove(&self.session_id);
         }
     }
@@ -142,7 +141,10 @@ fn begin_preview_operation(
     if let Some(previous) = registry.active.remove(&session_id) {
         previous.cancellation.cancel();
     }
-    registry.next_generation = registry.next_generation.saturating_add(1).max(1);
+    registry.next_generation = registry
+        .next_generation
+        .checked_add(1)
+        .ok_or_else(|| PreviewFailure::new("bridge_error", "Preview generation space exhausted."))?;
     let generation = registry.next_generation;
     let cancellation = CancellationToken::new();
     registry.active.insert(
@@ -161,9 +163,9 @@ fn begin_preview_operation(
     ))
 }
 
-/// Cooperatively cancels the currently executing preview for [session_id] without acquiring the
-/// authoritative microscope session mutex. Exact finger-up navigation calls this before it waits
-/// for that mutex, preventing disposable preview decode from naturally running to completion first.
+/// Cancels current disposable preview work without acquiring the authoritative session mutex.
+/// Exact microscope navigation calls this before waiting for that mutex, so finger-up work does not
+/// sit behind a stale preview until the stale decoder naturally reaches its target.
 pub(crate) fn cancel_session_preview(session_id: i64) -> bool {
     if session_id <= 0 {
         return false;
@@ -176,6 +178,11 @@ pub(crate) fn cancel_session_preview(session_id: i64) -> bool {
     };
     operation.cancellation.cancel();
     true
+}
+
+/// Drops disposable per-session scrub caches after the authoritative session has closed.
+pub(crate) fn forget_session_after_close(session_id: i64) -> bool {
+    forget_session(session_id)
 }
 
 #[unsafe(no_mangle)]
@@ -381,33 +388,32 @@ fn render_preview(
         })?;
         ensure_not_cancelled(&cancellation)?;
 
-        let (preview, source, decoded_frames) = if let Some(preview) =
-            state.preview_cache.get(frame_id, max_edge)
-        {
-            (preview, "preview_ram", 0)
-        } else {
-            let decoder_cancellation = cancellation.clone();
-            let navigated = navigate_to_frame_cached(
-                index,
-                &mut state.source_cache,
-                || open_decoder(source_fd, decoder_cancellation),
-                frame_id,
-            )
-            .map_err(from_navigation)?;
-            ensure_not_cancelled(&cancellation)?;
-            let source = match navigated.source {
-                CachedFrameSource::Ram => "source_ram",
-                CachedFrameSource::Decoded => "decoded",
+        let (preview, source, decoded_frames) =
+            if let Some(preview) = state.preview_cache.get(frame_id, max_edge) {
+                (preview, "preview_ram", 0)
+            } else {
+                let decoder_cancellation = cancellation.clone();
+                let navigated = navigate_to_frame_cached(
+                    index,
+                    &mut state.source_cache,
+                    || open_decoder(source_fd, decoder_cancellation),
+                    frame_id,
+                )
+                .map_err(from_navigation)?;
+                ensure_not_cancelled(&cancellation)?;
+                let source = match navigated.source {
+                    CachedFrameSource::Ram => "source_ram",
+                    CachedFrameSource::Decoded => "decoded",
+                };
+                let decoded_frames = navigated.decoded_frames;
+                let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
+                    .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
+                ensure_not_cancelled(&cancellation)?;
+                state
+                    .preview_cache
+                    .insert(frame_id, max_edge, preview.clone());
+                (preview, source, decoded_frames)
             };
-            let decoded_frames = navigated.decoded_frames;
-            let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
-                .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
-            ensure_not_cancelled(&cancellation)?;
-            state
-                .preview_cache
-                .insert(frame_id, max_edge, preview.clone());
-            (preview, source, decoded_frames)
-        };
 
         ensure_not_cancelled(&cancellation)?;
         if destination.len() < preview.byte_len() {
@@ -457,8 +463,8 @@ fn open_decoder(
     source_fd: RawFd,
     cancellation: CancellationToken,
 ) -> Result<VideoDecoder, FrameScopeError> {
-    // SAFETY: `with_extraction_context` keeps the owned microscope descriptor alive and locked for
-    // this call. VideoDecoder duplicates the descriptor immediately and owns only the duplicate.
+    // SAFETY: `with_extraction_context` keeps the owned microscope descriptor alive for this call.
+    // VideoDecoder duplicates the descriptor immediately and owns only that duplicate.
     let borrowed = unsafe { BorrowedFd::borrow_raw(source_fd) };
     VideoDecoder::open_file_descriptor_with_options(
         borrowed,
@@ -573,7 +579,7 @@ fn forget_session(session_id: i64) -> bool {
 }
 
 fn from_navigation(error: CachedNavigationError) -> PreviewFailure {
-    let code = match error {
+    let code = match &error {
         CachedNavigationError::IncompleteIndex => "index_incomplete",
         CachedNavigationError::FrameNotIndexed => "frame_out_of_range",
         CachedNavigationError::StreamIdentityMismatch => "stream_identity_mismatch",
@@ -581,6 +587,7 @@ fn from_navigation(error: CachedNavigationError) -> PreviewFailure {
         CachedNavigationError::UnexpectedEof => "unexpected_eof",
         CachedNavigationError::Cache(_) => "cache_error",
         CachedNavigationError::Index(_) => "index_error",
+        CachedNavigationError::Decoder(inner) if inner.code() == "cancelled" => "cancelled",
         CachedNavigationError::Decoder(_) => "decoder_error",
     };
     PreviewFailure::new(code, error.to_string())
@@ -666,10 +673,6 @@ mod tests {
         registry.sessions.clear();
         registry.clock = 0;
         drop(registry);
-
-        // Host tests cannot construct the Android cache hierarchy through a microscope session, so
-        // the hard bound itself is asserted here while the cache implementation has independent
-        // byte/count eviction coverage in framescope-video.
         assert_eq!(MAX_RETAINED_PREVIEW_SESSIONS, 2);
         assert_eq!(PREVIEW_CACHE_BUDGET_BYTES, 8 * 1024 * 1024);
         assert_eq!(PREVIEW_CACHE_MAX_FRAMES, 12);
