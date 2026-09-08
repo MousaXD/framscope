@@ -17,13 +17,19 @@ internal class LiveScrubRequestGate {
     private var pending: LiveScrubRequest? = null
 
     @Synchronized
-    fun submit(sessionRevision: Long, timestampUs: Long): LiveScrubRequest {
-        require(sessionRevision > 0L) { "Live scrub requires a positive session revision." }
+    fun submit(sessionId: Long, target: LiveScrubTarget): LiveScrubRequest {
+        require(sessionId > 0L) { "Live scrub requires a positive microscope session id." }
+        when (target) {
+            is LiveScrubTarget.Frame -> require(target.frameId >= 0L) {
+                "Live scrub frame id must be non-negative."
+            }
+            is LiveScrubTarget.Timestamp -> Unit
+        }
         val request = LiveScrubRequest(
             requestId = nextRequestId,
             epoch = epoch,
-            sessionRevision = sessionRevision,
-            timestampUs = timestampUs,
+            sessionId = sessionId,
+            target = target,
         )
         nextRequestId = increment(nextRequestId, "live scrub request id")
         latestRequestId = request.requestId
@@ -76,9 +82,19 @@ internal class LiveScrubRequestGate {
     }
 }
 
+internal sealed interface LiveScrubTarget {
+    data class Timestamp(
+        val timestampUs: Long,
+    ) : LiveScrubTarget
+
+    data class Frame(
+        val frameId: Long,
+    ) : LiveScrubTarget
+}
+
 internal data class LiveScrubRequest(
     val requestId: Long,
     val epoch: Long,
-    val sessionRevision: Long,
-    val timestampUs: Long,
+    val sessionId: Long,
+    val target: LiveScrubTarget,
 )
