@@ -313,7 +313,12 @@ fn microscope_lifecycle_error_json() -> String {
 fn microscope_open_succeeded(json: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
-        .and_then(|value| value.get("status").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
         .as_deref()
         == Some("ok")
 }
