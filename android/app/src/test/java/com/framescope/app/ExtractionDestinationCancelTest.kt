@@ -1,7 +1,10 @@
 package com.framescope.app
 
+import com.framescope.app.data.BatchExportProgress
 import com.framescope.app.data.BatchExportRequest
 import com.framescope.app.data.BatchExportSelection
+import com.framescope.app.data.ExportedBatchDocument
+import com.framescope.app.data.ExportedFrameDocument
 import com.framescope.app.data.FrameExportFormat
 import com.framescope.app.data.FrameScopeRepository
 import com.framescope.app.data.InspectedVideo
@@ -86,16 +89,18 @@ class ExtractionDestinationCancelTest {
             treeUri: String,
             format: FrameExportFormat,
             jpegQuality: Int,
-        ) = error("Export must not run after destination cancellation.").also {
+        ): Result<ExportedFrameDocument> {
             currentExportCalls += 1
+            return Result.failure(AssertionError("Export must not run after destination cancellation."))
         }
 
         override suspend fun exportFrames(
             treeUri: String,
             request: BatchExportRequest,
-            onProgress: (com.framescope.app.data.BatchExportProgress) -> Unit,
-        ) = error("Export must not run after destination cancellation.").also {
+            onProgress: (BatchExportProgress) -> Unit,
+        ): Result<ExportedBatchDocument> {
             batchExportCalls += 1
+            return Result.failure(AssertionError("Export must not run after destination cancellation."))
         }
     }
 }
