@@ -39,9 +39,22 @@ interface FrameScopeRepository {
     suspend fun loadMicroscopeFrame(): Result<MicroscopeFrame> =
         Result.failure(UnsupportedOperationException("Microscope frame presentation is not supported."))
 
+    suspend fun exportCurrentFrame(
+        treeUri: String,
+        format: FrameExportFormat,
+        jpegQuality: Int = DEFAULT_JPEG_QUALITY,
+    ): Result<ExportedFrameDocument> =
+        Result.failure(UnsupportedOperationException("Current-frame export is not supported."))
+
     suspend fun closeMicroscope(): Boolean = true
 
     fun cancelActiveInspection() {}
+
+    fun cancelActiveNativeOperation() = cancelActiveInspection()
+
+    companion object {
+        const val DEFAULT_JPEG_QUALITY = 92
+    }
 }
 
 class AndroidFrameScopeRepository(
@@ -52,6 +65,8 @@ class AndroidFrameScopeRepository(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val microscopeController: MicroscopeSessionController =
         MicroscopeSessionController(nativeBridge, frameBridge),
+    private val exportDestinationFactory: FrameExportDestinationFactory =
+        AndroidFrameExportDestinationFactory(contentResolver),
 ) : FrameScopeRepository {
     private val nextOperationId = AtomicLong(1L)
     private val activeNativeOperationId = AtomicLong(NO_OPERATION)
@@ -187,11 +202,132 @@ class AndroidFrameScopeRepository(
         }
     }
 
+    override suspend fun exportCurrentFrame(
+        treeUri: String,
+        format: FrameExportFormat,
+        jpegQuality: Int,
+    ): Result<ExportedFrameDocument> = try {
+        Result.success(
+            withContext(ioDispatcher) {
+                currentCoroutineContext().ensureActive()
+                if (format == FrameExportFormat.Jpeg && jpegQuality !in 1..100) {
+                    throw FrameExportException(
+                        code = "invalid_request",
+                        message = "JPEG quality must be between 1 and 100.",
+                    )
+                }
+                val snapshot = microscopeController.currentSnapshot()
+                    ?: throw FrameExportException(
+                        code = "session_not_found",
+                        message = "No microscope session is currently open.",
+                    )
+                val frameId = snapshot.currentFrame?.frameId
+                    ?: throw FrameExportException(
+                        code = "no_frames",
+                        message = "The current microscope session contains no indexed frames.",
+                    )
+                val displayName = stableFrameFileName(frameId, format)
+                val destination = try {
+                    exportDestinationFactory.create(
+                        treeUri = treeUri,
+                        displayName = displayName,
+                        mimeType = format.mimeType,
+                    )
+                } catch (error: SecurityException) {
+                    throw error
+                } catch (error: Exception) {
+                    throw FrameExportException(
+                        code = "destination_error",
+                        message = "Android could not create the frame export destination.",
+                        cause = error,
+                    )
+                }
+
+                destination.use { output ->
+                    currentCoroutineContext().ensureActive()
+                    val operationId = nextExportOperationId()
+                    if (!activeNativeOperationId.compareAndSet(NO_OPERATION, operationId)) {
+                        throw FrameExportException(
+                            code = "operation_busy",
+                            message = "Another native FrameScope operation is already active.",
+                        )
+                    }
+                    val nativeResult = try {
+                        currentCoroutineContext().ensureActive()
+                        microscopeController.exportCurrentFrame(
+                            outputFd = output.fd,
+                            operationId = operationId,
+                            format = format,
+                            jpegQuality = jpegQuality,
+                        )
+                    } finally {
+                        activeNativeOperationId.compareAndSet(operationId, NO_OPERATION)
+                    }
+                    currentCoroutineContext().ensureActive()
+
+                    val export = when (nativeResult) {
+                        is NativeFrameExport.Success -> nativeResult.export
+                        is NativeFrameExport.Failure -> {
+                            if (nativeResult.code in CANCELLATION_CODES) {
+                                throw CancellationException(nativeResult.message)
+                            }
+                            throw FrameExportException(
+                                code = nativeResult.code,
+                                message = nativeResult.message,
+                            )
+                        }
+                    }
+                    if (
+                        export.sessionId != snapshot.sessionId ||
+                        export.frameId != frameId ||
+                        export.format != format
+                    ) {
+                        throw FrameExportException(
+                            code = "export_identity_mismatch",
+                            message = "Frame export no longer matches the selected microscope frame.",
+                        )
+                    }
+                    currentCoroutineContext().ensureActive()
+                    output.commit()
+                    ExportedFrameDocument(
+                        uri = output.uri,
+                        displayName = displayName,
+                        export = export,
+                    )
+                }
+            },
+        )
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: FrameExportException) {
+        Result.failure(error)
+    } catch (error: SecurityException) {
+        Result.failure(
+            FrameExportException(
+                code = "permission_revoked",
+                message = "FrameScope no longer has permission to write to this export folder.",
+                cause = error,
+            ),
+        )
+    } catch (error: Exception) {
+        Result.failure(
+            FrameExportException(
+                code = "destination_error",
+                message = "FrameScope could not write the exported frame.",
+                cause = error,
+            ),
+        )
+    }
+
     override suspend fun closeMicroscope(): Boolean = withContext(ioDispatcher) {
         microscopeController.closeCurrent()
     }
 
     override fun cancelActiveInspection() {
+        cancelActiveNativeOperation()
+    }
+
+    override fun cancelActiveNativeOperation() {
         val operationId = activeNativeOperationId.get()
         if (operationId != NO_OPERATION) {
             nativeBridge.cancelInspection(operationId)
@@ -249,6 +385,29 @@ class AndroidFrameScopeRepository(
         }
     }
 
+    private fun nextExportOperationId(): Long = try {
+        nextOperationId()
+    } catch (error: VideoOpenException) {
+        throw FrameExportException(
+            code = "operation_id_exhausted",
+            message = "FrameScope cannot start another frame export in this process.",
+            cause = error,
+        )
+    }
+
+    private fun stableFrameFileName(
+        frameId: Long,
+        format: FrameExportFormat,
+    ): String {
+        if (frameId < 0L) {
+            throw FrameExportException(
+                code = "frame_out_of_range",
+                message = "Frame id must be non-negative for export.",
+            )
+        }
+        return "frame_${frameId.toString().padStart(FRAME_ID_WIDTH, '0')}.${format.extension}"
+    }
+
     private fun queryDisplayName(uri: Uri): String? {
         val cursor: Cursor = contentResolver.query(
             uri,
@@ -279,6 +438,8 @@ class AndroidFrameScopeRepository(
     private companion object {
         const val TAG = "FrameScopeRepository"
         const val NO_OPERATION = 0L
+        const val FRAME_ID_WIDTH = 20
+        val CANCELLATION_CODES = setOf("cancelled", "cancellation")
     }
 }
 
