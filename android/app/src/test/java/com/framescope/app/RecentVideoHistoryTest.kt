@@ -278,7 +278,7 @@ class RecentVideoHistoryTest {
         store: RecentVideoStore,
         access: RecentVideoAccessChecker = FakeAccessChecker(),
         now: () -> Long = { 1_000L },
-        id: () -> String = { "generated-id" },
+        id: () -> String = uniqueIdFactory(),
     ): RecentVideoHistoryRepository = RecentVideoHistoryRepository(
         store = store,
         accessChecker = access,
@@ -286,6 +286,11 @@ class RecentVideoHistoryTest {
         clockEpochMs = now,
         idFactory = id,
     )
+
+    private fun uniqueIdFactory(): () -> String {
+        var nextId = 0
+        return { "generated-${++nextId}" }
+    }
 
     private fun video(
         name: String,
