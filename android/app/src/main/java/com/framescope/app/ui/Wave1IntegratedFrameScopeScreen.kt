@@ -60,6 +60,7 @@ fun FrameScopeScreen(
     onFinishMicroscopeScrubTimestampUs: (Long) -> Unit,
     onCommitMicroscopeRange: (Long, Long) -> Unit,
     onClearMicroscopeRange: () -> Unit,
+    workspaceExtractionContent: @Composable () -> Unit = {},
     workspaceOverlay: @Composable () -> Unit = {},
     recentVideosContent: @Composable () -> Unit,
     storageSummaryContent: @Composable () -> Unit,
@@ -121,6 +122,7 @@ fun FrameScopeScreen(
                     onOpenInspector = {
                         navController.navigateWave1TopLevel(FrameScopeDestination.Inspector)
                     },
+                    workspaceExtractionContent = workspaceExtractionContent,
                     workspaceOverlay = workspaceOverlay,
                 )
             }
@@ -251,6 +253,7 @@ private fun Wave1WorkspaceScreen(
     onCommitRange: (Long, Long) -> Unit,
     onClearRange: () -> Unit,
     onOpenInspector: () -> Unit,
+    workspaceExtractionContent: @Composable () -> Unit,
     workspaceOverlay: @Composable () -> Unit,
 ) {
     Box(
@@ -285,7 +288,6 @@ private fun Wave1WorkspaceScreen(
                     }
                     MicroscopePanel(
                         state = state.microscopeState,
-                        indexingProgress = state.indexingProgress,
                         timelineBounds = state.timelineBounds,
                         rangeSelection = state.timelineRange,
                         scrubPreview = state.scrubPreview,
@@ -300,6 +302,7 @@ private fun Wave1WorkspaceScreen(
                         onClearRange = onClearRange,
                         onDismissError = onDismissError,
                     )
+                    workspaceExtractionContent()
                     OutlinedButton(
                         onClick = onOpenInspector,
                         modifier = Modifier.fillMaxWidth(),
