@@ -107,7 +107,7 @@ impl FrameOutputSink for CountingSink {
         }
         assert_eq!(output.pixels.width, 2);
         assert_eq!(output.pixels.height, 1);
-        assert_eq!(output.pixels.pixels.len(), 8);
+        assert_eq!(output.pixels.pixels().len(), 8);
 
         self.committed += 1;
         self.last_ordinal = Some(output.progress.ordinal);
