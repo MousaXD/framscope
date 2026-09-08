@@ -88,7 +88,9 @@ impl From<&IndexingReport> for IndexingRuntimeDiagnostics {
             bounded_resume_attempted: report.bounded_resume_attempted,
             bounded_resume_succeeded: report.bounded_resume_succeeded,
             bounded_resume_fell_back: report.bounded_resume_fell_back,
-            resume_checkpoint_frame_id: report.resume_checkpoint_frame_id.map(|frame_id| frame_id.0),
+            resume_checkpoint_frame_id: report
+                .resume_checkpoint_frame_id
+                .map(|frame_id| frame_id.0),
             resume_seek_scan_frames: report.resume_seek_scan_frames,
         }
     }
@@ -126,6 +128,7 @@ struct SourceIdentityMetrics {
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
 struct SourceIdentityOutcome {
     identity: SourceIdentity,
     metrics: SourceIdentityMetrics,
@@ -318,8 +321,8 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
-            r#"\"message\":\"failed to serialize microscope response\"}"#,
+            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
+            r#""message":"failed to serialize microscope response"}"#,
         )
         .into()
     })
@@ -341,8 +344,8 @@ fn serialize_prepared_frame_response(
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
-            r#"\"message\":\"failed to serialize frame preparation response\"}"#,
+            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
+            r#""message":"failed to serialize frame preparation response"}"#,
         )
         .into()
     })
@@ -845,7 +848,9 @@ fn elapsed_us(started: Instant) -> u64 {
 
 #[cfg(unix)]
 fn file_len_or_zero(path: &Path) -> u64 {
-    std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or(0)
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -1001,16 +1006,17 @@ fn source_identity(
     }
 
     let size = reader.len;
-    let identity_result = SourceIdentity::from_seekable_cancellable(&mut reader, None, None, || {
-        if cancellation.is_cancelled() {
-            Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "source identity hashing cancelled",
-            ))
-        } else {
-            Ok(())
-        }
-    });
+    let identity_result =
+        SourceIdentity::from_seekable_cancellable(&mut reader, None, None, || {
+            if cancellation.is_cancelled() {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "source identity hashing cancelled",
+                ))
+            } else {
+                Ok(())
+            }
+        });
     let metrics = SourceIdentityMetrics {
         seekable,
         size_bytes: Some(size),
@@ -1090,9 +1096,7 @@ impl Read for FdLogicalReader {
                 offset,
             )
         };
-        self.io_elapsed_us = self
-            .io_elapsed_us
-            .saturating_add(elapsed_us(read_started));
+        self.io_elapsed_us = self.io_elapsed_us.saturating_add(elapsed_us(read_started));
         if read < 0 {
             return Err(io::Error::last_os_error());
         }
