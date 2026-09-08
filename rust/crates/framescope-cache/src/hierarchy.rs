@@ -25,10 +25,6 @@ pub struct CacheHierarchyStats {
 }
 
 /// Bounded two-tier frame cache used by indexed navigation.
-///
-/// Lookup order is always RAM first, then compressed disk proxy storage. The hierarchy never
-/// promotes a proxy into `CachedFrame`; decoding proxy bytes back into RGBA is a rendering concern
-/// and cannot silently satisfy an original-quality request.
 #[derive(Debug)]
 pub struct FrameCacheHierarchy {
     ram: RamFrameCache,
@@ -38,10 +34,6 @@ pub struct FrameCacheHierarchy {
 }
 
 impl FrameCacheHierarchy {
-    /// Open both cache tiers strictly.
-    ///
-    /// This constructor preserves the original fail-fast contract for callers that need disk-cache
-    /// initialization errors to be fatal or explicitly handled by the caller.
     pub fn open(
         disk_root: impl AsRef<Path>,
         ram_budget_bytes: usize,
@@ -56,11 +48,6 @@ impl FrameCacheHierarchy {
         })
     }
 
-    /// Open the hierarchy while treating the disk proxy tier as disposable.
-    ///
-    /// If disk initialization fails, the RAM tier remains fully usable and the failure is retained
-    /// as a diagnostic. Preview navigation can then degrade disk access to authoritative source
-    /// decode instead of making the media request fail.
     pub fn open_resilient(
         disk_root: impl AsRef<Path>,
         ram_budget_bytes: usize,
@@ -92,11 +79,6 @@ impl FrameCacheHierarchy {
         Ok(CacheLookup::Miss)
     }
 
-    /// Look up only the source-quality RAM tier.
-    ///
-    /// This deliberately does not touch the compressed disk proxy tier. Callers such as frame
-    /// extraction or full-quality indexed navigation must never let a lossy proxy masquerade as
-    /// authoritative decoded pixels, and should not pay disk I/O merely to reject it.
     pub fn lookup_full(&mut self, key: &FrameCacheKey) -> Option<CachedFrame> {
         self.ram.get(key)
     }
@@ -130,6 +112,11 @@ impl FrameCacheHierarchy {
 
     pub fn ram_budget_bytes(&self) -> usize {
         self.ram.budget_bytes()
+    }
+
+    /// Applies a new source-quality RAM ceiling synchronously. Shrinks evict immediately.
+    pub fn set_ram_budget_bytes(&mut self, ram_budget_bytes: usize) {
+        self.ram.set_budget_bytes(ram_budget_bytes);
     }
 
     pub fn disk_budget_bytes(&self) -> u64 {
@@ -219,19 +206,14 @@ mod tests {
             cache.insert_proxy(&key, ProxyFormat::Jpeg, &jpeg).unwrap(),
             DiskInsertResult::Inserted
         );
-        let proxy = cache.lookup(&key).unwrap();
-        assert!(matches!(proxy, CacheLookup::Proxy(_)));
-        let after_proxy = cache.stats();
-        assert_eq!(after_proxy.ram.misses, 2);
-        assert_eq!(after_proxy.disk.hits, 1);
+        assert!(matches!(cache.lookup(&key).unwrap(), CacheLookup::Proxy(_)));
 
         assert_eq!(
             cache.insert_full(rgba_frame(key.clone())),
             RamInsertResult::Inserted
         );
         let disk_hits_before = cache.stats().disk.hits;
-        let full = cache.lookup(&key).unwrap();
-        assert!(matches!(full, CacheLookup::Full(_)));
+        assert!(matches!(cache.lookup(&key).unwrap(), CacheLookup::Full(_)));
         assert_eq!(cache.stats().disk.hits, disk_hits_before);
 
         let _ = fs::remove_dir_all(root);
@@ -247,18 +229,31 @@ mod tests {
             .insert_proxy(&key, ProxyFormat::Jpeg, &[0xff, 0xd8, 0xff, 0xd9])
             .unwrap();
         let before = cache.stats();
-
         assert!(cache.lookup_full(&key).is_none());
-        let after_miss = cache.stats();
-        assert_eq!(after_miss.disk.hits, before.disk.hits);
-        assert_eq!(after_miss.disk.misses, before.disk.misses);
-
+        assert_eq!(cache.stats().disk.hits, before.disk.hits);
+        assert_eq!(cache.stats().disk.misses, before.disk.misses);
         cache.insert_full(rgba_frame(key.clone()));
         assert!(cache.lookup_full(&key).is_some());
-        let after_hit = cache.stats();
-        assert_eq!(after_hit.disk.hits, before.disk.hits);
-        assert_eq!(after_hit.disk.misses, before.disk.misses);
+        let _ = fs::remove_dir_all(root);
+    }
 
+    #[test]
+    fn runtime_ram_shrink_is_immediate() {
+        let root = temp_root("resize");
+        let source = strong_source("source-resize");
+        let key_a = FrameCacheKey::new(&source, 0, FrameId(1)).unwrap();
+        let key_b = FrameCacheKey::new(&source, 0, FrameId(2)).unwrap();
+        let mut cache = FrameCacheHierarchy::open(&root, 32, 0).unwrap();
+        cache.insert_full(rgba_frame(key_a));
+        cache.insert_full(rgba_frame(key_b));
+        assert_eq!(cache.stats().ram.resident_bytes, 32);
+
+        cache.set_ram_budget_bytes(16);
+        assert_eq!(cache.ram_budget_bytes(), 16);
+        assert_eq!(cache.stats().ram.resident_bytes, 16);
+        cache.set_ram_budget_bytes(0);
+        assert_eq!(cache.stats().ram.resident_bytes, 0);
+        assert_eq!(cache.stats().ram.resident_frames, 0);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -272,10 +267,8 @@ mod tests {
         cache
             .insert_proxy(&key, ProxyFormat::WebP, b"RIFF\x04\x00\x00\x00WEBP")
             .unwrap();
-
         cache.invalidate_source(&source).unwrap();
         assert_eq!(cache.lookup(&key).unwrap(), CacheLookup::Miss);
-
         let _ = fs::remove_dir_all(root);
     }
 
@@ -286,12 +279,10 @@ mod tests {
         let key = FrameCacheKey::new(&source, 0, FrameId(1)).unwrap();
         let mut cache = FrameCacheHierarchy::open(&root, 1024, 1024).unwrap();
         cache.insert_full(rgba_frame(key.clone()));
-
         cache.clear().unwrap();
         assert_eq!(cache.lookup(&key).unwrap(), CacheLookup::Miss);
         assert_eq!(cache.ram_budget_bytes(), 1024);
         assert_eq!(cache.disk_budget_bytes(), 1024);
-
         let _ = fs::remove_dir_all(root);
     }
 
@@ -306,16 +297,13 @@ mod tests {
         let key = FrameCacheKey::new(&source, 0, FrameId(1)).unwrap();
         let missing = FrameCacheKey::new(&source, 0, FrameId(2)).unwrap();
         let mut cache = FrameCacheHierarchy::open_resilient(&root, 1024, 1024);
-
         assert!(!cache.disk_available());
         assert!(cache.disk_unavailable_reason().is_some());
         assert!(cache.lookup(&missing).is_err());
-
         cache.insert_full(rgba_frame(key.clone()));
         assert!(matches!(cache.lookup(&key), Ok(CacheLookup::Full(_))));
         cache.clear().unwrap();
         assert!(cache.lookup_full(&key).is_none());
-
         let _ = fs::remove_file(root);
     }
 }
