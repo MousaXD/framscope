@@ -61,7 +61,7 @@ enum StorageResponse {
     },
 }
 
-#[derive(Debug, Clone, Copy,PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InvalidCacheRoot;
 
 fn validate_cache_root(cache_root: &str) -> Result<(), InvalidCacheRoot> {
