@@ -67,13 +67,25 @@ See `docs/phase6-acceptance.md` for the full extraction invariants and deferred 
 
 ## Phase 7: Production hardening and releases
 
-**Next phase.**
+**In progress: repository/CI hardening complete; physical-device acceptance pending.**
 
-- Physical-device and codec/document-provider compatibility review.
-- Performance and peak-memory profiling on representative hardware and large media.
-- Malformed-media and adversarial low-storage/provider-failure hardening.
-- Dependency/security/license review.
-- Accessibility and UI polish.
-- Reproducible release build/signing path where credentials are available.
-- Semantic-version release workflow.
-- Durable GitHub Release with APK, SHA-256 checksum, changelog, and source/tag linkage.
+Completed repository-side work:
+
+- Deterministic malformed/adversarial media coverage, including no-video, garbage, header truncation, and media-payload truncation.
+- Low-storage/provider-failure classification and rollback behavior.
+- Accessibility and UI-state polish.
+- Committed/synchronized Cargo lockfile, reviewed Rust dependency source/license/checksum policy, RustSec advisory scanning, and immutable build-dependency declarations.
+- Reproducible arm64 Android debug/release candidate paths and fail-closed signing configuration.
+- Semantic-version release workflow and durable GitHub Release packaging with APK, SHA-256 checksum, generated notes, and immutable tag/source linkage.
+- Deterministic 100,000-frame large-stream extraction stress plus hosted-runner wall-time/max-RSS evidence without flaky timing thresholds.
+- Physical-device/local-provider report schema, CI validator, GitHub-built test kit, and a signed-release lock that requires accepted physical evidence.
+
+Still required before Phase 7 can be marked complete:
+
+- Run the physical arm64 Android/local-SAF provider compatibility matrix from `docs/phase7-device-provider-acceptance.md`.
+- Exercise the deterministic codec/navigation/export cases on real hardware.
+- Record representative >=1 GiB media timing and peak-PSS evidence.
+- Commit `acceptance/phase7/device-report.json` with every required capability/scenario passing.
+- Re-run final acceptance/release gates on the evidence commit.
+
+Cloud-only document providers are outside the current contract because both source and destination pickers explicitly use Android `EXTRA_LOCAL_ONLY`.
