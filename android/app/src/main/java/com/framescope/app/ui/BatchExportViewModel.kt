@@ -7,6 +7,7 @@ import com.framescope.app.data.BatchExportProgress
 import com.framescope.app.data.BatchExportRequest
 import com.framescope.app.data.BatchExportSelection
 import com.framescope.app.data.ExportedBatchDocument
+import com.framescope.app.data.ExportStorageFailureClassifier
 import com.framescope.app.data.FrameExportException
 import com.framescope.app.data.FrameScopeRepository
 import java.util.concurrent.atomic.AtomicLong
@@ -122,9 +123,17 @@ class BatchExportViewModel(
                 }.onFailure { error ->
                     if (revision == generation.get()) {
                         val exportError = error as? FrameExportException
+                        val storageFailure = exportError?.let {
+                            ExportStorageFailureClassifier.classifyNative(
+                                code = it.code,
+                                message = error.message.orEmpty(),
+                            )
+                        } ?: ExportStorageFailureClassifier.classify(error)
                         _state.value = BatchExportUiState.Error(
-                            message = error.message ?: "Could not export the selected frames.",
-                            code = exportError?.code,
+                            message = storageFailure?.message
+                                ?: error.message
+                                ?: "Could not export the selected frames.",
+                            code = storageFailure?.code ?: exportError?.code,
                         )
                     }
                 }
