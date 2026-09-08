@@ -1,3 +1,6 @@
+#[path = "scrub_handoff.rs"]
+mod scrub_handoff;
+
 use framescope_video::MicroscopeFramePresentation;
 use std::fmt;
 
