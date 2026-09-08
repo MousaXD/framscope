@@ -37,11 +37,17 @@ sealed interface BatchExportSelection {
         override val end: Long = 0L
     }
 
+    data object UniqueGroups : BatchExportSelection {
+        override val nativeKind: Int = 4
+        override val start: Long = 0L
+        override val end: Long = 0L
+    }
+
     fun isSane(): Boolean = when (this) {
         is CurrentFrame -> frameId >= 0L
         is FrameRangeInclusive -> startFrameId >= 0L && endFrameId >= startFrameId
         is TimestampRangeUsInclusive -> endUs >= startUs
-        AllFrames -> true
+        AllFrames, UniqueGroups -> true
     }
 }
 
@@ -54,6 +60,7 @@ data class BatchExportRequest(
     fun isSane(): Boolean =
         selection.isSane() &&
             everyNFrames > 0L &&
+            (selection != BatchExportSelection.UniqueGroups || everyNFrames == 1L) &&
             (format != FrameExportFormat.Jpeg || jpegQuality in 1..100)
 }
 
