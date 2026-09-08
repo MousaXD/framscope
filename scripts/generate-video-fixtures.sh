@@ -56,6 +56,10 @@ ffmpeg "${common[@]}" \
   -shortest -movflags +faststart "$OUT/h264-with-audio.mp4"
 
 ffmpeg "${common[@]}" \
+  -f lavfi -i "sine=frequency=660:sample_rate=48000:duration=0.5" \
+  -c:a aac -b:a 48k -ar 48000 -ac 1 -vn -movflags +faststart "$OUT/audio-only.m4a"
+
+ffmpeg "${common[@]}" \
   -f lavfi -i "testsrc2=size=64x48:rate=8:duration=0.5" \
   -f lavfi -i "color=c=black:size=32x24:rate=8:duration=0.5" \
   -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=0.5" \
@@ -70,7 +74,18 @@ ffmpeg "${common[@]}" -f lavfi -i "testsrc2=size=62x46:rate=8:duration=0.5" \
 ffmpeg "${common[@]}" -f lavfi -i "testsrc2=size=64x48:rate=8" -frames:v 1 \
   "${x264[@]}" -an -movflags +faststart "$OUT/very-short.mp4"
 
-# Keep only the opening MP4 bytes so probing must reject the truncated container.
+# Adversarial fixtures stay deterministic so failures are reproducible across CI runs.
+# Keep only the opening MP4 bytes so probing must reject the header-only container.
 head -c 12 "$OUT/h264-cfr.mp4" > "$OUT/truncated.mp4"
+
+# A fast-start MP4 keeps its metadata before media payload. Removing the tail therefore exercises
+# sources that may probe/open successfully and then terminate early or fail during packet decode.
+full_size="$(stat -c%s "$OUT/h264-cfr.mp4")"
+payload_cut=$((full_size * 2 / 3))
+head -c "$payload_cut" "$OUT/h264-cfr.mp4" > "$OUT/truncated-payload.mp4"
+
+# Zero bytes and deterministic non-container bytes exercise format probing without nondeterminism.
+: > "$OUT/empty.bin"
+printf 'FrameScope deterministic hostile input\x00\xff\x7fnot-a-container\n' > "$OUT/garbage.bin"
 
 printf 'Generated fixtures in %s\n' "$OUT"
