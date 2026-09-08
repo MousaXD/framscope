@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "notes": "Generated fixtures are intentionally not committed. Run scripts/generate-video-fixtures.sh to create them under build/video-fixtures.",
+  "schema_version": 2,
+  "notes": "Generated fixtures are intentionally not committed. Run scripts/generate-video-fixtures.sh to create them under build/video-fixtures. Adversarial entries use explicit probe/decode expectations so CI remains deterministic.",
   "fixtures": [
     {
       "file": "h264-cfr.mp4",
@@ -103,6 +103,14 @@
       "variable_frame_rate": false
     },
     {
+      "file": "audio-only.m4a",
+      "purpose": "Valid AAC-only media that must probe successfully but be rejected by FrameScope because it has no video track",
+      "expect_probe": "no_video",
+      "audio_codec": "aac",
+      "stream_count": 1,
+      "audio_stream_count": 1
+    },
+    {
       "file": "multi-stream.mkv",
       "purpose": "Two H.264 video streams plus one AAC audio stream for stream-selection tests",
       "expect_probe": "success",
@@ -147,7 +155,23 @@
     },
     {
       "file": "truncated.mp4",
-      "purpose": "Deliberately truncated MP4 that must be rejected by probing/decoder integration",
+      "purpose": "Header-only truncated MP4 that must be rejected during probing/open",
+      "expect_probe": "failure"
+    },
+    {
+      "file": "truncated-payload.mp4",
+      "purpose": "Fast-start H.264 MP4 with media payload removed; it must never decode as the complete healthy 12-frame baseline",
+      "expect_probe": "damaged_video",
+      "healthy_frame_count": 12
+    },
+    {
+      "file": "empty.bin",
+      "purpose": "Zero-byte hostile input that must be rejected safely during probing/open",
+      "expect_probe": "failure"
+    },
+    {
+      "file": "garbage.bin",
+      "purpose": "Deterministic non-container bytes that must be rejected safely during probing/open",
       "expect_probe": "failure"
     }
   ]
