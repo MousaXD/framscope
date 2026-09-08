@@ -2,6 +2,12 @@ name: Phase 7 physical-device kit
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/phase7-device-kit.yml'
+      - 'acceptance/phase7/device-report.template.json'
+      - 'docs/phase7-device-provider-acceptance.md'
+      - 'scripts/verify-phase7-device-report.py'
 
 permissions:
   contents: read
