@@ -116,17 +116,25 @@ def verify_damaged_video(entry: dict, path: Path, result: subprocess.CompletedPr
     baseline = FIXTURE_DIR / "h264-cfr.mp4"
     assert baseline.is_file(), f"{path.name}: healthy baseline fixture is missing"
     assert path.stat().st_size < baseline.stat().st_size, f"{path.name}: damaged fixture is not smaller than baseline"
+
+    # Container probing may fail immediately, which is an acceptable damaged-media outcome.
     if result.returncode != 0:
         return
     info = json.loads(result.stdout)
     _, video_streams, _ = stream_sets(info)
     assert video_streams, f"{path.name}: probe succeeded but reported no video stream"
-    count = frame_count(video_streams[0])
+
+    # `nb_frames` can come from intact fast-start metadata and therefore is not evidence that the
+    # damaged payload is readable. Force frame decoding and count only frames FFprobe can actually
+    # enumerate. A decoder error is acceptable; a clean full healthy sequence is not.
+    frames_result = run_ffprobe(path, frames=True)
+    if frames_result.returncode != 0:
+        return
+    decoded_frames = json.loads(frames_result.stdout).get("frames", [])
     healthy_count = int(entry["healthy_frame_count"])
-    if count is not None:
-        assert count < healthy_count, (
-            f"{path.name}: damaged payload still exposed {count} readable frames; expected fewer than {healthy_count}"
-        )
+    assert len(decoded_frames) < healthy_count, (
+        f"{path.name}: damaged payload decoded the complete {healthy_count}-frame healthy sequence"
+    )
 
 
 def main() -> int:
