@@ -168,50 +168,57 @@ where
     let target = index
         .entry(frame_id)?
         .ok_or(CachedNavigationError::FrameNotIndexed)?;
+    let timestamp_seek_safe = index.timestamp_seek_safety()?.permits_timestamp_seek();
     let mut decoder = open_checked_decoder(index, open_fresh_decoder)?;
 
-    if let KeyframeAnchor::Keyframe {
-        frame_id: anchor_id,
-        presentation_timestamp: Some(anchor_timestamp),
-    } = target.anchor
-    {
-        if let Some(timestamp_us) = anchor_timestamp
-            .to_microseconds()
-            .filter(|value| *value >= 0)
+    if timestamp_seek_safe {
+        if let KeyframeAnchor::Keyframe {
+            frame_id: anchor_id,
+            presentation_timestamp: Some(anchor_timestamp),
+        } = target.anchor
         {
-            decoder.seek_for_rgba_navigation(timestamp_us)?;
-            match decode_from_seek(index, &mut decoder, anchor_id, frame_id) {
-                Ok((frame, decoded_frames)) => {
-                    return Ok(RgbaNavigationResult {
-                        frame,
-                        decoded_frames,
-                        used_keyframe_seek: true,
-                        fell_back_to_stream_start: false,
-                    });
+            if let Some(timestamp_us) = anchor_timestamp
+                .to_microseconds()
+                .filter(|value| *value >= 0)
+            {
+                decoder.seek_for_rgba_navigation(timestamp_us)?;
+                match decode_from_seek(index, &mut decoder, anchor_id, frame_id) {
+                    Ok((frame, decoded_frames)) => {
+                        return Ok(RgbaNavigationResult {
+                            frame,
+                            decoded_frames,
+                            used_keyframe_seek: true,
+                            fell_back_to_stream_start: false,
+                        });
+                    }
+                    Err(
+                        CachedNavigationError::TimelineMismatch
+                        | CachedNavigationError::UnexpectedEof,
+                    ) => {}
+                    Err(error) => return Err(error),
                 }
-                Err(
-                    CachedNavigationError::TimelineMismatch | CachedNavigationError::UnexpectedEof,
-                ) => {}
-                Err(error) => return Err(error),
-            }
 
-            let mut fallback = open_checked_decoder(index, open_fresh_decoder)?;
-            let (frame, decoded_frames) = decode_from_start(index, &mut fallback, frame_id)?;
-            return Ok(RgbaNavigationResult {
-                frame,
-                decoded_frames,
-                used_keyframe_seek: true,
-                fell_back_to_stream_start: true,
-            });
+                let mut fallback = open_checked_decoder(index, open_fresh_decoder)?;
+                let (frame, decoded_frames) = decode_from_start(index, &mut fallback, frame_id)?;
+                return Ok(RgbaNavigationResult {
+                    frame,
+                    decoded_frames,
+                    used_keyframe_seek: true,
+                    fell_back_to_stream_start: true,
+                });
+            }
         }
     }
 
+    // If the persisted keyframe timeline is ambiguous, source-quality pixels must be proven from
+    // stream start. A cache miss may be slower, but it can never bind an earlier GOP's payload to a
+    // later persistent FrameId.
     let (frame, decoded_frames) = decode_from_start(index, &mut decoder, frame_id)?;
     Ok(RgbaNavigationResult {
         frame,
         decoded_frames,
         used_keyframe_seek: false,
-        fell_back_to_stream_start: false,
+        fell_back_to_stream_start: !timestamp_seek_safe,
     })
 }
 
@@ -327,7 +334,9 @@ fn matches_index_entry(decoded: &DecodedFrame, indexed: &FrameIndexEntry) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framescope_cache::{FrameIndexOpenDisposition, SourceIdentity};
+    use framescope_cache::{
+        FrameIndexOpenDisposition, SourceIdentity, TimestampSeekSafety,
+    };
     use framescope_core::{CodecInfo, MediaDuration, MediaKind, MediaTimestamp, TimeBase};
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -340,6 +349,7 @@ mod tests {
         stream: StreamInfo,
         frames: VecDeque<DecodedRgbaFrame>,
         decoded_counter: Arc<SharedAtomicU64>,
+        seek_lands_at_frame: u64,
     }
 
     impl RgbaNavigationDecoder for FakeRgbaDecoder {
@@ -361,7 +371,7 @@ mod tests {
             while self
                 .frames
                 .front()
-                .is_some_and(|frame| frame.frame.index < 2)
+                .is_some_and(|frame| frame.frame.index < self.seek_lands_at_frame)
             {
                 self.frames.pop_front();
             }
@@ -429,20 +439,23 @@ mod tests {
         ))
     }
 
-    fn complete_index_with_source(source: SourceIdentity) -> (PathBuf, FrameIndex) {
+    fn complete_index_with_timeline_and_source(
+        source: SourceIdentity,
+        ticks: &[i64],
+        keyframes: &[usize],
+    ) -> (PathBuf, FrameIndex) {
         let path = temp_path("index.sqlite");
         let identity = FrameIndexStreamIdentity::from_stream(&stream()).unwrap();
         let (mut index, disposition) = FrameIndex::open_or_create(&path, source, identity).unwrap();
         assert_eq!(disposition, FrameIndexOpenDisposition::Created);
         index.mark_building().unwrap();
-        let ticks = [0, 40, 100, 140, 220];
         let mut anchor_id = 0;
-        let mut anchor_ticks = 0;
+        let mut anchor_ticks = ticks.first().copied().unwrap_or(0);
         let entries = ticks
             .iter()
             .enumerate()
             .map(|(id, ticks)| {
-                let keyframe = id == 0 || id == 2;
+                let keyframe = keyframes.contains(&id);
                 if keyframe {
                     anchor_id = id as u64;
                     anchor_ticks = *ticks;
@@ -456,9 +469,13 @@ mod tests {
                     }),
                     keyframe,
                     corrupt: false,
-                    anchor: KeyframeAnchor::Keyframe {
-                        frame_id: FrameId(anchor_id),
-                        presentation_timestamp: Some(timestamp(anchor_ticks)),
+                    anchor: if keyframes.is_empty() {
+                        KeyframeAnchor::StreamStart
+                    } else {
+                        KeyframeAnchor::Keyframe {
+                            frame_id: FrameId(anchor_id),
+                            presentation_timestamp: Some(timestamp(anchor_ticks)),
+                        }
                     },
                 }
             })
@@ -468,11 +485,15 @@ mod tests {
         (path, index)
     }
 
+    fn complete_index_with_source(source: SourceIdentity) -> (PathBuf, FrameIndex) {
+        complete_index_with_timeline_and_source(source, &[0, 40, 100, 140, 220], &[0, 2])
+    }
+
     fn complete_index() -> (PathBuf, FrameIndex) {
         complete_index_with_source(SourceIdentity::new(
             100,
             None,
-            Some("cached-navigation".into()),
+            Some("cached-navigation-complete-proof".into()),
         ))
     }
 
@@ -487,6 +508,7 @@ mod tests {
                 rgba_frame(4, 220, false),
             ]),
             decoded_counter: counter,
+            seek_lands_at_frame: 2,
         }
     }
 
@@ -520,6 +542,56 @@ mod tests {
         assert_eq!(second.decoded_frames, 0);
         assert_eq!(counter.load(Ordering::Relaxed), decoded_after_first);
         assert_eq!(first.pixels.pixels(), second.pixels.pixels());
+
+        drop(index);
+        let _ = std::fs::remove_file(index_path);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn duplicate_keyframe_pts_never_return_earlier_rgba_payload_for_later_frame_id() {
+        let source = SourceIdentity::new(
+            100,
+            None,
+            Some("duplicate-keyframe-complete-proof".into()),
+        );
+        let (index_path, index) =
+            complete_index_with_timeline_and_source(source, &[0, 40, 0, 40], &[0, 2]);
+        assert_eq!(
+            index.timestamp_seek_safety().unwrap(),
+            TimestampSeekSafety::Ambiguous
+        );
+        let cache_root = temp_path("duplicate-keyframe-cache");
+        let mut cache = FrameCacheHierarchy::open(&cache_root, 1024, 1024).unwrap();
+        let counter = Arc::new(SharedAtomicU64::new(0));
+        let frames = vec![
+            rgba_frame(0, 0, true),
+            rgba_frame(1, 40, false),
+            rgba_frame(2, 0, true),
+            rgba_frame(3, 40, false),
+        ];
+
+        let result = navigate_to_frame_cached(
+            &index,
+            &mut cache,
+            || {
+                Ok(FakeRgbaDecoder {
+                    stream: stream(),
+                    frames: VecDeque::from(frames.clone()),
+                    decoded_counter: counter.clone(),
+                    // Under the old contract, seeking PTS 0 could land here and frame 0's metadata
+                    // would falsely satisfy frame 2's persisted anchor.
+                    seek_lands_at_frame: 0,
+                })
+            },
+            FrameId(2),
+        )
+        .unwrap();
+
+        assert_eq!(result.frame_id, FrameId(2));
+        assert!(!result.used_keyframe_seek);
+        assert!(result.fell_back_to_stream_start);
+        assert_eq!(result.pixels.pixels(), &[2_u8; 16]);
 
         drop(index);
         let _ = std::fs::remove_file(index_path);
