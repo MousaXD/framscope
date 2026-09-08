@@ -277,7 +277,9 @@ private class BatchManifestDocument(
  * JNI-visible SAF sink for a streaming batch export.
  *
  * Rust calls these methods synchronously. The sink therefore retains at most one caller-owned
- * document descriptor and never accumulates frame URIs or descriptors for the whole batch.
+ * document descriptor and never accumulates frame URIs or descriptors for the whole batch. The
+ * first provider/callback failure is retained only for the lifetime of this sink so Kotlin can map
+ * capacity errors such as ENOSPC without allowing a Java exception to escape through JNI.
  */
 class BatchSafFrameSink(
     private val treeUri: String,
@@ -294,6 +296,9 @@ class BatchSafFrameSink(
 
     private var pending: Pending? = null
     private var closed = false
+    private var firstFailure: Throwable? = null
+
+    internal fun failureCause(): Throwable? = firstFailure
 
     override fun openFrame(
         fileName: String,
@@ -314,7 +319,8 @@ class BatchSafFrameSink(
                 displayName = fileName,
                 mimeType = mimeType,
             )
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            recordFailure(error)
             return INVALID_FD
         }
         val value = Pending(
@@ -331,7 +337,8 @@ class BatchSafFrameSink(
                 abortPending(value)
                 INVALID_FD
             }
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            recordFailure(error)
             abortPending(value)
             INVALID_FD
         }
@@ -360,8 +367,11 @@ class BatchSafFrameSink(
             value.document.commit()
             value.document.close()
             true
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            recordFailure(error)
             runCatching { value.document.close() }
+                .exceptionOrNull()
+                ?.let(::recordFailure)
             false
         }
     }
@@ -381,6 +391,12 @@ class BatchSafFrameSink(
     private fun abortPending(value: Pending) {
         if (pending === value) pending = null
         runCatching { value.document.close() }
+            .exceptionOrNull()
+            ?.let(::recordFailure)
+    }
+
+    private fun recordFailure(error: Throwable) {
+        if (firstFailure == null) firstFailure = error
     }
 
     private fun validFrameName(fileName: String): Boolean =
