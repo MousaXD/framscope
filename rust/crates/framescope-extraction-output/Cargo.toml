@@ -1,0 +1,18 @@
+[package]
+name = "framescope-extraction-output"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+framescope-cache = { path = "../framescope-cache" }
+framescope-extraction = { path = "../framescope-extraction" }
+framescope-extraction-image = { path = "../framescope-extraction-image" }
+framescope-extraction-manifest = { path = "../framescope-extraction-manifest" }
+framescope-extraction-video = { path = "../framescope-extraction-video" }
+framescope-video = { path = "../framescope-video" }
+thiserror.workspace = true
+
+[dev-dependencies]
+framescope-core = { path = "../framescope-core" }
