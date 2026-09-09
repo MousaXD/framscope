@@ -76,16 +76,22 @@ internal class LiveScrubAdmissionPolicy {
         val minimumInterval = minimumIntervalNanos(velocityPerSecond)
         val reversed = previousDirection != 0 && sampleDirection != 0 && sampleDirection != previousDirection
         val largeJump = abs(clampedFraction - admittedFraction) >= LARGE_JUMP_FRACTION
-        val canInterruptCadence = elapsedSinceAdmission >= MIN_INTERRUPT_GAP_NANOS
+        val reversalCanInterrupt = reversed && elapsedSinceAdmission >= MIN_REVERSAL_GAP_NANOS
+        val largeJumpCanInterrupt = largeJump && elapsedSinceAdmission >= LARGE_JUMP_GAP_NANOS
 
         if (
             elapsedSinceAdmission >= minimumInterval ||
-            ((reversed || largeJump) && canInterruptCadence)
+            reversalCanInterrupt ||
+            largeJumpCanInterrupt
         ) {
             return LiveScrubAdmissionPlan.Immediate
         }
 
-        val remainingNanos = minimumInterval - elapsedSinceAdmission
+        val nextEligibleAt = minOf(
+            minimumInterval,
+            if (largeJump) LARGE_JUMP_GAP_NANOS else Long.MAX_VALUE,
+        )
+        val remainingNanos = (nextEligibleAt - elapsedSinceAdmission).coerceAtLeast(1L)
         val delayMs = ceil(remainingNanos.toDouble() / NANOS_PER_MILLISECOND.toDouble())
             .toLong()
             .coerceAtLeast(1L)
@@ -129,7 +135,8 @@ internal class LiveScrubAdmissionPolicy {
         const val FAST_INTERVAL_NANOS = 50L * NANOS_PER_MILLISECOND
         const val MEDIUM_INTERVAL_NANOS = 32L * NANOS_PER_MILLISECOND
         const val SLOW_INTERVAL_NANOS = 16L * NANOS_PER_MILLISECOND
-        const val MIN_INTERRUPT_GAP_NANOS = 12L * NANOS_PER_MILLISECOND
+        const val MIN_REVERSAL_GAP_NANOS = 12L * NANOS_PER_MILLISECOND
+        const val LARGE_JUMP_GAP_NANOS = 32L * NANOS_PER_MILLISECOND
         const val FAST_VELOCITY_FRACTIONS_PER_SECOND = 1.5
         const val MEDIUM_VELOCITY_FRACTIONS_PER_SECOND = 0.35
     }
