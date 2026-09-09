@@ -49,4 +49,28 @@ class PixelTransportTelemetryTest {
         assertEquals(200L, snapshot.totalJniUs)
         assertEquals(50L, snapshot.totalBitmapConversionUs)
     }
+
+    @Test
+    fun authoritativeFrameAccountingSeparatesJniAndBitmapWork() {
+        PixelTransportTelemetry.resetForTest()
+
+        PixelTransportTelemetry.recordAuthoritativeBufferAllocation(8_192)
+        PixelTransportTelemetry.recordAuthoritativeJniCopy(bytes = 8_192L, jniUs = 75L)
+        PixelTransportTelemetry.recordAuthoritativeBitmap(
+            allocationBytes = 4_096L,
+            copiedBytes = 4_096L,
+            conversionUs = 25L,
+        )
+
+        val snapshot = PixelTransportTelemetry.snapshot()
+        assertEquals(1L, snapshot.directBufferAllocations)
+        assertEquals(0L, snapshot.directBufferReuses)
+        assertEquals(8_192L, snapshot.directBufferAllocatedBytes)
+        assertEquals(8_192L, snapshot.nativeToJvmCopiedBytes)
+        assertEquals(1L, snapshot.bitmapAllocations)
+        assertEquals(4_096L, snapshot.bitmapAllocatedBytes)
+        assertEquals(4_096L, snapshot.bitmapCopiedBytes)
+        assertEquals(75L, snapshot.totalJniUs)
+        assertEquals(25L, snapshot.totalBitmapConversionUs)
+    }
 }
