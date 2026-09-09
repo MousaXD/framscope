@@ -82,7 +82,7 @@ internal object AndroidHardwareDecodeCapabilities {
     ): AndroidVideoDecoderCapability? {
         val codecCapabilities = runCatching { codecInfo.getCapabilitiesForType(mimeType) }.getOrNull()
             ?: return null
-        val colorFormats = codecCapabilities.colorFormats.orEmpty()
+        val colorFormats = codecCapabilities.colorFormats
         val classification = classifyDecoder(
             sdkInt = Build.VERSION.SDK_INT,
             hardwareAccelerated = if (Build.VERSION.SDK_INT >= 29) codecInfo.isHardwareAccelerated else null,
