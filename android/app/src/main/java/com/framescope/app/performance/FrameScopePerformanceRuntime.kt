@@ -161,7 +161,10 @@ private class ActiveIndexingSession(
     private val cycleTracker = IndexingWorkCycleTracker()
     private val hintLock = Any()
     private var hintController: AdpfController? = null
+
+    @Volatile
     private var currentThermalStatus = initialThermalStatus
+
     private var lastDiagnosticsElapsedMs = Long.MIN_VALUE
     private var lastDiagnosticsWorkUnits: Long? = null
     private var lastDiagnosticsSampleElapsedMs: Long? = null
@@ -197,7 +200,7 @@ private class ActiveIndexingSession(
         if (context == null || ownerTid <= 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
 
         synchronized(hintLock) {
-            if (closed.get()) return
+            if (closed.get() || currentThermalStatus >= THERMAL_STATUS_SEVERE) return
             if (hintController == null) {
                 val target = calibratedTargetDurationNanos(actualDurationNanos)
                 hintController = runCatching {
