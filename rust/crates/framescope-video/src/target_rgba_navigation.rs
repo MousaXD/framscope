@@ -315,7 +315,6 @@ where
 /// the source-quality cache.
 pub fn navigate_to_frame_bounded_preview_with_cursor<D, F>(
     index: &FrameIndex,
-    cache: &mut FrameCacheHierarchy,
     cursor: &mut Option<TargetRgbaNavigationCursor<D>>,
     mut open_fresh_decoder: F,
     frame_id: FrameId,
@@ -331,36 +330,11 @@ where
         .entry(frame_id)
         .map_err(CachedNavigationError::from)?
         .ok_or(CachedNavigationError::FrameNotIndexed)?;
-    let key = match FrameCacheKey::new(
-        index.source_identity(),
-        index.stream_identity().stream_index,
-        frame_id,
-    ) {
-        Ok(key) => Some(key),
-        Err(FrameCacheError::UnsafeSourceIdentity) => None,
-        Err(error) => return Err(CachedNavigationError::from(error).into()),
-    };
-
     let can_continue = cursor
         .as_ref()
         .is_some_and(|active| active.can_continue_to(frame_id, max_forward_frames));
     if cursor.is_some() && !can_continue {
         *cursor = None;
-    }
-
-    if let Some(key) = key.as_ref() {
-        if let Some(cached) = cache.lookup_full(key) {
-            let pixels = downscale_scrub_preview(&cached.pixels, max_edge)?;
-            return Ok(TargetPreviewNavigationResult {
-                frame_id,
-                index_entry,
-                pixels,
-                source: CachedFrameSource::Ram,
-                decoded_frames: 0,
-                used_keyframe_seek: false,
-                fell_back_to_stream_start: false,
-            });
-        }
     }
 
     let decoded = if can_continue {
@@ -1169,7 +1143,6 @@ mod tests {
 
         let preview = navigate_to_frame_bounded_preview_with_cursor(
             &index,
-            &mut cache,
             &mut cursor,
             || Ok(fake_decoder(decoded.clone(), materialized.clone())),
             FrameId(4),
