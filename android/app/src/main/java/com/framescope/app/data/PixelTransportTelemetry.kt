@@ -7,8 +7,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Pixel-transport observability that never participates in frame identity, ordering, cache keys,
- * cancellation, or admission. Counters intentionally describe transport work only; decoder and
- * cache telemetry remain owned by their respective subsystems.
+ * cancellation, or admission. Counters intentionally describe measured transport work only;
+ * decoder, swscale, and cache telemetry remain owned by their respective subsystems.
  */
 internal object PixelTransportTelemetry {
     private const val TAG = "FrameScopePixels"
@@ -18,12 +18,10 @@ internal object PixelTransportTelemetry {
     private val directBufferAllocatedBytes = AtomicLong()
     private val nativeToJvmCopiedBytes = AtomicLong()
     private val bitmapAllocations = AtomicLong()
+    private val bitmapAllocatedBytes = AtomicLong()
     private val bitmapCopiedBytes = AtomicLong()
     private val totalJniUs = AtomicLong()
     private val totalBitmapConversionUs = AtomicLong()
-    private val totalNativeConversionUs = AtomicLong()
-    private val totalNativeCopyUs = AtomicLong()
-    private val previewPixelAllocations = AtomicLong()
 
     fun recordPreview(
         descriptor: MicroscopePreviewDescriptor,
@@ -39,20 +37,20 @@ internal object PixelTransportTelemetry {
         } else {
             directBufferReuses.incrementAndGet()
         }
-        nativeToJvmCopiedBytes.addAndGet(descriptor.nativeBytesCopied)
+        nativeToJvmCopiedBytes.addAndGet(descriptor.byteLen.toLong())
         bitmapAllocations.incrementAndGet()
+        bitmapAllocatedBytes.addAndGet(bitmapAllocationBytes.coerceAtLeast(0L))
         bitmapCopiedBytes.addAndGet(descriptor.byteLen.toLong())
         totalJniUs.addAndGet(jniUs.coerceAtLeast(0L))
         totalBitmapConversionUs.addAndGet(bitmapConversionUs.coerceAtLeast(0L))
-        totalNativeConversionUs.addAndGet(descriptor.nativeConversionUs)
-        totalNativeCopyUs.addAndGet(descriptor.nativeCopyUs)
-        previewPixelAllocations.addAndGet(descriptor.previewPixelAllocations)
+        val measuredTransportAllocations = 1 + if (directBufferAllocated) 1 else 0
         log(
             "path=live_preview frame_id=${descriptor.frameId} source=${descriptor.source} " +
-                "bytes=${descriptor.byteLen} direct_buffer=${if (directBufferAllocated) "allocated" else "reused"} " +
-                "direct_capacity=$directBufferCapacity native_conversion_us=${descriptor.nativeConversionUs} " +
-                "native_copy_us=${descriptor.nativeCopyUs} jni_us=$jniUs bitmap_us=$bitmapConversionUs " +
-                "preview_pixel_allocations=${descriptor.previewPixelAllocations}",
+                "payload_bytes=${descriptor.byteLen} native_to_jvm_bytes=${descriptor.byteLen} " +
+                "direct_buffer=${if (directBufferAllocated) "allocated" else "reused"} " +
+                "direct_capacity=$directBufferCapacity bitmap_allocation_bytes=$bitmapAllocationBytes " +
+                "measured_transport_allocations=$measuredTransportAllocations " +
+                "jni_us=$jniUs bitmap_conversion_us=$bitmapConversionUs",
         )
     }
 
@@ -73,11 +71,12 @@ internal object PixelTransportTelemetry {
         conversionUs: Long,
     ) {
         bitmapAllocations.incrementAndGet()
+        bitmapAllocatedBytes.addAndGet(allocationBytes.coerceAtLeast(0L))
         bitmapCopiedBytes.addAndGet(copiedBytes.coerceAtLeast(0L))
         totalBitmapConversionUs.addAndGet(conversionUs.coerceAtLeast(0L))
         log(
-            "path=authoritative_bitmap allocation_bytes=$allocationBytes " +
-                "copied_bytes=$copiedBytes conversion_us=$conversionUs",
+            "path=authoritative_bitmap bitmap_allocation_bytes=$allocationBytes " +
+                "copied_bytes=$copiedBytes bitmap_conversion_us=$conversionUs",
         )
     }
 
@@ -87,12 +86,10 @@ internal object PixelTransportTelemetry {
         directBufferAllocatedBytes = directBufferAllocatedBytes.get(),
         nativeToJvmCopiedBytes = nativeToJvmCopiedBytes.get(),
         bitmapAllocations = bitmapAllocations.get(),
+        bitmapAllocatedBytes = bitmapAllocatedBytes.get(),
         bitmapCopiedBytes = bitmapCopiedBytes.get(),
         totalJniUs = totalJniUs.get(),
         totalBitmapConversionUs = totalBitmapConversionUs.get(),
-        totalNativeConversionUs = totalNativeConversionUs.get(),
-        totalNativeCopyUs = totalNativeCopyUs.get(),
-        previewPixelAllocations = previewPixelAllocations.get(),
     )
 
     internal fun resetForTest() {
@@ -102,12 +99,10 @@ internal object PixelTransportTelemetry {
             directBufferAllocatedBytes,
             nativeToJvmCopiedBytes,
             bitmapAllocations,
+            bitmapAllocatedBytes,
             bitmapCopiedBytes,
             totalJniUs,
             totalBitmapConversionUs,
-            totalNativeConversionUs,
-            totalNativeCopyUs,
-            previewPixelAllocations,
         ).forEach { it.set(0L) }
     }
 
@@ -124,12 +119,10 @@ internal data class PixelTransportSnapshot(
     val directBufferAllocatedBytes: Long,
     val nativeToJvmCopiedBytes: Long,
     val bitmapAllocations: Long,
+    val bitmapAllocatedBytes: Long,
     val bitmapCopiedBytes: Long,
     val totalJniUs: Long,
     val totalBitmapConversionUs: Long,
-    val totalNativeConversionUs: Long,
-    val totalNativeCopyUs: Long,
-    val previewPixelAllocations: Long,
 )
 
 /**
@@ -177,8 +170,14 @@ internal class PreviewDirectBufferPool(
     @Synchronized
     private fun release(buffer: ByteBuffer) {
         buffer.clear()
+        if (maxRetainedBuffers == 0) return
         if (retained.size < maxRetainedBuffers) {
             retained += buffer
+            return
+        }
+        val smallestIndex = retained.indices.minByOrNull { retained[it].capacity() } ?: return
+        if (retained[smallestIndex].capacity() < buffer.capacity()) {
+            retained[smallestIndex] = buffer
         }
     }
 
