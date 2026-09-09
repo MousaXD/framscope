@@ -13,9 +13,10 @@ import kotlinx.coroutines.launch
  * UI-side scrub telemetry that never participates in correctness or admission decisions.
  *
  * The native scrub telemetry measures decoder/cache service. This companion surface measures the
- * pieces only the UI can see: pointer-to-thumb draw latency, admission delay, request queue/target
- * age at publication, stale-result drops, and authoritative finger-up settle latency. Agent 12 can
- * correlate these counters with the existing `FrameScope.scrub.render` Perfetto slices.
+ * pieces only the UI can see: pointer-to-thumb draw latency, admission delay, request queue age,
+ * target age when its bitmap is actually drawn, stale-result drops, and authoritative finger-up
+ * settle-to-draw latency. Agent 12 can correlate these counters with the existing
+ * `FrameScope.scrub.render` Perfetto slices.
  */
 internal object ScrubUxTelemetry {
     private const val TAG = "FrameScopeScrubUX"
@@ -37,6 +38,7 @@ internal object ScrubUxTelemetry {
     private val targetAgeTotalUs = AtomicLong()
     private val targetAgeMaxUs = AtomicLong()
     private val targetAgeLastUs = AtomicLong()
+    private val pendingPreviewPresentation = AtomicReference<PendingPreviewPresentation?>(null)
 
     private val exactSettleSamples = AtomicLong()
     private val exactSettleTotalUs = AtomicLong()
@@ -72,34 +74,71 @@ internal object ScrubUxTelemetry {
 
     fun recordRequestStarted(
         requestId: Long,
+        sessionId: Long,
         submittedAtNanos: Long,
         startedAtNanos: Long,
     ) {
         requestStarts.incrementAndGet()
+        // A newer request makes an older not-yet-drawn preview irrelevant for age measurement.
+        pendingPreviewPresentation.get()?.takeIf { it.sessionId == sessionId }?.let { pending ->
+            pendingPreviewPresentation.compareAndSet(pending, null)
+        }
         val queueUs = elapsedUs(submittedAtNanos, startedAtNanos) ?: 0L
         traceCounter("FrameScope.scrub.request_queue_us", queueUs)
-        debugLog("request_start id=$requestId queue_us=$queueUs")
+        debugLog("request_start id=$requestId session_id=$sessionId queue_us=$queueUs")
     }
 
     fun recordRequestFinished(
         requestId: Long,
+        sessionId: Long,
         submittedAtNanos: Long,
         finishedAtNanos: Long,
         publishable: Boolean,
     ) {
         requestFinishes.incrementAndGet()
-        val ageUs = elapsedUs(submittedAtNanos, finishedAtNanos) ?: 0L
+        val serviceAgeUs = elapsedUs(submittedAtNanos, finishedAtNanos) ?: 0L
         if (publishable) {
-            targetAgeSamples.incrementAndGet()
-            targetAgeTotalUs.addAndGet(ageUs)
-            targetAgeLastUs.set(ageUs)
-            updateMax(targetAgeMaxUs, ageUs)
-            traceCounter("FrameScope.scrub.target_age_at_publication_us", ageUs)
+            pendingPreviewPresentation.set(
+                PendingPreviewPresentation(
+                    requestId = requestId,
+                    sessionId = sessionId,
+                    submittedAtNanos = submittedAtNanos,
+                ),
+            )
+            traceCounter("FrameScope.scrub.publishable_request_age_us", serviceAgeUs)
         } else {
             staleResultDrops.incrementAndGet()
             traceCounter("FrameScope.scrub.stale_result_drops", staleResultDrops.get())
         }
-        debugLog("request_end id=$requestId publishable=$publishable target_age_us=$ageUs")
+        debugLog(
+            "request_end id=$requestId session_id=$sessionId publishable=$publishable " +
+                "request_age_us=$serviceAgeUs",
+        )
+    }
+
+    /** Completes target-age timing only when the corresponding live image reaches the draw phase. */
+    fun recordPreviewPresented(
+        sessionId: Long,
+        presentedAtNanos: Long,
+    ) {
+        if (sessionId <= 0L) return
+        while (true) {
+            val pending = pendingPreviewPresentation.get() ?: return
+            if (pending.sessionId != sessionId) return
+            if (!pendingPreviewPresentation.compareAndSet(pending, null)) continue
+            elapsedUs(pending.submittedAtNanos, presentedAtNanos)?.let { ageUs ->
+                targetAgeSamples.incrementAndGet()
+                targetAgeTotalUs.addAndGet(ageUs)
+                targetAgeLastUs.set(ageUs)
+                updateMax(targetAgeMaxUs, ageUs)
+                traceCounter("FrameScope.scrub.target_age_when_presented_us", ageUs)
+                debugLog(
+                    "preview_presented id=${pending.requestId} session_id=$sessionId " +
+                        "target_age_us=$ageUs",
+                )
+            }
+            return
+        }
     }
 
     fun beginExactSettle(
@@ -110,6 +149,7 @@ internal object ScrubUxTelemetry {
         pendingExactSettle.set(PendingExactSettle(sessionId, startedAtNanos))
     }
 
+    /** Completes finger-up timing only when the new authoritative image reaches the draw phase. */
     fun completeExactSettle(
         sessionId: Long,
         completedAtNanos: Long = System.nanoTime(),
@@ -124,7 +164,7 @@ internal object ScrubUxTelemetry {
                 exactSettleTotalUs.addAndGet(latencyUs)
                 exactSettleLastUs.set(latencyUs)
                 updateMax(exactSettleMaxUs, latencyUs)
-                traceCounter("FrameScope.scrub.exact_settle_us", latencyUs)
+                traceCounter("FrameScope.scrub.exact_settle_to_draw_us", latencyUs)
                 debugLog("exact_settle session_id=$sessionId latency_us=$latencyUs")
             }
             return
@@ -183,6 +223,7 @@ internal object ScrubUxTelemetry {
             exactSettleMaxUs,
             exactSettleLastUs,
         ).forEach { it.set(0L) }
+        pendingPreviewPresentation.set(null)
         pendingExactSettle.set(null)
     }
 
@@ -208,6 +249,12 @@ internal object ScrubUxTelemetry {
             current = target.get()
         }
     }
+
+    private data class PendingPreviewPresentation(
+        val requestId: Long,
+        val sessionId: Long,
+        val submittedAtNanos: Long,
+    )
 
     private data class PendingExactSettle(
         val sessionId: Long,
