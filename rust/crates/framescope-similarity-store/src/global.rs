@@ -264,8 +264,7 @@ fn translation_similarity(left: &[u8], right: &[u8]) -> u16 {
                         continue;
                     }
                     let left_index = (y * NORMALIZED_SIDE + x) * 3;
-                    let right_index =
-                        (right_y as usize * NORMALIZED_SIDE + right_x as usize) * 3;
+                    let right_index = (right_y as usize * NORMALIZED_SIDE + right_x as usize) * 3;
                     for channel in 0..3 {
                         difference += u64::from(
                             left[left_index + channel].abs_diff(right[right_index + channel]),
@@ -288,19 +287,13 @@ fn scaled_similarity(source: &[u8], target: &[u8], inset_x_q16: u32, inset_y_q16
     let mut difference = 0_u64;
 
     for y in 0..NORMALIZED_SIDE {
-        let source_y_q16 =
-            u64::from(inset_y_q16) + y as u64 * span_y_q16 / denominator;
+        let source_y_q16 = u64::from(inset_y_q16) + y as u64 * span_y_q16 / denominator;
         for x in 0..NORMALIZED_SIDE {
-            let source_x_q16 =
-                u64::from(inset_x_q16) + x as u64 * span_x_q16 / denominator;
+            let source_x_q16 = u64::from(inset_x_q16) + x as u64 * span_x_q16 / denominator;
             let target_index = (y * NORMALIZED_SIDE + x) * 3;
             for channel in 0..3 {
-                let sampled = sample_descriptor_channel(
-                    source,
-                    source_x_q16,
-                    source_y_q16,
-                    channel,
-                );
+                let sampled =
+                    sample_descriptor_channel(source, source_x_q16, source_y_q16, channel);
                 difference += u64::from(sampled.abs_diff(target[target_index + channel]));
             }
         }
@@ -308,12 +301,7 @@ fn scaled_similarity(source: &[u8], target: &[u8], inset_x_q16: u32, inset_y_q16
     score_from_difference(difference, NORMALIZED_RGB_BYTES as u64)
 }
 
-fn sample_descriptor_channel(
-    descriptor: &[u8],
-    x_q16: u64,
-    y_q16: u64,
-    channel: usize,
-) -> u8 {
+fn sample_descriptor_channel(descriptor: &[u8], x_q16: u64, y_q16: u64, channel: usize) -> u8 {
     let max_index = NORMALIZED_SIDE - 1;
     let x0 = ((x_q16 >> 16) as usize).min(max_index);
     let y0 = ((y_q16 >> 16) as usize).min(max_index);
@@ -328,8 +316,7 @@ fn sample_descriptor_channel(
     let p11 = u64::from(descriptor[index(x1, y1)]);
     let top = p00 * u64::from(65_536 - fx) + p10 * u64::from(fx);
     let bottom = p01 * u64::from(65_536 - fx) + p11 * u64::from(fx);
-    ((top * u64::from(65_536 - fy) + bottom * u64::from(fy) + (1_u64 << 31)) >> 32)
-        .min(255) as u8
+    ((top * u64::from(65_536 - fy) + bottom * u64::from(fy) + (1_u64 << 31)) >> 32).min(255) as u8
 }
 
 fn score_from_difference(difference: u64, channels: u64) -> u16 {
