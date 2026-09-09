@@ -9,37 +9,72 @@ permissions:
   contents: read
 
 jobs:
-  rust-clippy:
+  workspace-clippy:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@1.85.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust -> target
       - name: Workspace clippy diagnostics
         id: clippy
         shell: bash
         run: |
           set +e
-          cargo clippy --workspace --all-targets --all-features --exclude framescope-video --exclude framescope-integration -- -D warnings 2>&1 | tee agent4-clippy.log
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee agent4-workspace-clippy.log
           status=${PIPESTATUS[0]}
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit 0
-      - name: Upload compiler diagnostics
+      - name: Upload workspace diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: agent4-clippy-log
-          path: rust/agent4-clippy.log
+          name: agent4-workspace-clippy-log
+          path: rust/agent4-workspace-clippy.log
           if-no-files-found: error
           retention-days: 1
-      - name: Preserve clippy result
+      - name: Preserve workspace clippy result
+        if: always()
+        shell: bash
+        run: exit "${{ steps.clippy.outputs.status }}"
+
+  video-clippy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install FFmpeg development headers
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev
+      - uses: dtolnay/rust-toolchain@1.85.1
+        with:
+          components: clippy
+      - name: Video clippy diagnostics
+        id: clippy
+        shell: bash
+        run: |
+          set +e
+          cargo clippy -p framescope-video --features system-ffmpeg --all-targets -- -D warnings 2>&1 | tee agent4-video-clippy.log
+          status=${PIPESTATUS[0]}
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload video diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent4-video-clippy-log
+          path: rust/agent4-video-clippy.log
+          if-no-files-found: error
+          retention-days: 1
+      - name: Preserve video clippy result
         if: always()
         shell: bash
         run: exit "${{ steps.clippy.outputs.status }}"
