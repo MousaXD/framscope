@@ -1,14 +1,14 @@
 use framescope_cache::{
     FRAME_INDEX_SCHEMA_VERSION, FrameCacheHierarchy, FrameId, FrameIndex, FrameIndexError,
-    FrameIndexOpenDisposition, FrameIndexStreamIdentity, SourceIdentity,
+    FrameIndexOpenDisposition, FrameIndexStreamIdentity, KeyframeAnchor, SourceIdentity,
 };
 use framescope_core::FrameScopeError;
 use framescope_video::{
     CachedNavigationError, CancellationToken, IndexingError, IndexingOptions, IndexingReport,
     MicroscopeFramePresentation, MicroscopeNavigationError, MicroscopePresentationError,
-    MicroscopeStep, MicroscopeTarget, MicroscopeTimestampSelection, OpenOptions, VideoDecoder,
-    build_or_resume_frame_index, microscope_step, microscope_target, microscope_timestamp_us,
-    present_microscope_frame,
+    MicroscopeStep, MicroscopeTarget, MicroscopeTimestampSelection, OpenOptions,
+    TargetRgbaNavigationCursor, VideoDecoder, build_or_resume_frame_index, microscope_step,
+    microscope_target, microscope_timestamp_us, present_microscope_frame_with_cursor,
 };
 use serde::Serialize;
 use std::collections::HashMap;
@@ -29,9 +29,136 @@ const MAX_MICROSCOPE_SESSIONS: usize = 4;
 const MICROSCOPE_RAM_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const MICROSCOPE_DISK_CACHE_BUDGET_BYTES: u64 = 0;
 const MAX_PRESENTATION_RGBA_BYTES: usize = 256 * 1024 * 1024;
+/// Matches the already-validated live-scrub locality bound. This is a work bound, not a timeline
+/// estimate: exact identity still comes only from persistent FrameId/index reconciliation.
+const MAX_EXACT_FORWARD_CURSOR_REUSE_FRAMES: u64 = 48;
 static NEXT_SESSION_ID: AtomicI64 = AtomicI64::new(1);
 static MICROSCOPE_SESSIONS: OnceLock<Mutex<HashMap<i64, Arc<Mutex<NavigationSession>>>>> =
     OnceLock::new();
+static FRAME_PREPARATIONS: OnceLock<Mutex<FramePreparationRegistry>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct FramePreparationRegistry {
+    next_generation: i64,
+    active: HashMap<i64, ActiveFramePreparation>,
+}
+
+#[derive(Debug)]
+struct ActiveFramePreparation {
+    generation: i64,
+    request_cancellation: CancellationToken,
+    work_cancellation: CancellationToken,
+}
+
+#[derive(Debug)]
+struct FramePreparationGuard {
+    session_id: i64,
+    generation: i64,
+    request_cancellation: CancellationToken,
+}
+
+impl FramePreparationGuard {
+    fn request_cancellation(&self) -> CancellationToken {
+        self.request_cancellation.clone()
+    }
+
+    /// Make a retained decoder's one-shot token the interrupt signal for this request only while
+    /// the request is active. A newer exact navigation can then interrupt warm forward decode
+    /// without cancelling idle cursor state during ordinary sequential navigation.
+    fn adopt_work_cancellation(&self, work_cancellation: CancellationToken) -> bool {
+        if self.request_cancellation.is_cancelled() || work_cancellation.is_cancelled() {
+            return false;
+        }
+        let Ok(mut registry) = frame_preparations().lock() else {
+            return false;
+        };
+        let Some(active) = registry.active.get_mut(&self.session_id) else {
+            return false;
+        };
+        if active.generation != self.generation || active.request_cancellation.is_cancelled() {
+            return false;
+        }
+        active.work_cancellation = work_cancellation;
+        true
+    }
+}
+
+impl Drop for FramePreparationGuard {
+    fn drop(&mut self) {
+        let Ok(mut registry) = frame_preparations().lock() else {
+            return;
+        };
+        let current = registry
+            .active
+            .get(&self.session_id)
+            .is_some_and(|active| active.generation == self.generation);
+        if current {
+            // Normal completion deliberately does not cancel the work token. A retained decoder may
+            // keep using that one-shot token on the next warm request.
+            registry.active.remove(&self.session_id);
+        }
+    }
+}
+
+fn frame_preparations() -> &'static Mutex<FramePreparationRegistry> {
+    FRAME_PREPARATIONS.get_or_init(|| Mutex::new(FramePreparationRegistry::default()))
+}
+
+fn begin_frame_preparation(session_id: i64) -> Result<FramePreparationGuard, MicroscopeFailure> {
+    if session_id <= 0 {
+        return Err(MicroscopeFailure::new(
+            "invalid_request",
+            "microscope session id must be positive",
+        ));
+    }
+    let request_cancellation = CancellationToken::new();
+    let mut registry = frame_preparations().lock().map_err(|_| {
+        MicroscopeFailure::new("bridge_error", "frame preparation state is poisoned")
+    })?;
+    if let Some(previous) = registry.active.remove(&session_id) {
+        previous.request_cancellation.cancel();
+        previous.work_cancellation.cancel();
+    }
+    let generation = registry
+        .next_generation
+        .checked_add(1)
+        .filter(|generation| *generation > 0)
+        .ok_or_else(|| {
+            MicroscopeFailure::new("bridge_error", "frame preparation generation exhausted")
+        })?;
+    registry.next_generation = generation;
+    registry.active.insert(
+        session_id,
+        ActiveFramePreparation {
+            generation,
+            request_cancellation: request_cancellation.clone(),
+            work_cancellation: request_cancellation.clone(),
+        },
+    );
+    Ok(FramePreparationGuard {
+        session_id,
+        generation,
+        request_cancellation,
+    })
+}
+
+/// Cancel expensive source-quality preparation before a newer metadata navigation waits on the
+/// per-session mutex. This is a supersession signal only; normal completion leaves the warm decoder
+/// token uncancelled so locality survives sequential frame stepping.
+fn cancel_active_frame_preparation(session_id: i64) -> bool {
+    if session_id <= 0 {
+        return false;
+    }
+    let Ok(registry) = frame_preparations().lock() else {
+        return false;
+    };
+    let Some(active) = registry.active.get(&session_id) else {
+        return false;
+    };
+    active.request_cancellation.cancel();
+    active.work_cancellation.cancel();
+    true
+}
 
 #[derive(Debug, Serialize)]
 struct FrameDetails {
@@ -138,6 +265,79 @@ struct MicroscopeOpenDiagnostics {
     indexing: IndexingRuntimeDiagnostics,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct ExactNavigationDiagnostics {
+    /// Successful authoritative source-quality presentation requests.
+    requested_exact_frames: u64,
+    /// Container timestamp seeks attempted by exact navigation.
+    random_seeks: u64,
+    /// Presentation frames decoded while continuing an already-open verified decoder cursor.
+    forward_decodes: u64,
+    /// Fresh decoder constructions, including a second open for a correctness fallback.
+    decoder_reopen_count: u64,
+    /// Total presentation frames decoded to satisfy successful exact requests.
+    decoded_frames: u64,
+    /// Requests satisfied by advancing a retained decoder without opening or seeking.
+    warm_navigation_hits: u64,
+    /// Requests satisfied directly from the source-quality RAM cache.
+    ram_navigation_hits: u64,
+    /// FrameId distance from the keyframe anchor for the most recent actual timestamp seek.
+    last_seek_distance_frames: u64,
+    /// Sum of keyframe-anchor-to-target FrameId distances for actual timestamp seeks.
+    total_seek_distance_frames: u64,
+    /// Per-request denominator data for Agent 12 latency/work correlation.
+    last_frames_decoded: u64,
+    last_decoder_reopens: u64,
+    last_random_seek: bool,
+    last_warm_navigation_hit: bool,
+}
+
+impl ExactNavigationDiagnostics {
+    fn record_success(&mut self, presentation: &MicroscopeFramePresentation, decoder_reopens: u64) {
+        let random_seek = presentation.used_keyframe_seek;
+        let warm_navigation_hit =
+            decoder_reopens == 0 && presentation.decoded_frames > 0 && !random_seek;
+        let ram_navigation_hit = decoder_reopens == 0 && presentation.decoded_frames == 0;
+        let seek_distance_frames = keyframe_seek_distance_frames(presentation);
+
+        self.requested_exact_frames = self.requested_exact_frames.saturating_add(1);
+        self.random_seeks = self.random_seeks.saturating_add(u64::from(random_seek));
+        if warm_navigation_hit {
+            self.forward_decodes = self
+                .forward_decodes
+                .saturating_add(presentation.decoded_frames);
+            self.warm_navigation_hits = self.warm_navigation_hits.saturating_add(1);
+        }
+        if ram_navigation_hit {
+            self.ram_navigation_hits = self.ram_navigation_hits.saturating_add(1);
+        }
+        self.decoder_reopen_count = self.decoder_reopen_count.saturating_add(decoder_reopens);
+        self.decoded_frames = self
+            .decoded_frames
+            .saturating_add(presentation.decoded_frames);
+        self.last_seek_distance_frames = seek_distance_frames;
+        self.total_seek_distance_frames = self
+            .total_seek_distance_frames
+            .saturating_add(seek_distance_frames);
+        self.last_frames_decoded = presentation.decoded_frames;
+        self.last_decoder_reopens = decoder_reopens;
+        self.last_random_seek = random_seek;
+        self.last_warm_navigation_hit = warm_navigation_hit;
+    }
+}
+
+fn keyframe_seek_distance_frames(presentation: &MicroscopeFramePresentation) -> u64 {
+    if !presentation.used_keyframe_seek {
+        return 0;
+    }
+    match &presentation.target.entry.anchor {
+        KeyframeAnchor::Keyframe { frame_id, .. } => {
+            presentation.frame_id().0.saturating_sub(frame_id.0)
+        }
+        KeyframeAnchor::StreamStart => 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SourceIdentityMetrics {
     seekable: bool,
@@ -176,6 +376,7 @@ struct PreparedFrameDetails {
     height: u32,
     stride_bytes: usize,
     byte_len: usize,
+    navigation: ExactNavigationDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -265,6 +466,8 @@ struct NavigationSession {
     // Declared after `index` so the SQLite connection is dropped before cleanup removes the files.
     _ephemeral_index_cleanup: Option<EphemeralIndexCleanup>,
     frame_cache: FrameCacheHierarchy,
+    decoder_cursor: Option<TargetRgbaNavigationCursor<VideoDecoder>>,
+    exact_navigation: ExactNavigationDiagnostics,
     frame_count: u64,
     current: Option<FrameId>,
     presentation_generation: i64,
@@ -286,10 +489,12 @@ pub(crate) fn open_response(fd: i32, operation_id: OperationId, cache_root: &str
 }
 
 pub(crate) fn step_response(session_id: i64, delta: i32) -> String {
+    let _ = cancel_active_frame_preparation(session_id);
     serialize_response(step_session(session_id, delta))
 }
 
 pub(crate) fn jump_frame_response(session_id: i64, frame_id: i64) -> String {
+    let _ = cancel_active_frame_preparation(session_id);
     serialize_response(jump_to_frame(session_id, frame_id))
 }
 
@@ -298,17 +503,24 @@ pub(crate) fn jump_timestamp_response(
     timestamp_us: i64,
     selection: i32,
 ) -> String {
+    let _ = cancel_active_frame_preparation(session_id);
     serialize_response(jump_to_timestamp(session_id, timestamp_us, selection))
 }
 
 pub(crate) fn prepare_frame_response(session_id: i64) -> String {
-    serialize_prepared_frame_response(prepare_current_frame(session_id))
+    // Frame preparation is the expensive authoritative operation, so keep the exact-navigation
+    // barrier alive for the decode itself, not only for the preceding metadata step/jump call.
+    let _exact_navigation = super::scrub_handoff::begin_exact_navigation(session_id);
+    let result = begin_frame_preparation(session_id)
+        .and_then(|preparation| prepare_current_frame(session_id, &preparation));
+    serialize_prepared_frame_response(result)
 }
 
 pub(crate) fn close_session(session_id: i64) -> bool {
     if session_id <= 0 {
         return false;
     }
+    let _ = cancel_active_frame_preparation(session_id);
     microscope_sessions()
         .lock()
         .map(|mut sessions| sessions.remove(&session_id).is_some())
@@ -462,6 +674,8 @@ fn open_session(
         index,
         _ephemeral_index_cleanup: ephemeral_index_cleanup,
         frame_cache,
+        decoder_cursor: None,
+        exact_navigation: ExactNavigationDiagnostics::default(),
         frame_count,
         current,
         presentation_generation,
@@ -638,25 +852,74 @@ fn jump_to_timestamp(
 }
 
 #[cfg(unix)]
-fn prepare_current_frame(session_id: i64) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+fn prepare_current_frame(
+    session_id: i64,
+    preparation: &FramePreparationGuard,
+) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+    let request_cancellation = preparation.request_cancellation();
+    if request_cancellation.is_cancelled() {
+        return Err(from_frame_scope(FrameScopeError::Cancelled));
+    }
     with_session_mut(session_id, |session| {
+        if request_cancellation.is_cancelled() {
+            return Err(from_frame_scope(FrameScopeError::Cancelled));
+        }
         let frame_id = session.current.ok_or_else(|| {
             MicroscopeFailure::new("no_frames", "video contains no indexed frames")
         })?;
+
+        let cursor_cancelled = session
+            .decoder_cursor
+            .as_ref()
+            .and_then(|cursor| cursor.cancellation_token())
+            .is_some_and(|cancellation| cancellation.is_cancelled());
+        if cursor_cancelled {
+            session.decoder_cursor = None;
+        }
+        if let Some(cursor_cancellation) = session
+            .decoder_cursor
+            .as_ref()
+            .and_then(|cursor| cursor.cancellation_token())
+        {
+            if !preparation.adopt_work_cancellation(cursor_cancellation) {
+                session.decoder_cursor = None;
+                return Err(from_frame_scope(FrameScopeError::Cancelled));
+            }
+        }
+
         let source_fd = session._source_fd.as_fd();
-        let presentation = present_microscope_frame(
+        let decoder_cancellation = request_cancellation.clone();
+        let mut decoder_reopens = 0_u64;
+        let presentation = present_microscope_frame_with_cursor(
             &session.index,
             &mut session.frame_cache,
-            || open_decoder(source_fd, CancellationToken::new()),
+            &mut session.decoder_cursor,
+            || {
+                if decoder_cancellation.is_cancelled()
+                    || !preparation.adopt_work_cancellation(decoder_cancellation.clone())
+                {
+                    return Err(FrameScopeError::Cancelled);
+                }
+                decoder_reopens = decoder_reopens.saturating_add(1);
+                open_decoder(source_fd, decoder_cancellation.clone())
+            },
             frame_id,
+            MAX_EXACT_FORWARD_CURSOR_REUSE_FRAMES,
         )
         .map_err(from_presentation)?;
+        if request_cancellation.is_cancelled() {
+            session.decoder_cursor = None;
+            return Err(from_frame_scope(FrameScopeError::Cancelled));
+        }
         if presentation.pixels.byte_len() > MAX_PRESENTATION_RGBA_BYTES {
             return Err(MicroscopeFailure::new(
                 "frame_too_large",
                 "decoded frame exceeds the Android presentation byte limit",
             ));
         }
+        session
+            .exact_navigation
+            .record_success(&presentation, decoder_reopens);
         let details = PreparedFrameDetails {
             session_id,
             frame_id: presentation.frame_id().0,
@@ -665,6 +928,7 @@ fn prepare_current_frame(session_id: i64) -> Result<PreparedFrameDetails, Micros
             height: presentation.pixels.height,
             stride_bytes: presentation.pixels.stride_bytes,
             byte_len: presentation.pixels.byte_len(),
+            navigation: session.exact_navigation.clone(),
         };
         session.current_presentation = Some(presentation);
         Ok(details)
@@ -672,7 +936,10 @@ fn prepare_current_frame(session_id: i64) -> Result<PreparedFrameDetails, Micros
 }
 
 #[cfg(not(unix))]
-fn prepare_current_frame(_session_id: i64) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+fn prepare_current_frame(
+    _session_id: i64,
+    _preparation: &FramePreparationGuard,
+) -> Result<PreparedFrameDetails, MicroscopeFailure> {
     Err(MicroscopeFailure::new(
         "bridge_error",
         "microscope frame presentation is unavailable on this platform",
@@ -1250,6 +1517,110 @@ mod tests {
     fn presentation_generation_advances_and_rejects_overflow() {
         assert_eq!(next_presentation_generation(1).unwrap(), 2);
         assert!(next_presentation_generation(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn newer_frame_preparation_cancels_request_and_adopted_decoder_work() {
+        let session_id = 91_001;
+        let first = begin_frame_preparation(session_id).unwrap();
+        let retained_decoder = CancellationToken::new();
+        assert!(first.adopt_work_cancellation(retained_decoder.clone()));
+        assert!(!first.request_cancellation().is_cancelled());
+        assert!(!retained_decoder.is_cancelled());
+
+        let second = begin_frame_preparation(session_id).unwrap();
+        assert!(first.request_cancellation().is_cancelled());
+        assert!(retained_decoder.is_cancelled());
+        assert!(!second.request_cancellation().is_cancelled());
+
+        drop(first);
+        assert!(cancel_active_frame_preparation(session_id));
+        assert!(second.request_cancellation().is_cancelled());
+        drop(second);
+        assert!(!cancel_active_frame_preparation(session_id));
+    }
+
+    #[test]
+    fn completed_frame_preparation_keeps_retained_decoder_token_warm() {
+        let session_id = 91_002;
+        let preparation = begin_frame_preparation(session_id).unwrap();
+        let retained_decoder = CancellationToken::new();
+        assert!(preparation.adopt_work_cancellation(retained_decoder.clone()));
+        drop(preparation);
+
+        assert!(!retained_decoder.is_cancelled());
+        assert!(!cancel_active_frame_preparation(session_id));
+    }
+
+    #[test]
+    fn exact_navigation_diagnostics_count_warm_and_random_work_separately() {
+        let time_base = TimeBase::new(1, 1_000).unwrap();
+        let mut diagnostics = ExactNavigationDiagnostics::default();
+        let warm = MicroscopeFramePresentation {
+            target: MicroscopeTarget {
+                entry: framescope_cache::FrameIndexEntry {
+                    frame_id: FrameId(11),
+                    presentation_timestamp: None,
+                    duration: None,
+                    keyframe: false,
+                    corrupt: false,
+                    anchor: KeyframeAnchor::Keyframe {
+                        frame_id: FrameId(10),
+                        presentation_timestamp: None,
+                    },
+                },
+                frame_count: 20,
+            },
+            pixels: framescope_cache::OwnedRgbaFrame::new(1, 1, 4, vec![0; 4]).unwrap(),
+            source: framescope_video::CachedFrameSource::Decoded,
+            decoded_frames: 1,
+            used_keyframe_seek: false,
+            fell_back_to_stream_start: false,
+            cache_insert_result: None,
+        };
+        diagnostics.record_success(&warm, 0);
+        assert_eq!(diagnostics.requested_exact_frames, 1);
+        assert_eq!(diagnostics.warm_navigation_hits, 1);
+        assert_eq!(diagnostics.forward_decodes, 1);
+        assert_eq!(diagnostics.decoder_reopen_count, 0);
+        assert_eq!(diagnostics.random_seeks, 0);
+
+        let random = MicroscopeFramePresentation {
+            target: MicroscopeTarget {
+                entry: framescope_cache::FrameIndexEntry {
+                    frame_id: FrameId(15),
+                    presentation_timestamp: Some(framescope_core::MediaTimestamp {
+                        ticks: 600,
+                        time_base,
+                    }),
+                    duration: None,
+                    keyframe: false,
+                    corrupt: false,
+                    anchor: KeyframeAnchor::Keyframe {
+                        frame_id: FrameId(12),
+                        presentation_timestamp: Some(framescope_core::MediaTimestamp {
+                            ticks: 480,
+                            time_base,
+                        }),
+                    },
+                },
+                frame_count: 20,
+            },
+            pixels: framescope_cache::OwnedRgbaFrame::new(1, 1, 4, vec![0; 4]).unwrap(),
+            source: framescope_video::CachedFrameSource::Decoded,
+            decoded_frames: 4,
+            used_keyframe_seek: true,
+            fell_back_to_stream_start: false,
+            cache_insert_result: None,
+        };
+        diagnostics.record_success(&random, 1);
+        assert_eq!(diagnostics.requested_exact_frames, 2);
+        assert_eq!(diagnostics.random_seeks, 1);
+        assert_eq!(diagnostics.decoder_reopen_count, 1);
+        assert_eq!(diagnostics.decoded_frames, 5);
+        assert_eq!(diagnostics.last_seek_distance_frames, 3);
+        assert_eq!(diagnostics.total_seek_distance_frames, 3);
+        assert!(!diagnostics.last_warm_navigation_hit);
     }
 
     #[cfg(unix)]

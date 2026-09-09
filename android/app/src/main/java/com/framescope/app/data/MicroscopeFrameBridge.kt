@@ -5,6 +5,43 @@ import org.json.JSONObject
 
 private const val MAX_PRESENTATION_RGBA_BYTES = 256L * 1024L * 1024L
 
+/** Operation counters emitted by the authoritative exact-navigation engine. */
+data class ExactNavigationDiagnostics(
+    val requestedExactFrames: Long,
+    val randomSeeks: Long,
+    val forwardDecodes: Long,
+    val decoderReopenCount: Long,
+    val decodedFrames: Long,
+    val warmNavigationHits: Long,
+    val ramNavigationHits: Long,
+    val lastSeekDistanceFrames: Long,
+    val totalSeekDistanceFrames: Long,
+    val lastFramesDecoded: Long,
+    val lastDecoderReopens: Long,
+    val lastRandomSeek: Boolean,
+    val lastWarmNavigationHit: Boolean,
+) {
+    fun isSane(): Boolean =
+        requestedExactFrames >= 0L &&
+            randomSeeks >= 0L &&
+            forwardDecodes >= 0L &&
+            decoderReopenCount >= 0L &&
+            decodedFrames >= 0L &&
+            warmNavigationHits >= 0L &&
+            ramNavigationHits >= 0L &&
+            lastSeekDistanceFrames >= 0L &&
+            totalSeekDistanceFrames >= 0L &&
+            lastFramesDecoded >= 0L &&
+            lastDecoderReopens >= 0L &&
+            randomSeeks <= requestedExactFrames &&
+            warmNavigationHits <= requestedExactFrames &&
+            ramNavigationHits <= requestedExactFrames
+
+    /** Frames decoded per successful authoritative exact-frame request. */
+    fun framesDecodedPerExactFrame(): Double? =
+        if (requestedExactFrames == 0L) null else decodedFrames.toDouble() / requestedExactFrames
+}
+
 /** Metadata-only description of one prepared source-quality RGBA frame. */
 data class PreparedMicroscopeFrame(
     val sessionId: Long,
@@ -14,10 +51,12 @@ data class PreparedMicroscopeFrame(
     val height: Int,
     val strideBytes: Long,
     val byteLen: Int,
+    val navigation: ExactNavigationDiagnostics? = null,
 ) {
     fun isSane(): Boolean {
         if (sessionId <= 0L || frameId < 0L || generation <= 0L) return false
         if (width !in 1..65_535 || height !in 1..65_535) return false
+        if (navigation?.isSane() == false) return false
         val minimumStride = width.toLong() * RGBA_BYTES_PER_PIXEL
         if (strideBytes < minimumStride) return false
         val expectedBytes = runCatching { Math.multiplyExact(strideBytes, height.toLong()) }
@@ -167,6 +206,8 @@ object MicroscopeFrameBridge : NativeMicroscopeFrameBridge {
                             height = value.getInt("height"),
                             strideBytes = value.getLong("stride_bytes"),
                             byteLen = byteLenLong.toInt(),
+                            navigation = value.optJSONObject("navigation")
+                                ?.let(::parseNavigationDiagnostics),
                         )
                     } else {
                         null
@@ -222,6 +263,25 @@ object MicroscopeFrameBridge : NativeMicroscopeFrameBridge {
             rgba = destination.asReadOnlyBuffer(),
         )
     }
+
+    private fun parseNavigationDiagnostics(value: JSONObject): ExactNavigationDiagnostics? =
+        runCatching {
+            ExactNavigationDiagnostics(
+                requestedExactFrames = value.getLong("requested_exact_frames"),
+                randomSeeks = value.getLong("random_seeks"),
+                forwardDecodes = value.getLong("forward_decodes"),
+                decoderReopenCount = value.getLong("decoder_reopen_count"),
+                decodedFrames = value.getLong("decoded_frames"),
+                warmNavigationHits = value.getLong("warm_navigation_hits"),
+                ramNavigationHits = value.getLong("ram_navigation_hits"),
+                lastSeekDistanceFrames = value.getLong("last_seek_distance_frames"),
+                totalSeekDistanceFrames = value.getLong("total_seek_distance_frames"),
+                lastFramesDecoded = value.getLong("last_frames_decoded"),
+                lastDecoderReopens = value.getLong("last_decoder_reopens"),
+                lastRandomSeek = value.getBoolean("last_random_seek"),
+                lastWarmNavigationHit = value.getBoolean("last_warm_navigation_hit"),
+            )
+        }.getOrNull()?.takeIf(ExactNavigationDiagnostics::isSane)
 
     private fun copyFailure(code: Long): NativeFrameCopy.Failure = when (code) {
         -1L -> NativeFrameCopy.Failure("invalid_request", "Rust rejected the frame copy request.")
