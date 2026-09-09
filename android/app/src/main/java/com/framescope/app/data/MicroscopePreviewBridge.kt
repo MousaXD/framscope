@@ -3,6 +3,8 @@ package com.framescope.app.data
 import android.graphics.Bitmap
 import android.os.Trace
 import java.nio.ByteBuffer
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
 
 const val DEFAULT_SCRUB_PREVIEW_MAX_EDGE = 640
@@ -44,29 +46,98 @@ data class MicroscopePreviewDescriptor(
 /**
  * One non-authoritative, bounded image used only while the timeline is being scrubbed.
  *
- * Production previews are materialized into a Bitmap before the JNI scratch-buffer lease is
- * released. The RGBA constructor is retained only for deterministic JVM fixtures and parser tests.
+ * Production previews own one reference to a pooled Bitmap. Compose must acquire a draw lease before
+ * reading that Bitmap. The bridge may then release producer ownership on supersession/cancellation
+ * without ever returning pixels to the pool while the UI can still draw them. The RGBA constructor
+ * remains only for deterministic JVM fixtures and parser tests.
  */
 class MicroscopeScrubPreview private constructor(
     val descriptor: MicroscopePreviewDescriptor,
     internal val rgba: ByteBuffer?,
-    internal val bitmap: Bitmap?,
+    private val bitmapHandle: SharedPreviewBitmapHandle?,
 ) {
     constructor(
         descriptor: MicroscopePreviewDescriptor,
         rgba: ByteBuffer,
-    ) : this(descriptor = descriptor, rgba = rgba, bitmap = null)
+    ) : this(descriptor = descriptor, rgba = rgba, bitmapHandle = null)
+
+    /** Raw access is retained for compatibility checks; production display must use a draw lease. */
+    internal val bitmap: Bitmap?
+        get() = bitmapHandle?.bitmap
+
+    internal fun acquireBitmapLease(): MicroscopePreviewBitmapLease? = bitmapHandle?.acquire()
+
+    internal fun releaseBitmapOwner() {
+        bitmapHandle?.releaseOwner()
+    }
+
+    internal fun bitmapOwnerReleasedForTest(): Boolean =
+        bitmapHandle?.ownerReleasedForTest() ?: true
 
     companion object {
-        internal fun fromBitmap(
+        internal fun fromBitmapLease(
             descriptor: MicroscopePreviewDescriptor,
-            bitmap: Bitmap,
+            bitmapLease: PreviewBitmapPoolLease,
         ): MicroscopeScrubPreview = MicroscopeScrubPreview(
             descriptor = descriptor,
             rgba = null,
-            bitmap = bitmap,
+            bitmapHandle = SharedPreviewBitmapHandle(bitmapLease),
         )
     }
+}
+
+internal class MicroscopePreviewBitmapLease private constructor(
+    val bitmap: Bitmap,
+    private val handle: SharedPreviewBitmapHandle,
+) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            handle.releaseReference()
+        }
+    }
+
+    companion object {
+        fun acquire(handle: SharedPreviewBitmapHandle): MicroscopePreviewBitmapLease =
+            MicroscopePreviewBitmapLease(handle.bitmap, handle)
+    }
+}
+
+internal class SharedPreviewBitmapHandle(
+    private val bitmapLease: PreviewBitmapPoolLease,
+) {
+    private val references = AtomicInteger(1)
+    private val ownerReleased = AtomicBoolean(false)
+
+    val bitmap: Bitmap
+        get() = bitmapLease.bitmap
+
+    fun acquire(): MicroscopePreviewBitmapLease? {
+        while (true) {
+            val current = references.get()
+            if (current <= 0) return null
+            if (references.compareAndSet(current, current + 1)) {
+                return MicroscopePreviewBitmapLease.acquire(this)
+            }
+        }
+    }
+
+    fun releaseOwner() {
+        if (ownerReleased.compareAndSet(false, true)) {
+            releaseReference()
+        }
+    }
+
+    fun releaseReference() {
+        val remaining = references.decrementAndGet()
+        check(remaining >= 0) { "Preview bitmap reference count underflow" }
+        if (remaining == 0) {
+            bitmapLease.close()
+        }
+    }
+
+    internal fun ownerReleasedForTest(): Boolean = ownerReleased.get()
 }
 
 sealed interface NativeMicroscopePreview {
@@ -115,6 +186,9 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
         System.loadLibrary("framescope_ffi")
     }.exceptionOrNull()
     private val directBufferPool = PreviewDirectBufferPool(maxRetainedBuffers = 2)
+    private val bitmapPool = PreviewBitmapPool(maxRetainedBitmaps = 2)
+    private val previewOwnersLock = Any()
+    private val latestPreviewOwnerBySession = HashMap<Long, MicroscopeScrubPreview>()
 
     @JvmStatic
     private external fun nativeRenderMicroscopePreviewTimestampUs(
@@ -201,13 +275,19 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
     }
 
     override fun cancelSession(sessionId: Long): Boolean {
-        if (sessionId <= 0L || loadFailure != null) return false
-        return runCatching { nativeCancelMicroscopePreviewSession(sessionId) }.getOrDefault(false)
+        if (sessionId <= 0L) return false
+        val releasedPreview = releaseLatestPreviewOwner(sessionId)
+        if (loadFailure != null) return releasedPreview
+        return runCatching { nativeCancelMicroscopePreviewSession(sessionId) }
+            .getOrDefault(false) || releasedPreview
     }
 
     override fun forgetSession(sessionId: Long): Boolean {
-        if (sessionId <= 0L || loadFailure != null) return false
-        return runCatching { nativeForgetMicroscopePreviewSession(sessionId) }.getOrDefault(false)
+        if (sessionId <= 0L) return false
+        val releasedPreview = releaseLatestPreviewOwner(sessionId)
+        if (loadFailure != null) return releasedPreview
+        return runCatching { nativeForgetMicroscopePreviewSession(sessionId) }
+            .getOrDefault(false) || releasedPreview
     }
 
     private fun render(
@@ -300,14 +380,28 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
             message = "Parsed live preview did not retain its synchronous RGBA transport buffer.",
             engine = parsed.engine,
         )
-        var bitmap: Bitmap? = null
+        val bitmapLease = try {
+            bitmapPool.borrow(descriptor.width, descriptor.height)
+        } catch (_: OutOfMemoryError) {
+            return NativeMicroscopePreview.Failure(
+                code = "bitmap_allocation_failed",
+                message = "Android could not allocate the bounded live preview bitmap.",
+                engine = parsed.engine,
+            )
+        } catch (error: RuntimeException) {
+            return NativeMicroscopePreview.Failure(
+                code = "bitmap_allocation_failed",
+                message = "Android could not prepare the bounded live preview bitmap: ${error.message ?: error::class.java.simpleName}",
+                engine = parsed.engine,
+            )
+        }
+        val bitmap = bitmapLease.bitmap
         val bitmapStarted = System.nanoTime()
         val traceStarted = runCatching {
             Trace.beginSection(TRACE_PREVIEW_BITMAP)
             true
         }.getOrDefault(false)
         return try {
-            bitmap = Bitmap.createBitmap(descriptor.width, descriptor.height, Bitmap.Config.ARGB_8888)
             val source = rgba.duplicate().apply {
                 position(0)
                 limit(descriptor.byteLen)
@@ -319,22 +413,29 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
                 directBufferAllocated = directBufferAllocated,
                 directBufferCapacity = directBufferCapacity,
                 jniUs = jniUs,
-                bitmapAllocationBytes = bitmap.allocationByteCount.toLong(),
+                bitmapAllocated = bitmapLease.allocated,
+                bitmapAllocationBytes = if (bitmapLease.allocated) {
+                    bitmap.allocationByteCount.toLong()
+                } else {
+                    0L
+                },
                 bitmapConversionUs = bitmapUs,
             )
+            val preview = MicroscopeScrubPreview.fromBitmapLease(descriptor, bitmapLease)
+            replaceLatestPreviewOwner(descriptor.sessionId, preview)
             NativeMicroscopePreview.Success(
-                preview = MicroscopeScrubPreview.fromBitmap(descriptor, bitmap),
+                preview = preview,
                 engine = parsed.engine,
             )
         } catch (_: OutOfMemoryError) {
-            bitmap?.recycle()
+            bitmapLease.close()
             NativeMicroscopePreview.Failure(
                 code = "bitmap_allocation_failed",
                 message = "Android could not allocate the bounded live preview bitmap.",
                 engine = parsed.engine,
             )
         } catch (error: RuntimeException) {
-            bitmap?.recycle()
+            bitmapLease.close()
             NativeMicroscopePreview.Failure(
                 code = "bitmap_copy_failed",
                 message = "Android could not materialize the live preview bitmap: ${error.message ?: error::class.java.simpleName}",
@@ -343,6 +444,23 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
         } finally {
             if (traceStarted) runCatching { Trace.endSection() }
         }
+    }
+
+    private fun replaceLatestPreviewOwner(sessionId: Long, preview: MicroscopeScrubPreview) {
+        val previous = synchronized(previewOwnersLock) {
+            latestPreviewOwnerBySession.put(sessionId, preview)
+        }
+        if (previous !== preview) {
+            previous?.releaseBitmapOwner()
+        }
+    }
+
+    private fun releaseLatestPreviewOwner(sessionId: Long): Boolean {
+        val previous = synchronized(previewOwnersLock) {
+            latestPreviewOwnerBySession.remove(sessionId)
+        } ?: return false
+        previous.releaseBitmapOwner()
+        return true
     }
 
     internal fun parseResponse(
@@ -433,4 +551,105 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
 
     private fun JSONObject.optionalString(key: String): String? =
         if (!has(key) || isNull(key)) null else getString(key).trim().takeIf(String::isNotEmpty)
+}
+
+/**
+ * Bounded reusable ARGB bitmap pool for live scrub previews.
+ *
+ * A bitmap returns here only when producer ownership and every active UI draw lease have both been
+ * released. Reconfiguration therefore cannot mutate pixels still reachable by Compose. The pool
+ * keeps the largest useful allocations, allowing smaller previews to reuse them without unbounded
+ * managed/native bitmap growth.
+ */
+internal class PreviewBitmapPool(
+    private val maxRetainedBitmaps: Int = 2,
+) {
+    private val retained = ArrayList<Bitmap>(maxRetainedBitmaps)
+
+    init {
+        require(maxRetainedBitmaps >= 0)
+    }
+
+    @Synchronized
+    fun borrow(width: Int, height: Int): PreviewBitmapPoolLease {
+        require(width > 0 && height > 0)
+        val requiredBytes = Math.multiplyExact(Math.multiplyExact(width, height), 4)
+        var bestIndex = -1
+        var bestCapacity = Int.MAX_VALUE
+        retained.forEachIndexed { index, candidate ->
+            if (
+                !candidate.isRecycled &&
+                candidate.isMutable &&
+                candidate.allocationByteCount >= requiredBytes &&
+                candidate.allocationByteCount < bestCapacity
+            ) {
+                bestIndex = index
+                bestCapacity = candidate.allocationByteCount
+            }
+        }
+
+        if (bestIndex >= 0) {
+            val bitmap = retained.removeAt(bestIndex)
+            try {
+                bitmap.reconfigure(width, height, Bitmap.Config.ARGB_8888)
+                return PreviewBitmapPoolLease(
+                    bitmap = bitmap,
+                    allocated = false,
+                    onRelease = ::release,
+                )
+            } catch (_: RuntimeException) {
+                bitmap.recycle()
+            }
+        }
+
+        return PreviewBitmapPoolLease(
+            bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888),
+            allocated = true,
+            onRelease = ::release,
+        )
+    }
+
+    @Synchronized
+    private fun release(bitmap: Bitmap) {
+        if (bitmap.isRecycled) return
+        if (!bitmap.isMutable || maxRetainedBitmaps == 0) {
+            bitmap.recycle()
+            return
+        }
+        if (retained.size < maxRetainedBitmaps) {
+            retained += bitmap
+            return
+        }
+        val smallestIndex = retained.indices.minByOrNull { retained[it].allocationByteCount }
+        if (smallestIndex == null) {
+            bitmap.recycle()
+            return
+        }
+        val smallest = retained[smallestIndex]
+        if (smallest.allocationByteCount < bitmap.allocationByteCount) {
+            retained[smallestIndex] = bitmap
+            smallest.recycle()
+        } else {
+            bitmap.recycle()
+        }
+    }
+
+    @Synchronized
+    internal fun retainedCountForTest(): Int = retained.size
+}
+
+internal class PreviewBitmapPoolLease(
+    val bitmap: Bitmap,
+    val allocated: Boolean,
+    private val onRelease: (Bitmap) -> Unit,
+) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            onRelease(bitmap)
+        }
+    }
+
+    internal fun isClosedForTest(): Boolean = closed.get()
 }
