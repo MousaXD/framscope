@@ -29,7 +29,7 @@ internal object PixelTransportTelemetry {
         directBufferAllocated: Boolean,
         directBufferCapacity: Int,
         jniUs: Long,
-        bitmapAllocated: Boolean,
+        bitmapAllocated: Boolean = true,
         bitmapAllocationBytes: Long,
         bitmapConversionUs: Long,
     ) {
