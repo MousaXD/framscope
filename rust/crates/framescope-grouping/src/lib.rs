@@ -27,7 +27,7 @@ struct ActiveGroup {
     previous: OwnedRgbaFrame,
 }
 
-/// Bounded streaming grouper using dHash as a rejection prefilter and full luma confirmation.
+/// Bounded streaming grouper using dHash as a rejection prefilter and full color confirmation.
 ///
 /// A candidate joins only when it is accepted against both the immediately previous frame and the
 /// canonical representative. This preserves the anti-chain-drift invariant while retaining only
@@ -74,14 +74,14 @@ impl HybridFrameGrouper {
         }
 
         let previous = self.engine.compare(&active.previous, &pixels)?;
-        if accepted_luma(previous).is_none() {
+        if accepted_confirmation(previous).is_none() {
             let completed = active.metadata.clone();
             self.active = Some(active_group(entry, timestamp, pixels));
             return Ok(Some(completed));
         }
 
         let representative = self.engine.compare(&active.representative, &pixels)?;
-        let Some(representative_luma) = accepted_luma(representative) else {
+        let Some(representative_confirmation) = accepted_confirmation(representative) else {
             let completed = active.metadata.clone();
             self.active = Some(active_group(entry, timestamp, pixels));
             return Ok(Some(completed));
@@ -94,7 +94,7 @@ impl HybridFrameGrouper {
         active.metadata.representative_similarity_floor = active
             .metadata
             .representative_similarity_floor
-            .min(representative_luma.basis_points);
+            .min(representative_confirmation.basis_points);
         active.previous = pixels;
         Ok(None)
     }
@@ -104,10 +104,12 @@ impl HybridFrameGrouper {
     }
 }
 
-fn accepted_luma(decision: HybridDecision) -> Option<SimilarityScore> {
+fn accepted_confirmation(decision: HybridDecision) -> Option<SimilarityScore> {
     match decision {
-        HybridDecision::Accepted { luma, .. } => Some(luma),
-        HybridDecision::RejectedByHash { .. } | HybridDecision::RejectedByLuma { .. } => None,
+        HybridDecision::Accepted { confirmation, .. } => Some(confirmation),
+        HybridDecision::RejectedByHash { .. } | HybridDecision::RejectedByConfirmation { .. } => {
+            None
+        }
     }
 }
 
@@ -234,6 +236,47 @@ mod tests {
         assert_eq!(completed.last_frame, FrameId(1));
         assert_eq!(completed.frame_count, 2);
         assert_eq!(grouper.finish().unwrap().first_frame, FrameId(2));
+    }
+
+    fn solid_rgb(r: u8, g: u8, b: u8) -> OwnedRgbaFrame {
+        let mut pixels = Vec::with_capacity(9 * 8 * 4);
+        for _ in 0..(9 * 8) {
+            pixels.extend_from_slice(&[r, g, b, 255]);
+        }
+        OwnedRgbaFrame::new(9, 8, 36, pixels).unwrap()
+    }
+
+    #[test]
+    fn equal_luma_different_hue_frames_do_not_group() {
+        let mut grouper = HybridFrameGrouper::new(policy()).unwrap();
+        assert!(
+            grouper
+                .push(&entry(0, 0, 40), solid_rgb(255, 0, 0))
+                .unwrap()
+                .is_none()
+        );
+        let completed = grouper
+            .push(&entry(1, 40, 40), solid_rgb(0, 131, 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.first_frame, FrameId(0));
+        assert_eq!(completed.last_frame, FrameId(0));
+        assert_eq!(grouper.finish().unwrap().first_frame, FrameId(1));
+    }
+
+    #[test]
+    fn a_b_a_remains_three_consecutive_runs_not_a_global_cluster() {
+        let mut grouper = HybridFrameGrouper::new(policy()).unwrap();
+        assert!(grouper.push(&entry(0, 0, 40), solid(10)).unwrap().is_none());
+        let first = grouper
+            .push(&entry(1, 40, 40), solid(220))
+            .unwrap()
+            .unwrap();
+        let second = grouper.push(&entry(2, 80, 40), solid(10)).unwrap().unwrap();
+        let third = grouper.finish().unwrap();
+        assert_eq!((first.first_frame.0, first.last_frame.0), (0, 0));
+        assert_eq!((second.first_frame.0, second.last_frame.0), (1, 1));
+        assert_eq!((third.first_frame.0, third.last_frame.0), (2, 2));
     }
 
     #[test]

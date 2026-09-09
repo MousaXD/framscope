@@ -305,7 +305,7 @@ where
         policy,
     )?;
 
-    let initial = store.visit_groups(&key, |_| {})?;
+    let initial = store.visit_groups_for_frame_count(&key, frame_count, |_| {})?;
     let (group_count, disposition) = match initial {
         SimilarityStoreLoad::Reused { group_count } => {
             (group_count, SimilarityAnalysisDisposition::Reused)
@@ -357,7 +357,7 @@ where
                 writer.append(&group)?;
             }
             let written = writer.finish()?;
-            let verified = store.visit_groups(&key, |_| {})?;
+            let verified = store.visit_groups_for_frame_count(&key, frame_count, |_| {})?;
             let SimilarityStoreLoad::Reused { group_count } = verified else {
                 return Err(GroupNavigationError::InvalidPersistedNavigation(
                     "fresh similarity result did not validate after transactional commit".into(),

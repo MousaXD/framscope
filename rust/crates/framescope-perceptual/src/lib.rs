@@ -5,11 +5,15 @@
 //! of pixels changed.
 
 use framescope_cache::OwnedRgbaFrame;
-use framescope_similarity::{SimilarityEngine, SimilarityError, SimilarityMode, SimilarityScore};
+use framescope_similarity::{SIMILARITY_SCALE, SimilarityError, SimilarityScore};
 use thiserror::Error;
 
 pub const PERCEPTUAL_SCALE: u16 = 10_000;
 pub const DHASH_BITS: u32 = 64;
+/// Persisted derived-group semantics generation for the hybrid metric.
+///
+/// Bump this whenever hash sampling, confirmation color semantics, or score normalization changes.
+pub const HYBRID_SIMILARITY_ALGORITHM_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DHash64(pub u64);
@@ -78,10 +82,14 @@ impl DHashEngine {
 }
 
 /// Two-stage policy: dHash may reject obvious differences cheaply, but only the full visible-pixel
-/// luma metric is allowed to accept a pair as similar.
+/// color confirmation is allowed to accept a pair as similar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HybridSimilarityPolicy {
     pub max_hash_distance: u8,
+    /// Minimum deterministic RGB confirmation score on the 0..=10_000 scale.
+    ///
+    /// The legacy field name is retained for source compatibility with the Phase 4 API. Persisted
+    /// hybrid results are separately fenced by `HYBRID_SIMILARITY_ALGORITHM_VERSION`.
     pub minimum_luma_similarity: u16,
 }
 
@@ -90,19 +98,76 @@ pub enum HybridDecision {
     RejectedByHash {
         perceptual: PerceptualScore,
     },
-    RejectedByLuma {
+    RejectedByConfirmation {
         perceptual: PerceptualScore,
-        luma: SimilarityScore,
+        confirmation: SimilarityScore,
     },
     Accepted {
         perceptual: PerceptualScore,
-        luma: SimilarityScore,
+        confirmation: SimilarityScore,
     },
 }
 
 impl HybridDecision {
     pub fn accepted(self) -> bool {
         matches!(self, Self::Accepted { .. })
+    }
+}
+
+/// Diagnostic result that deliberately runs the stronger confirmation even when the production
+/// dHash gate rejects the pair. It is for quality measurement, not a second acceptance path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridAnalysis {
+    pub decision: HybridDecision,
+    pub confirmation: SimilarityScore,
+    pub hash_rejected_but_confirmation_accepted: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SimilarityQualityCounters {
+    pub compared_pairs: u64,
+    pub true_positive: u64,
+    pub false_positive: u64,
+    pub true_negative: u64,
+    pub false_negative: u64,
+    pub rejected_by_hash: u64,
+    pub hash_reject_confirmation_accepts: u64,
+}
+
+impl SimilarityQualityCounters {
+    pub fn record(&mut self, expected_similar: bool, analysis: HybridAnalysis) {
+        self.compared_pairs = self.compared_pairs.saturating_add(1);
+        let accepted = analysis.decision.accepted();
+        match (expected_similar, accepted) {
+            (true, true) => self.true_positive = self.true_positive.saturating_add(1),
+            (false, true) => self.false_positive = self.false_positive.saturating_add(1),
+            (false, false) => self.true_negative = self.true_negative.saturating_add(1),
+            (true, false) => self.false_negative = self.false_negative.saturating_add(1),
+        }
+        if matches!(analysis.decision, HybridDecision::RejectedByHash { .. }) {
+            self.rejected_by_hash = self.rejected_by_hash.saturating_add(1);
+        }
+        if analysis.hash_rejected_but_confirmation_accepted {
+            self.hash_reject_confirmation_accepts =
+                self.hash_reject_confirmation_accepts.saturating_add(1);
+        }
+    }
+
+    pub fn precision_basis_points(self) -> Option<u16> {
+        ratio_basis_points(self.true_positive, self.true_positive + self.false_positive)
+    }
+
+    pub fn recall_basis_points(self) -> Option<u16> {
+        ratio_basis_points(self.true_positive, self.true_positive + self.false_negative)
+    }
+
+    pub fn f1_basis_points(self) -> Option<u16> {
+        let denominator = self
+            .true_positive
+            .saturating_mul(2)
+            .saturating_add(self.false_positive)
+            .saturating_add(self.false_negative);
+        ratio_basis_points(self.true_positive.saturating_mul(2), denominator)
     }
 }
 
@@ -117,7 +182,6 @@ pub enum HybridSimilarityError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HybridSimilarityEngine {
     policy: HybridSimilarityPolicy,
-    confirmation: SimilarityEngine,
 }
 
 impl HybridSimilarityEngine {
@@ -127,13 +191,10 @@ impl HybridSimilarityEngine {
                 policy.max_hash_distance,
             ));
         }
-        let confirmation = SimilarityEngine::new(SimilarityMode::LumaMeanAbsolute {
-            minimum_similarity: policy.minimum_luma_similarity,
-        })?;
-        Ok(Self {
-            policy,
-            confirmation,
-        })
+        if policy.minimum_luma_similarity > SIMILARITY_SCALE {
+            return Err(SimilarityError::InvalidThreshold(policy.minimum_luma_similarity).into());
+        }
+        Ok(Self { policy })
     }
 
     pub fn policy(&self) -> HybridSimilarityPolicy {
@@ -145,26 +206,129 @@ impl HybridSimilarityEngine {
         left: &OwnedRgbaFrame,
         right: &OwnedRgbaFrame,
     ) -> Result<HybridDecision, HybridSimilarityError> {
-        if (left.width, left.height) != (right.width, right.height) {
-            return Err(SimilarityError::DimensionMismatch {
-                left: (left.width, left.height),
-                right: (right.width, right.height),
-            }
-            .into());
-        }
-
+        validate_dimensions(left, right)?;
         let perceptual = DHashEngine::compare(left, right);
         if perceptual.hamming_distance > self.policy.max_hash_distance {
             return Ok(HybridDecision::RejectedByHash { perceptual });
         }
-
-        let luma = self.confirmation.compare(left, right)?;
-        if self.confirmation.accepts(luma) {
-            Ok(HybridDecision::Accepted { perceptual, luma })
+        let confirmation = rgb_mean_absolute_similarity(left, right)?;
+        if confirmation.basis_points >= self.policy.minimum_luma_similarity {
+            Ok(HybridDecision::Accepted {
+                perceptual,
+                confirmation,
+            })
         } else {
-            Ok(HybridDecision::RejectedByLuma { perceptual, luma })
+            Ok(HybridDecision::RejectedByConfirmation {
+                perceptual,
+                confirmation,
+            })
         }
     }
+
+    /// Run full confirmation even for a dHash reject so corpus/benchmark code can quantify the
+    /// hard-gate recall cost without changing the production decision.
+    pub fn analyze(
+        &self,
+        left: &OwnedRgbaFrame,
+        right: &OwnedRgbaFrame,
+    ) -> Result<HybridAnalysis, HybridSimilarityError> {
+        validate_dimensions(left, right)?;
+        let perceptual = DHashEngine::compare(left, right);
+        let confirmation = rgb_mean_absolute_similarity(left, right)?;
+        let confirmation_accepted =
+            confirmation.basis_points >= self.policy.minimum_luma_similarity;
+        let decision = if perceptual.hamming_distance > self.policy.max_hash_distance {
+            HybridDecision::RejectedByHash { perceptual }
+        } else if confirmation_accepted {
+            HybridDecision::Accepted {
+                perceptual,
+                confirmation,
+            }
+        } else {
+            HybridDecision::RejectedByConfirmation {
+                perceptual,
+                confirmation,
+            }
+        };
+        Ok(HybridAnalysis {
+            decision,
+            confirmation,
+            hash_rejected_but_confirmation_accepted: matches!(
+                decision,
+                HybridDecision::RejectedByHash { .. }
+            ) && confirmation_accepted,
+        })
+    }
+}
+
+fn validate_dimensions(
+    left: &OwnedRgbaFrame,
+    right: &OwnedRgbaFrame,
+) -> Result<(), SimilarityError> {
+    if (left.width, left.height) != (right.width, right.height) {
+        return Err(SimilarityError::DimensionMismatch {
+            left: (left.width, left.height),
+            right: (right.width, right.height),
+        });
+    }
+    Ok(())
+}
+
+fn rgb_mean_absolute_similarity(
+    left: &OwnedRgbaFrame,
+    right: &OwnedRgbaFrame,
+) -> Result<SimilarityScore, SimilarityError> {
+    let width_bytes = usize::try_from(left.width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+        .ok_or(SimilarityError::FrameLayoutOverflow)?;
+    let height = usize::try_from(left.height).map_err(|_| SimilarityError::FrameLayoutOverflow)?;
+
+    let visible_pixels_identical = (0..height).all(|y| {
+        let left_start = y * left.stride_bytes;
+        let right_start = y * right.stride_bytes;
+        left.pixels()[left_start..left_start + width_bytes]
+            == right.pixels()[right_start..right_start + width_bytes]
+    });
+    if visible_pixels_identical {
+        return Ok(SimilarityScore::IDENTICAL);
+    }
+
+    let mut total_difference: u128 = 0;
+    for y in 0..height {
+        let left_start = y * left.stride_bytes;
+        let right_start = y * right.stride_bytes;
+        let left_row = &left.pixels()[left_start..left_start + width_bytes];
+        let right_row = &right.pixels()[right_start..right_start + width_bytes];
+        for (left_px, right_px) in left_row.chunks_exact(4).zip(right_row.chunks_exact(4)) {
+            total_difference += u128::from(left_px[0].abs_diff(right_px[0]));
+            total_difference += u128::from(left_px[1].abs_diff(right_px[1]));
+            total_difference += u128::from(left_px[2].abs_diff(right_px[2]));
+        }
+    }
+
+    let pixel_count = u128::from(left.width) * u128::from(left.height);
+    let max_difference = pixel_count * 3 * 255;
+    let difference_bps = if max_difference == 0 {
+        0
+    } else {
+        ((total_difference * u128::from(SIMILARITY_SCALE) + max_difference / 2) / max_difference)
+            .min(u128::from(SIMILARITY_SCALE)) as u16
+    };
+    Ok(SimilarityScore {
+        basis_points: SIMILARITY_SCALE - difference_bps,
+        exact: false,
+    })
+}
+
+fn ratio_basis_points(numerator: u64, denominator: u64) -> Option<u16> {
+    if denominator == 0 {
+        return None;
+    }
+    let scaled = (u128::from(numerator) * u128::from(SIMILARITY_SCALE)
+        + u128::from(denominator) / 2)
+        / u128::from(denominator);
+    Some(scaled.min(u128::from(SIMILARITY_SCALE)) as u16)
 }
 
 fn sample_coordinate(size: u32, index: usize, sample_count: usize) -> usize {
@@ -281,15 +445,87 @@ mod tests {
     }
 
     #[test]
-    fn brightness_hash_collision_is_rejected_by_luma_confirmation() {
+    fn brightness_hash_collision_is_rejected_by_color_confirmation() {
         let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
             max_hash_distance: 4,
             minimum_luma_similarity: 9_900,
         })
         .unwrap();
         let decision = engine.compare(&solid(10), &solid(240)).unwrap();
-        assert!(matches!(decision, HybridDecision::RejectedByLuma { .. }));
+        assert!(matches!(
+            decision,
+            HybridDecision::RejectedByConfirmation { .. }
+        ));
         assert!(!decision.accepted());
+    }
+
+    #[test]
+    fn equal_luma_different_hue_is_rejected_by_color_confirmation() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 8,
+            minimum_luma_similarity: 9_700,
+        })
+        .unwrap();
+        let red = frame(9, 8, 36, [255_u8, 0, 0, 255].repeat(9 * 8));
+        let green = frame(9, 8, 36, [0_u8, 131, 0, 255].repeat(9 * 8));
+        assert_eq!(DHashEngine::hash(&red), DHashEngine::hash(&green));
+        assert_eq!(integer_luma(255, 0, 0), integer_luma(0, 131, 0));
+        let analysis = engine.analyze(&red, &green).unwrap();
+        assert!(matches!(
+            analysis.decision,
+            HybridDecision::RejectedByConfirmation { .. }
+        ));
+        assert!(analysis.confirmation.basis_points < 9_700);
+    }
+
+    #[test]
+    fn alpha_only_difference_has_explicit_rgb_confirmation_policy() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 8,
+            minimum_luma_similarity: 9_700,
+        })
+        .unwrap();
+        let opaque = frame(9, 8, 36, [40_u8, 80, 120, 255].repeat(9 * 8));
+        let translucent = frame(9, 8, 36, [40_u8, 80, 120, 64].repeat(9 * 8));
+        let analysis = engine.analyze(&opaque, &translucent).unwrap();
+        assert!(!analysis.confirmation.exact);
+        assert_eq!(analysis.confirmation.basis_points, SIMILARITY_SCALE);
+        assert!(analysis.decision.accepted());
+    }
+
+    #[test]
+    fn hard_dhash_gate_false_negative_is_measurable_without_policy_tuning() {
+        let engine = HybridSimilarityEngine::new(HybridSimilarityPolicy {
+            max_hash_distance: 8,
+            minimum_luma_similarity: 9_700,
+        })
+        .unwrap();
+        let mut left = Vec::with_capacity(9 * 8 * 4);
+        let mut right = Vec::with_capacity(9 * 8 * 4);
+        for _ in 0..8 {
+            for x in 0..9 {
+                let a = if x % 2 == 0 { 101_u8 } else { 100_u8 };
+                let b = if x % 2 == 0 { 100_u8 } else { 101_u8 };
+                left.extend_from_slice(&[a, a, a, 255]);
+                right.extend_from_slice(&[b, b, b, 255]);
+            }
+        }
+        let analysis = engine
+            .analyze(&frame(9, 8, 36, left), &frame(9, 8, 36, right))
+            .unwrap();
+        assert!(matches!(
+            analysis.decision,
+            HybridDecision::RejectedByHash { .. }
+        ));
+        assert!(analysis.confirmation.basis_points >= 9_700);
+        assert!(analysis.hash_rejected_but_confirmation_accepted);
+
+        let mut counters = SimilarityQualityCounters::default();
+        counters.record(true, analysis);
+        assert_eq!(counters.false_negative, 1);
+        assert_eq!(counters.rejected_by_hash, 1);
+        assert_eq!(counters.hash_reject_confirmation_accepts, 1);
+        assert_eq!(counters.recall_basis_points(), Some(0));
     }
 
     #[test]

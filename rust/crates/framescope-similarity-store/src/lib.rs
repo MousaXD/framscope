@@ -5,7 +5,9 @@
 
 use framescope_cache::{FrameId, FrameIndexStreamIdentity, SourceIdentity};
 use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
-use framescope_perceptual::{HybridSimilarityEngine, HybridSimilarityPolicy};
+use framescope_perceptual::{
+    HYBRID_SIMILARITY_ALGORITHM_VERSION, HybridSimilarityEngine, HybridSimilarityPolicy,
+};
 use framescope_similarity::{FrameGroup, SIMILARITY_SCALE, SimilarityMode};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -15,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 3;
+pub const SIMILARITY_STORE_SCHEMA_VERSION: u32 = 4;
 const META_ROW_ID: i64 = 1;
 const STATE_BUILDING: i64 = 1;
 const STATE_COMPLETE: i64 = 2;
@@ -80,7 +82,9 @@ impl SimilarityStoreKey {
             SimilarityStoreConfig::Hybrid(HybridSimilarityPolicy {
                 max_hash_distance,
                 minimum_luma_similarity,
-            }) => format!("hybrid-h{max_hash_distance}-l{minimum_luma_similarity}"),
+            }) => format!(
+                "hybrid-a{HYBRID_SIMILARITY_ALGORITHM_VERSION}-h{max_hash_distance}-l{minimum_luma_similarity}"
+            ),
         };
         format!("stream-{}-{suffix}.sqlite3", self.stream.stream_index)
     }
@@ -138,6 +142,7 @@ enum PersistedConfig {
         minimum_similarity: u16,
     },
     Hybrid {
+        algorithm_version: u32,
         max_hash_distance: u8,
         minimum_luma_similarity: u16,
     },
@@ -154,6 +159,7 @@ impl From<SimilarityStoreConfig> for PersistedConfig {
                 max_hash_distance,
                 minimum_luma_similarity,
             }) => Self::Hybrid {
+                algorithm_version: HYBRID_SIMILARITY_ALGORITHM_VERSION,
                 max_hash_distance,
                 minimum_luma_similarity,
             },
@@ -212,6 +218,33 @@ impl SimilarityStore {
     pub fn visit_groups<F>(
         &self,
         expected: &SimilarityStoreKey,
+        visitor: F,
+    ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
+    where
+        F: FnMut(FrameGroup),
+    {
+        self.visit_groups_with_frame_count(expected, None, visitor)
+    }
+
+    /// Validate a reusable contiguous grouping result against the authoritative completed frame
+    /// count. Derived state with a missing first frame, a gap, an overlap, or a wrong final frame is
+    /// invalidated rather than repaired optimistically.
+    pub fn visit_groups_for_frame_count<F>(
+        &self,
+        expected: &SimilarityStoreKey,
+        expected_frame_count: u64,
+        visitor: F,
+    ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
+    where
+        F: FnMut(FrameGroup),
+    {
+        self.visit_groups_with_frame_count(expected, Some(expected_frame_count), visitor)
+    }
+
+    fn visit_groups_with_frame_count<F>(
+        &self,
+        expected: &SimilarityStoreKey,
+        expected_frame_count: Option<u64>,
         mut visitor: F,
     ) -> Result<SimilarityStoreLoad, SimilarityStoreError>
     where
@@ -268,7 +301,9 @@ impl SimilarityStore {
         }
         let group_count = from_sql_u64(stored_count, "stored group count")?;
 
-        if !quick_check_ok(&connection)? || !validate_rows(&connection, group_count)? {
+        if !quick_check_ok(&connection)?
+            || !validate_rows(&connection, group_count, expected_frame_count)?
+        {
             drop(connection);
             purge_database_files(&path)?;
             return Ok(SimilarityStoreLoad::InvalidatedCorrupt);
@@ -454,6 +489,7 @@ fn quick_check_ok(connection: &Connection) -> Result<bool, SimilarityStoreError>
 fn validate_rows(
     connection: &Connection,
     expected_count: u64,
+    expected_frame_count: Option<u64>,
 ) -> Result<bool, SimilarityStoreError> {
     let (count, min_ordinal, max_ordinal): (i64, Option<i64>, Option<i64>) = connection.query_row(
         "SELECT COUNT(*), MIN(ordinal), MAX(ordinal) FROM similarity_groups",
@@ -480,9 +516,35 @@ fn validate_rows(
          FROM similarity_groups ORDER BY ordinal",
     )?;
     let rows = statement.query_map([], decode_group)?;
+    let mut previous_last: Option<u64> = None;
+    let mut observed_groups = 0_u64;
     for row in rows {
         let group = row?;
         if invalid_group(&group) {
+            return Ok(false);
+        }
+        if expected_frame_count.is_some() {
+            if observed_groups == 0 && group.first_frame != FrameId(0) {
+                return Ok(false);
+            }
+            if let Some(previous_last) = previous_last {
+                if previous_last.checked_add(1) != Some(group.first_frame.0) {
+                    return Ok(false);
+                }
+            }
+        }
+        previous_last = Some(group.last_frame.0);
+        observed_groups = observed_groups.saturating_add(1);
+    }
+
+    if let Some(expected_frame_count) = expected_frame_count {
+        if expected_frame_count == 0 {
+            return Ok(expected_count == 0 && observed_groups == 0);
+        }
+        if expected_count == 0
+            || observed_groups != expected_count
+            || previous_last != Some(expected_frame_count - 1)
+        {
             return Ok(false);
         }
     }
@@ -865,5 +927,72 @@ mod tests {
             Err(SimilarityStoreError::InvalidGroup(_))
         ));
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn assert_strict_coverage_invalid(tag: &str, groups: &[FrameGroup], frame_count: u64) {
+        let root = root(tag);
+        let store = SimilarityStore::new(&root);
+        let key =
+            SimilarityStoreKey::new_hybrid(source("coverage"), stream(), hybrid(8, 9_700)).unwrap();
+        let mut writer = store.begin(&key).unwrap();
+        for group in groups {
+            writer.append(group).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(
+            store
+                .visit_groups_for_frame_count(&key, frame_count, |_| {})
+                .unwrap(),
+            SimilarityStoreLoad::InvalidatedCorrupt
+        );
+        assert!(!store.path_for(&key).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strict_coverage_accepts_complete_contiguous_groups() {
+        let root = root("strict-complete");
+        let store = SimilarityStore::new(&root);
+        let key = SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
+        let mut writer = store.begin(&key).unwrap();
+        writer.append(&group(0, 1, 0)).unwrap();
+        writer.append(&group(2, 2, 80)).unwrap();
+        writer.finish().unwrap();
+        assert_eq!(
+            store.visit_groups_for_frame_count(&key, 3, |_| {}).unwrap(),
+            SimilarityStoreLoad::Reused { group_count: 2 }
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_gap() {
+        assert_strict_coverage_invalid("strict-gap", &[group(0, 0, 0), group(2, 2, 80)], 3);
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_overlap() {
+        assert_strict_coverage_invalid("strict-overlap", &[group(0, 1, 0), group(1, 2, 40)], 3);
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_first_group_not_at_zero() {
+        assert_strict_coverage_invalid("strict-first", &[group(1, 2, 40)], 3);
+    }
+
+    #[test]
+    fn strict_coverage_invalidates_final_group_ending_early() {
+        assert_strict_coverage_invalid("strict-final", &[group(0, 1, 0)], 3);
+    }
+
+    #[test]
+    fn hybrid_store_namespace_fences_metric_algorithm_generation() {
+        let store = SimilarityStore::new(root("metric-version"));
+        let key = SimilarityStoreKey::new_hybrid(source("a"), stream(), hybrid(8, 9_700)).unwrap();
+        let path = store.path_for(&key).to_string_lossy().into_owned();
+        assert!(path.contains("/v4/"));
+        assert!(path.contains(&format!(
+            "hybrid-a{HYBRID_SIMILARITY_ALGORITHM_VERSION}-h8-l9700"
+        )));
     }
 }
