@@ -1,15 +1,13 @@
 package com.framescope.app.ui
 
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assert
-import androidx.compose.ui.test.assertDoesNotExist
-import androidx.compose.ui.test.assertExists
-import androidx.compose.ui.test.fetchSemanticsNode
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -230,8 +228,8 @@ class MicroscopeTimelineControlsTest {
 
     private fun dragTimeline(fromFraction: Float, toFraction: Float) {
         composeRule.onNodeWithTag(TIMELINE_SLIDER_TAG).performTouchInput {
-            val start = Offset(width * fromFraction, center.y)
-            val end = Offset(width * toFraction, center.y)
+            val start = Offset(width.toFloat() * fromFraction, center.y)
+            val end = Offset(width.toFloat() * toFraction, center.y)
             down(start)
             moveTo(end)
             up()
