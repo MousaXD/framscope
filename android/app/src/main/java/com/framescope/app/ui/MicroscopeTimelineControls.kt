@@ -11,13 +11,17 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -69,10 +73,65 @@ internal fun MicroscopeTimelineControls(
     // A drag gesture cannot survive disposal/recreation. Persisting this flag could suppress
     // authoritative synchronization even though no gesture is active anymore.
     var scrubbing by remember(session.sessionId) { mutableStateOf(false) }
+    val previewAdmissionPolicy = remember(session.sessionId) { LiveScrubAdmissionPolicy() }
+    val delayedPreviewAdmission = remember(session.sessionId) { DelayedScrubPreviewAdmission() }
+    val thumbDrawTracker = remember(session.sessionId) { ScrubThumbDrawTracker() }
+    val previewScope = rememberCoroutineScope()
+
+    DisposableEffect(session.sessionId) {
+        onDispose {
+            delayedPreviewAdmission.cancel()
+            previewAdmissionPolicy.reset()
+            ScrubUxTelemetry.cancelExactSettle(session.sessionId)
+        }
+    }
+
+    // Exact-settle timing starts in the release callback. The navigating composition is disabled,
+    // so only the next enabled authoritative Ready composition can close that sample.
+    SideEffect {
+        if (enabled && !scrubbing) {
+            ScrubUxTelemetry.completeExactSettle(session.sessionId)
+        }
+    }
 
     LaunchedEffect(authoritativeFraction, scrubbing) {
         if (!scrubbing) {
             scrubFraction = authoritativeFraction
+            delayedPreviewAdmission.cancel()
+            previewAdmissionPolicy.reset()
+        }
+    }
+
+    fun admitPreview(
+        fraction: Float,
+        targetKey: Long,
+        observedAtNanos: Long,
+        action: () -> Unit,
+    ) {
+        when (
+            val plan = previewAdmissionPolicy.plan(
+                sessionId = session.sessionId,
+                fraction = fraction,
+                targetKey = targetKey,
+                observedAtNanos = observedAtNanos,
+            )
+        ) {
+            LiveScrubAdmissionPlan.Immediate -> {
+                delayedPreviewAdmission.cancel()
+                val admittedAtNanos = System.nanoTime()
+                previewAdmissionPolicy.markAdmitted(fraction, targetKey, admittedAtNanos)
+                ScrubUxTelemetry.recordAdmissionDelay(observedAtNanos, admittedAtNanos)
+                action()
+            }
+            is LiveScrubAdmissionPlan.After -> {
+                delayedPreviewAdmission.replace(previewScope, plan.delayMs) {
+                    val admittedAtNanos = System.nanoTime()
+                    previewAdmissionPolicy.markAdmitted(fraction, targetKey, admittedAtNanos)
+                    ScrubUxTelemetry.recordAdmissionDelay(observedAtNanos, admittedAtNanos)
+                    action()
+                }
+            }
+            LiveScrubAdmissionPlan.NoPreview -> delayedPreviewAdmission.cancel()
         }
     }
 
@@ -113,23 +172,46 @@ internal fun MicroscopeTimelineControls(
         Slider(
             value = scrubFraction,
             onValueChange = { fraction ->
+                val observedAtNanos = System.nanoTime()
+                thumbDrawTracker.onPointerInput(observedAtNanos)
                 scrubbing = true
-                scrubFraction = fraction.coerceIn(0f, 1f)
+                val nextFraction = fraction.coerceIn(0f, 1f)
+                // Gesture state is committed before any preview scheduling. Decoder work therefore
+                // cannot own the thumb position or decide whether it moves.
+                scrubFraction = nextFraction
                 val indexedBounds = bounds
                 if (indexedBounds != null) {
                     MicroscopeTimelineMath.timestampForFraction(
-                        fraction = scrubFraction,
+                        fraction = nextFraction,
                         startUs = indexedBounds.startUs,
                         endUs = indexedBounds.endUs,
-                    )?.let(onPreviewTimestampUs)
+                    )?.let { targetTimestampUs ->
+                        admitPreview(
+                            fraction = nextFraction,
+                            targetKey = targetTimestampUs,
+                            observedAtNanos = observedAtNanos,
+                        ) {
+                            onPreviewTimestampUs(targetTimestampUs)
+                        }
+                    }
                 } else {
                     MicroscopeTimelineMath.frameForFraction(
-                        fraction = scrubFraction,
+                        fraction = nextFraction,
                         frameCount = session.frameCount,
-                    )?.let(onPreviewFrame)
+                    )?.let { targetFrameId ->
+                        admitPreview(
+                            fraction = nextFraction,
+                            targetKey = targetFrameId,
+                            observedAtNanos = observedAtNanos,
+                        ) {
+                            onPreviewFrame(targetFrameId)
+                        }
+                    }
                 }
             },
             onValueChangeFinished = {
+                delayedPreviewAdmission.cancel()
+                previewAdmissionPolicy.reset()
                 val indexedBounds = bounds
                 val targetTimestampUs = indexedBounds?.let {
                     MicroscopeTimelineMath.timestampForFraction(
@@ -148,14 +230,24 @@ internal fun MicroscopeTimelineControls(
                 }
                 scrubbing = false
                 when {
-                    targetTimestampUs != null -> onFinishScrubTimestampUs(targetTimestampUs)
-                    targetFrameId != null -> onFinishScrubFrame(targetFrameId)
+                    targetTimestampUs != null -> {
+                        ScrubUxTelemetry.beginExactSettle(session.sessionId)
+                        onFinishScrubTimestampUs(targetTimestampUs)
+                    }
+                    targetFrameId != null -> {
+                        ScrubUxTelemetry.beginExactSettle(session.sessionId)
+                        onFinishScrubFrame(targetFrameId)
+                    }
                 }
             },
             enabled = enabled && session.frameCount > 1L,
             valueRange = 0f..1f,
             modifier = Modifier
                 .fillMaxWidth()
+                .drawWithContent {
+                    drawContent()
+                    thumbDrawTracker.onDrawn(System.nanoTime())
+                }
                 .testTag(TIMELINE_SLIDER_TAG)
                 .semantics { contentDescription = "Video timeline scrubber" },
         )
