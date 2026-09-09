@@ -23,6 +23,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
@@ -152,11 +153,18 @@ private fun MicroscopeFrameCard(
             }
         }
     }
-    val livePreview by produceState<MicroscopePreviewState?>(
-        initialValue = null,
-        key1 = scrubPreview,
-    ) {
-        value = scrubPreview?.toBoundedPreview()
+    val liveBitmapLease = remember(scrubPreview) {
+        scrubPreview?.acquireBitmapLease()
+    }
+    DisposableEffect(liveBitmapLease) {
+        onDispose {
+            liveBitmapLease?.close()
+        }
+    }
+    val livePreview = if (scrubPreview != null && liveBitmapLease != null) {
+        scrubPreview.toBoundedPreview(liveBitmapLease.bitmap)
+    } else {
+        null
     }
 
     RecyclePreviewBitmap(authoritativePreview)
@@ -303,14 +311,18 @@ private suspend fun MicroscopeFrame.toBoundedPreview(): MicroscopePreviewState {
     )
 }
 
-private fun MicroscopeScrubPreview.toBoundedPreview(): MicroscopePreviewState {
+private fun MicroscopeScrubPreview.toBoundedPreview(
+    displayBitmap: Bitmap,
+): MicroscopePreviewState {
     val metadata = descriptor
     if (!metadata.isSane(DEFAULT_SCRUB_PREVIEW_MAX_EDGE)) {
         return MicroscopePreviewState.Error("Live preview metadata is outside display safety bounds.")
     }
-    val displayBitmap = bitmap
-        ?: return MicroscopePreviewState.Error("The live preview transport did not provide a display bitmap.")
-    if (displayBitmap.isRecycled || displayBitmap.width != metadata.width || displayBitmap.height != metadata.height) {
+    if (
+        displayBitmap.isRecycled ||
+        displayBitmap.width != metadata.width ||
+        displayBitmap.height != metadata.height
+    ) {
         return MicroscopePreviewState.Error("The live preview bitmap no longer matches its frame descriptor.")
     }
     val plan = MicroscopePreviewMath.plan(metadata.width, metadata.height)

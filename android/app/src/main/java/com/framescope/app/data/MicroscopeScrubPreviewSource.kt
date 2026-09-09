@@ -1,5 +1,6 @@
 package com.framescope.app.data
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -77,7 +78,7 @@ class AndroidMicroscopeScrubPreviewSource(
                 cacheRoot = cacheRoot,
             )
         }
-        currentCoroutineContext().ensureActive()
+        ensureActiveOrRelease(nativeResult)
         bridgeResult(nativeResult, expectedSessionId = sessionId)
     }
 
@@ -93,7 +94,7 @@ class AndroidMicroscopeScrubPreviewSource(
                 cacheRoot = cacheRoot,
             )
         }
-        currentCoroutineContext().ensureActive()
+        ensureActiveOrRelease(nativeResult)
         bridgeResult(nativeResult, expectedSessionId = sessionId)
     }
 
@@ -120,6 +121,17 @@ class AndroidMicroscopeScrubPreviewSource(
         }
     }
 
+    private suspend fun ensureActiveOrRelease(result: NativeMicroscopePreview) {
+        try {
+            currentCoroutineContext().ensureActive()
+        } catch (cancelled: CancellationException) {
+            if (result is NativeMicroscopePreview.Success) {
+                result.preview.releaseBitmapOwner()
+            }
+            throw cancelled
+        }
+    }
+
     private fun bridgeResult(
         result: NativeMicroscopePreview,
         expectedSessionId: Long,
@@ -129,6 +141,7 @@ class AndroidMicroscopeScrubPreviewSource(
         )
         is NativeMicroscopePreview.Success -> {
             if (result.preview.descriptor.sessionId != expectedSessionId) {
+                result.preview.releaseBitmapOwner()
                 Result.failure(
                     MicroscopeOperationException(
                         code = "preview_identity_mismatch",

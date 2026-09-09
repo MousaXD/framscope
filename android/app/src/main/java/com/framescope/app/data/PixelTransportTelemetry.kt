@@ -18,6 +18,7 @@ internal object PixelTransportTelemetry {
     private val directBufferAllocatedBytes = AtomicLong()
     private val nativeToJvmCopiedBytes = AtomicLong()
     private val bitmapAllocations = AtomicLong()
+    private val bitmapReuses = AtomicLong()
     private val bitmapAllocatedBytes = AtomicLong()
     private val bitmapCopiedBytes = AtomicLong()
     private val totalJniUs = AtomicLong()
@@ -28,6 +29,7 @@ internal object PixelTransportTelemetry {
         directBufferAllocated: Boolean,
         directBufferCapacity: Int,
         jniUs: Long,
+        bitmapAllocated: Boolean = true,
         bitmapAllocationBytes: Long,
         bitmapConversionUs: Long,
     ) {
@@ -38,17 +40,24 @@ internal object PixelTransportTelemetry {
             directBufferReuses.incrementAndGet()
         }
         nativeToJvmCopiedBytes.addAndGet(descriptor.byteLen.toLong())
-        bitmapAllocations.incrementAndGet()
-        bitmapAllocatedBytes.addAndGet(bitmapAllocationBytes.coerceAtLeast(0L))
+        if (bitmapAllocated) {
+            bitmapAllocations.incrementAndGet()
+            bitmapAllocatedBytes.addAndGet(bitmapAllocationBytes.coerceAtLeast(0L))
+        } else {
+            bitmapReuses.incrementAndGet()
+        }
         bitmapCopiedBytes.addAndGet(descriptor.byteLen.toLong())
         totalJniUs.addAndGet(jniUs.coerceAtLeast(0L))
         totalBitmapConversionUs.addAndGet(bitmapConversionUs.coerceAtLeast(0L))
-        val measuredTransportAllocations = 1 + if (directBufferAllocated) 1 else 0
+        val measuredTransportAllocations =
+            (if (directBufferAllocated) 1 else 0) + (if (bitmapAllocated) 1 else 0)
         log(
             "path=live_preview frame_id=${descriptor.frameId} source=${descriptor.source} " +
                 "payload_bytes=${descriptor.byteLen} native_to_jvm_bytes=${descriptor.byteLen} " +
                 "direct_buffer=${if (directBufferAllocated) "allocated" else "reused"} " +
-                "direct_capacity=$directBufferCapacity bitmap_allocation_bytes=$bitmapAllocationBytes " +
+                "direct_capacity=$directBufferCapacity " +
+                "bitmap=${if (bitmapAllocated) "allocated" else "reused"} " +
+                "bitmap_allocation_bytes=${if (bitmapAllocated) bitmapAllocationBytes else 0L} " +
                 "measured_transport_allocations=$measuredTransportAllocations " +
                 "jni_us=$jniUs bitmap_conversion_us=$bitmapConversionUs",
         )
@@ -86,6 +95,7 @@ internal object PixelTransportTelemetry {
         directBufferAllocatedBytes = directBufferAllocatedBytes.get(),
         nativeToJvmCopiedBytes = nativeToJvmCopiedBytes.get(),
         bitmapAllocations = bitmapAllocations.get(),
+        bitmapReuses = bitmapReuses.get(),
         bitmapAllocatedBytes = bitmapAllocatedBytes.get(),
         bitmapCopiedBytes = bitmapCopiedBytes.get(),
         totalJniUs = totalJniUs.get(),
@@ -99,6 +109,7 @@ internal object PixelTransportTelemetry {
             directBufferAllocatedBytes,
             nativeToJvmCopiedBytes,
             bitmapAllocations,
+            bitmapReuses,
             bitmapAllocatedBytes,
             bitmapCopiedBytes,
             totalJniUs,
@@ -119,6 +130,7 @@ internal data class PixelTransportSnapshot(
     val directBufferAllocatedBytes: Long,
     val nativeToJvmCopiedBytes: Long,
     val bitmapAllocations: Long,
+    val bitmapReuses: Long,
     val bitmapAllocatedBytes: Long,
     val bitmapCopiedBytes: Long,
     val totalJniUs: Long,
