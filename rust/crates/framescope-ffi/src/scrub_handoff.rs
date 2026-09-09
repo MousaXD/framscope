@@ -3,7 +3,7 @@ use framescope_core::FrameScopeError;
 use framescope_video::{
     CachedFrameSource, CachedNavigationError, CancellationToken, MicroscopeTimestampSelection,
     OpenOptions, ScrubPreviewCache, VideoDecoder, downscale_scrub_preview, microscope_target,
-    microscope_timestamp_us, navigate_to_frame_cached,
+    microscope_timestamp_us, navigate_to_frame_cached_target_only,
 };
 use jni::JNIEnv;
 use jni::objects::{JByteBuffer, JClass, JString};
@@ -584,7 +584,7 @@ fn render_preview(
             PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
         })?;
         let decoder_cancellation = cancellation.clone();
-        navigate_to_frame_cached(
+        navigate_to_frame_cached_target_only(
             index,
             &mut state.source_cache,
             || open_decoder(source_fd, decoder_cancellation.clone()),
