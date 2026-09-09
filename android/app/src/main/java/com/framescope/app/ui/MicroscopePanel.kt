@@ -170,7 +170,6 @@ private fun MicroscopeFrameCard(
     }
 
     RecyclePreviewBitmap(authoritativePreview)
-    livePreview?.let { RecyclePreviewBitmap(it) }
     val displayedPreview = livePreview ?: authoritativePreview
 
     Card(
@@ -293,6 +292,7 @@ private fun MicroscopeFrameCard(
 @Composable
 private fun RecyclePreviewBitmap(state: MicroscopePreviewState) {
     val ready = state as? MicroscopePreviewState.Ready ?: return
+    if (ready.liveScrub) return
     DisposableEffect(ready.bitmap) {
         onDispose {
             if (!ready.bitmap.isRecycled) {
