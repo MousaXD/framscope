@@ -22,14 +22,9 @@ data class MicroscopePreviewDescriptor(
     val byteLen: Int,
     val source: String,
     val decodedFrames: Long,
-    val nativeConversionUs: Long = 0L,
-    val nativeCopyUs: Long = 0L,
-    val nativeBytesCopied: Long = byteLen.toLong(),
-    val previewPixelAllocations: Long = 0L,
 ) {
     fun isSane(maxEdge: Int): Boolean {
         if (sessionId <= 0L || frameId < 0L || decodedFrames < 0L) return false
-        if (nativeConversionUs < 0L || nativeCopyUs < 0L || previewPixelAllocations < 0L) return false
         if (maxEdge !in MIN_SCRUB_PREVIEW_MAX_EDGE..MAX_SCRUB_PREVIEW_MAX_EDGE) return false
         if (width !in 1..maxEdge || height !in 1..maxEdge) return false
         if (source !in VALID_SOURCES) return false
@@ -38,9 +33,7 @@ data class MicroscopePreviewDescriptor(
         val expectedBytes = runCatching { Math.multiplyExact(strideBytes, height.toLong()) }
             .getOrNull() ?: return false
         val maxBytes = maxEdge.toLong() * maxEdge.toLong() * RGBA_BYTES_PER_PIXEL
-        return expectedBytes == byteLen.toLong() &&
-            expectedBytes in 1..maxBytes &&
-            nativeBytesCopied == expectedBytes
+        return expectedBytes == byteLen.toLong() && expectedBytes in 1..maxBytes
     }
 
     private companion object {
@@ -386,10 +379,6 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
                             byteLen = byteLenLong.toInt(),
                             source = value.getString("source"),
                             decodedFrames = value.getLong("decoded_frames"),
-                            nativeConversionUs = value.optLong("native_conversion_us", 0L),
-                            nativeCopyUs = value.optLong("native_copy_us", 0L),
-                            nativeBytesCopied = value.optLong("native_bytes_copied", byteLenLong),
-                            previewPixelAllocations = value.optLong("preview_pixel_allocations", 0L),
                         )
                     } else {
                         null
