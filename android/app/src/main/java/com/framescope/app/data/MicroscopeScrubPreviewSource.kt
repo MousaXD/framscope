@@ -121,7 +121,7 @@ class AndroidMicroscopeScrubPreviewSource(
         }
     }
 
-    private fun ensureActiveOrRelease(result: NativeMicroscopePreview) {
+    private suspend fun ensureActiveOrRelease(result: NativeMicroscopePreview) {
         try {
             currentCoroutineContext().ensureActive()
         } catch (cancelled: CancellationException) {
