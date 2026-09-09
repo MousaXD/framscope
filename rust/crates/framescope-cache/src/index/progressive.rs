@@ -390,7 +390,10 @@ impl ProgressiveFrameIndex {
             lifecycle: ProgressiveLayerLifecycle::from_i64(row.1)?,
             generation: to_u32(row.2, "layer generation")?,
             completed_units: to_u64(row.3, "completed units")?,
-            total_units: row.4.map(|value| to_u64(value, "total units")).transpose()?,
+            total_units: row
+                .4
+                .map(|value| to_u64(value, "total units"))
+                .transpose()?,
             covered_frame_prefix: row
                 .5
                 .map(|value| to_u64(value, "covered frame prefix"))
@@ -444,9 +447,11 @@ impl ProgressiveFrameIndex {
     }
 
     pub fn structural_anchor_count(&self) -> Result<u64, ProgressiveIndexError> {
-        let count: i64 = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM navigation_anchor", [], |row| row.get(0))?;
+        let count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM navigation_anchor", [], |row| {
+                    row.get(0)
+                })?;
         to_u64(count, "structural anchor count")
     }
 
@@ -637,9 +642,9 @@ impl ProgressiveFrameIndex {
     }
 
     pub fn visual_artifact_count(&self) -> Result<u64, ProgressiveIndexError> {
-        let count: i64 = self
-            .connection
-            .query_row("SELECT COUNT(*) FROM visual_artifact", [], |row| row.get(0))?;
+        let count: i64 =
+            self.connection
+                .query_row("SELECT COUNT(*) FROM visual_artifact", [], |row| row.get(0))?;
         to_u64(count, "visual artifact count")
     }
 
@@ -761,7 +766,8 @@ impl ProgressiveFrameIndex {
                 },
             )
             .optional()?;
-        let Some((source_key, source_json, stream_json, authority_schema, timeline_generation)) = row
+        let Some((source_key, source_json, stream_json, authority_schema, timeline_generation)) =
+            row
         else {
             return Ok(None);
         };
@@ -839,10 +845,18 @@ impl ProgressiveFrameIndex {
     }
 }
 
-fn initialize_status_rows(transaction: &rusqlite::Transaction<'_>) -> Result<(), ProgressiveIndexError> {
+fn initialize_status_rows(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), ProgressiveIndexError> {
     for (layer, generation) in [
-        (ProgressiveIndexLayer::StructuralNavigation, STRUCTURAL_INDEX_GENERATION),
-        (ProgressiveIndexLayer::VisualAcceleration, VISUAL_INDEX_GENERATION),
+        (
+            ProgressiveIndexLayer::StructuralNavigation,
+            STRUCTURAL_INDEX_GENERATION,
+        ),
+        (
+            ProgressiveIndexLayer::VisualAcceleration,
+            VISUAL_INDEX_GENERATION,
+        ),
         (
             ProgressiveIndexLayer::AuthoritativeExact,
             FRAME_TIMELINE_CONTRACT_GENERATION,
@@ -959,7 +973,9 @@ fn safe_relative_storage_key(value: &str) -> bool {
     }
     let path = Path::new(value);
     !path.is_absolute()
-        && path.components().all(|component| matches!(component, Component::Normal(_)))
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn decode_structural_anchor(
@@ -987,15 +1003,24 @@ fn decode_structural_anchor(
     Ok(StructuralAnchor {
         ordinal: to_u64(row.0, "anchor ordinal")?,
         kind: StructuralAnchorKind::from_i64(row.1)?,
-        frame_id: row.2.map(|value| to_u64(value, "anchor frame id").map(FrameId)).transpose()?,
+        frame_id: row
+            .2
+            .map(|value| to_u64(value, "anchor frame id").map(FrameId))
+            .transpose()?,
         presentation_timestamp: decode_timestamp(row.3, row.4, row.5)?,
         gop_end_frame_exclusive: row
             .6
             .map(|value| to_u64(value, "GOP end frame").map(FrameId))
             .transpose()?,
         gop_end_timestamp: decode_timestamp(row.7, row.8, row.9)?,
-        packet_index: row.10.map(|value| to_u64(value, "packet index")).transpose()?,
-        byte_offset: row.11.map(|value| to_u64(value, "byte offset")).transpose()?,
+        packet_index: row
+            .10
+            .map(|value| to_u64(value, "packet index"))
+            .transpose()?,
+        byte_offset: row
+            .11
+            .map(|value| to_u64(value, "byte offset"))
+            .transpose()?,
         packet_pts: decode_timestamp(row.12, row.13, row.14)?,
         packet_dts: decode_timestamp(row.15, row.16, row.17)?,
     })
@@ -1162,8 +1187,9 @@ fn remove_if_exists(path: &Path) -> Result<(), std::io::Error> {
 }
 
 fn to_i64(value: u64, label: &str) -> Result<i64, ProgressiveIndexError> {
-    i64::try_from(value)
-        .map_err(|_| ProgressiveIndexError::InvalidState(format!("{label} exceeds SQLite i64 range")))
+    i64::try_from(value).map_err(|_| {
+        ProgressiveIndexError::InvalidState(format!("{label} exceeds SQLite i64 range"))
+    })
 }
 
 fn to_u64(value: i64, label: &str) -> Result<u64, ProgressiveIndexError> {
@@ -1221,7 +1247,13 @@ mod tests {
         FrameIndexStreamIdentity::from_stream(&info).unwrap()
     }
 
-    fn entry(frame: u64, ticks: i64, keyframe: bool, anchor: u64, anchor_ticks: i64) -> FrameIndexEntry {
+    fn entry(
+        frame: u64,
+        ticks: i64,
+        keyframe: bool,
+        anchor: u64,
+        anchor_ticks: i64,
+    ) -> FrameIndexEntry {
         let time_base = TimeBase::new(1, 1_000).unwrap();
         FrameIndexEntry {
             frame_id: FrameId(frame),
@@ -1423,7 +1455,9 @@ mod tests {
             ProgressiveFrameIndex::open_or_create(&companion_path, &authority).unwrap();
         drop(progressive);
         let connection = Connection::open(&companion_path).unwrap();
-        connection.pragma_update(None, "user_version", 999_i64).unwrap();
+        connection
+            .pragma_update(None, "user_version", 999_i64)
+            .unwrap();
         drop(connection);
 
         let (progressive, disposition) =
