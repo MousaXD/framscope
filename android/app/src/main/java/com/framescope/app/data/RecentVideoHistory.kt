@@ -264,7 +264,9 @@ class RecentVideoHistoryRepository(
                 ?.let(::indexOnlyRecord)
             ?: throw IllegalArgumentException("Media-library record no longer exists.")
         val record = recentVideoRecord(
-            id = previous.id,
+            // An index-only row is a derived identity for the cached source, not a source-record id.
+            // Give the selected URI an independent id until native source identity proves the join.
+            id = if (previous.contentUri == null) idFactory() else previous.id,
             contentUri = contentUri,
             video = video,
             permissionStatus = permissionStatus,
