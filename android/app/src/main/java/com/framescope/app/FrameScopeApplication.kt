@@ -7,22 +7,23 @@ import com.framescope.app.performance.FrameScopePerformanceRuntime
 class FrameScopeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        FrameScopePerformanceRuntime.initialize(this)
+        // Keep RAM policy on the same cache namespace used by microscope/scrub/storage.
         RamAccelerationRuntime.initialize(
             context = this,
-            cacheRoot = cacheDir.resolve("ram-acceleration"),
+            cacheRoot = cacheDir.resolve("framescope").absolutePath,
         )
-        FrameScopePerformanceRuntime.initialize(this)
     }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        RamAccelerationRuntime.onTrimMemory(level)
         FrameScopePerformanceRuntime.onTrimMemory(level)
+        RamAccelerationRuntime.onTrimMemory(level)
     }
 
     override fun onLowMemory() {
-        RamAccelerationRuntime.onLowMemory()
-        FrameScopePerformanceRuntime.onLowMemory()
         super.onLowMemory()
+        FrameScopePerformanceRuntime.onLowMemory()
+        RamAccelerationRuntime.onLowMemory()
     }
 }
