@@ -166,15 +166,10 @@ private fun MicroscopeFrameCard(
         initialValue = null,
         key1 = scrubPreview,
     ) {
-        value = scrubPreview?.let { preview ->
-            withContext(Dispatchers.Default) {
-                preview.toBoundedPreview()
-            }
-        }
+        value = scrubPreview?.toBoundedPreview()
     }
 
     RecyclePreviewBitmap(authoritativePreview)
-    livePreview?.let { RecyclePreviewBitmap(it) }
     val displayedPreview = livePreview ?: authoritativePreview
 
     Card(
@@ -297,6 +292,7 @@ private fun MicroscopeFrameCard(
 @Composable
 private fun RecyclePreviewBitmap(state: MicroscopePreviewState) {
     val ready = state as? MicroscopePreviewState.Ready ?: return
+    if (ready.liveScrub) return
     DisposableEffect(ready.bitmap) {
         onDispose {
             if (!ready.bitmap.isRecycled) {
@@ -419,19 +415,26 @@ private suspend fun MicroscopeFrame.toBoundedPreview(): MicroscopePreviewState {
     )
 }
 
-private suspend fun MicroscopeScrubPreview.toBoundedPreview(): MicroscopePreviewState {
+private fun MicroscopeScrubPreview.toBoundedPreview(): MicroscopePreviewState {
     val metadata = descriptor
     if (!metadata.isSane(DEFAULT_SCRUB_PREVIEW_MAX_EDGE)) {
         return MicroscopePreviewState.Error("Live preview metadata is outside display safety bounds.")
     }
-    return rgbaToBoundedPreview(
-        width = metadata.width,
-        height = metadata.height,
-        strideBytes = metadata.strideBytes,
-        rgba = rgba,
+    val displayBitmap = bitmap
+        ?: return MicroscopePreviewState.Error("The live preview transport did not provide a display bitmap.")
+    if (displayBitmap.isRecycled || displayBitmap.width != metadata.width || displayBitmap.height != metadata.height) {
+        return MicroscopePreviewState.Error("The live preview bitmap no longer matches its frame descriptor.")
+    }
+    val plan = MicroscopePreviewMath.plan(metadata.width, metadata.height)
+        ?: return MicroscopePreviewState.Error("Could not plan the bounded live preview.")
+    if (plan.isDownscaled) {
+        return MicroscopePreviewState.Error("The native live preview exceeded the Android display preview budget.")
+    }
+    return MicroscopePreviewState.Ready(
+        bitmap = displayBitmap,
+        plan = plan,
         frameId = metadata.frameId,
         liveScrub = true,
-        errorMessage = "The live timeline preview could not be converted for display.",
     )
 }
 
