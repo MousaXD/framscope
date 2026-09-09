@@ -29,9 +29,31 @@ if readelf -W -d "$LIB" | grep -Eq '\(RPATH\)|\(RUNPATH\)'; then
   exit 1
 fi
 
+# Keep the shipped Kotlin/native surface link-checked. A Kotlin `external` declaration that is not
+# exported by libframescope_ffi.so is a runtime UnsatisfiedLinkError even when both Kotlin and Rust
+# unit tests are green, so all product-critical bridges belong in this gate.
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeVersion'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeInspectVideoFd'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeOpenMicroscopeSession'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeStepMicroscope'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeJumpMicroscopeFrame'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeJumpMicroscopeTimestampUs'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeCloseMicroscopeSession'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustBridge_nativeCancelInspection'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustMicroscopeIndexingProgressSource_nativeMicroscopeIndexingProgress'
+
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewTimestampUs'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewFrame'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_MicroscopePreviewBridge_nativePrefetchMicroscopePreviewFrame'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_MicroscopePreviewBridge_nativeCancelMicroscopePreviewSession'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_MicroscopePreviewBridge_nativeForgetMicroscopePreviewSession'
+
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_MicroscopeSimilarityBridge_nativeFindSimilarFrames'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_MicroscopeSimilarityBridge_nativeCancelSimilarity'
+
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RamAccelerationBridge_nativeConfigureRamAcceleration'
+nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RamAccelerationBridge_nativeRamAccelerationStats'
+
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_RustUniqueExportBridge_nativeExportMicroscopeUniqueGroupsFd'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats'
 nm -D "$LIB" | grep -q 'Java_com_framescope_app_data_FrameScopeStorageBridge_nativeClearStorage'
