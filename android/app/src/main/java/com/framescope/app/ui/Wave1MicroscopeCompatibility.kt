@@ -1,6 +1,9 @@
 package com.framescope.app.ui
 
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.unit.dp
 import com.framescope.app.data.MicroscopeSessionSnapshot
 import com.framescope.app.data.VideoMetadata
 
@@ -73,11 +76,17 @@ internal fun MicroscopeInspectorPanel(
     onJumpFrame: (Long) -> Unit,
     onJumpTimestampUs: (Long) -> Unit,
 ) {
-    MicroscopeInspectorWorkspace(
-        state = state,
-        metadata = metadata,
-        onStep = onStep,
-        onJumpFrame = onJumpFrame,
-        onJumpTimestampUs = onJumpTimestampUs,
-    )
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        MicroscopeInspectorWorkspace(
+            state = state,
+            metadata = metadata,
+            onStep = onStep,
+            onJumpFrame = onJumpFrame,
+            onJumpTimestampUs = onJumpTimestampUs,
+        )
+        MicroscopeSimilarityInspectorPanel(
+            state = state,
+            onJumpFrame = onJumpFrame,
+        )
+    }
 }

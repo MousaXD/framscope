@@ -1,7 +1,44 @@
 use framescope_cache::OwnedRgbaFrame;
 use framescope_perceptual::{
-    HybridSimilarityEngine, HybridSimilarityPolicy, SimilarityQualityCounters,
+    HybridDecision, HybridSimilarityEngine, HybridSimilarityPolicy, SimilarityQualityCounters,
 };
+
+const HASH_DISTANCE_BUCKETS: usize = 65;
+const CONFIRMATION_BUCKET_WIDTH_BPS: usize = 100;
+const CONFIRMATION_SCORE_BUCKETS: usize = 101;
+
+#[derive(Debug)]
+struct QualityDistributions {
+    hash_distance: [u64; HASH_DISTANCE_BUCKETS],
+    confirmation_score: [u64; CONFIRMATION_SCORE_BUCKETS],
+}
+
+impl Default for QualityDistributions {
+    fn default() -> Self {
+        Self {
+            hash_distance: [0; HASH_DISTANCE_BUCKETS],
+            confirmation_score: [0; CONFIRMATION_SCORE_BUCKETS],
+        }
+    }
+}
+
+impl QualityDistributions {
+    fn record(&mut self, analysis: framescope_perceptual::HybridAnalysis) {
+        let perceptual = match analysis.decision {
+            HybridDecision::RejectedByHash { perceptual }
+            | HybridDecision::RejectedByConfirmation { perceptual, .. }
+            | HybridDecision::Accepted { perceptual, .. } => perceptual,
+        };
+        self.hash_distance[usize::from(perceptual.hamming_distance)] += 1;
+        let confirmation_bucket =
+            usize::from(analysis.confirmation.basis_points) / CONFIRMATION_BUCKET_WIDTH_BPS;
+        self.confirmation_score[confirmation_bucket.min(CONFIRMATION_SCORE_BUCKETS - 1)] += 1;
+    }
+
+    fn observations(&self) -> u64 {
+        self.hash_distance.iter().sum()
+    }
+}
 
 fn frame_from_rgb(width: u32, height: u32, rgb: &[(u8, u8, u8)]) -> OwnedRgbaFrame {
     assert_eq!(rgb.len(), (width * height) as usize);
@@ -199,17 +236,25 @@ fn labeled_similarity_corpus_reports_quality_and_hash_gate_misses() {
     ];
 
     let mut counters = SimilarityQualityCounters::default();
+    let mut distributions = QualityDistributions::default();
     for case in &cases {
         let right = frame_from_rgb(16, 16, &case.right);
         let analysis = engine.analyze(&left, &right).unwrap();
+        let hamming_distance = match analysis.decision {
+            HybridDecision::RejectedByHash { perceptual }
+            | HybridDecision::RejectedByConfirmation { perceptual, .. }
+            | HybridDecision::Accepted { perceptual, .. } => perceptual.hamming_distance,
+        };
         eprintln!(
-            "{} expected={} accepted={} confirmation={} gate_false_negative={}",
+            "{} expected={} accepted={} dhash_distance={} confirmation={} gate_false_negative={}",
             case.name,
             case.expected_similar,
             analysis.decision.accepted(),
+            hamming_distance,
             analysis.confirmation.basis_points,
             analysis.hash_rejected_but_confirmation_accepted,
         );
+        distributions.record(analysis);
         counters.record(case.expected_similar, analysis);
     }
 
@@ -222,6 +267,7 @@ fn labeled_similarity_corpus_reports_quality_and_hash_gate_misses() {
             &frame_from_rgb(16, 16, &green),
         )
         .unwrap();
+    distributions.record(hue_analysis);
     counters.record(false, hue_analysis);
     assert!(!hue_analysis.decision.accepted());
 
@@ -231,11 +277,16 @@ fn labeled_similarity_corpus_reports_quality_and_hash_gate_misses() {
         + counters.false_negative;
     assert_eq!(classified, counters.compared_pairs);
     assert_eq!(counters.compared_pairs, cases.len() as u64 + 1);
+    assert_eq!(distributions.observations(), counters.compared_pairs);
+    assert_eq!(
+        distributions.confirmation_score.iter().sum::<u64>(),
+        counters.compared_pairs,
+    );
     assert!(counters.precision_basis_points().is_some());
     assert!(counters.recall_basis_points().is_some());
     assert!(counters.f1_basis_points().is_some());
     eprintln!(
-        "quality tp={} fp={} tn={} fn={} precision_bps={:?} recall_bps={:?} f1_bps={:?} hash_rejects={} hash_reject_confirmation_accepts={}",
+        "quality tp={} fp={} tn={} fn={} precision_bps={:?} recall_bps={:?} f1_bps={:?} hash_rejects={} hash_reject_confirmation_accepts={} dhash_histogram={:?} confirmation_histogram_100bps={:?}",
         counters.true_positive,
         counters.false_positive,
         counters.true_negative,
@@ -245,5 +296,7 @@ fn labeled_similarity_corpus_reports_quality_and_hash_gate_misses() {
         counters.f1_basis_points(),
         counters.rejected_by_hash,
         counters.hash_reject_confirmation_accepts,
+        distributions.hash_distance,
+        distributions.confirmation_score,
     );
 }

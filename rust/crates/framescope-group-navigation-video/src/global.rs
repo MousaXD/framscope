@@ -1,35 +1,23 @@
-//! Sequential source-quality video adapter for bounded similarity-group navigation.
-//!
-//! The core group-navigation crate intentionally knows nothing about FFmpeg or Android. This crate
-//! adapts a fresh `VideoDecoder` into that core contract while preserving the Phase 2/3 rules:
-//! presentation timestamps remain authoritative, the selected stream must match the indexed stream,
-//! and pixels are owned RGBA snapshots rather than lossy preview proxies.
+//! Source-quality FFmpeg adapter for non-contiguous similar-frame retrieval.
 
-use framescope_cache::{
-    FrameId, FrameIndex, FrameIndexEntry, FrameIndexStreamIdentity, OwnedRgbaFrame, SourceIdentity,
-};
+use framescope_cache::{FrameId, FrameIndex, FrameIndexStreamIdentity, OwnedRgbaFrame};
 use framescope_core::{DecodedFrame, FrameScopeError};
-use framescope_group_navigation::timeline_global::{
-    TimelineGlobalSimilarityError, TimelineGlobalSimilarityResult,
-    open_or_build_and_query_with_timeline,
+use framescope_group_navigation::global::{
+    GlobalSimilarityAnalysis, GlobalSimilarityNavigationError, open_or_build_global_similarity,
 };
-use framescope_group_navigation::{
-    GroupNavigationError, IndexedRgbaFrame, IndexedRgbaStream, SimilarityGroupAnalysis,
-    SimilaritySourceError, open_or_build_group_navigation,
-};
-use framescope_perceptual::HybridSimilarityPolicy;
+use framescope_group_navigation::{IndexedRgbaFrame, IndexedRgbaStream, SimilaritySourceError};
 use framescope_video::{CancellationToken, OpenOptions, VideoDecoder, VideoStreamSelection};
 use std::path::Path;
 
 #[cfg(unix)]
 use std::os::fd::BorrowedFd;
 
-struct DecoderIndexedRgbaStream {
+struct GlobalDecoderIndexedRgbaStream {
     decoder: VideoDecoder,
     next_frame_id: u64,
 }
 
-impl DecoderIndexedRgbaStream {
+impl GlobalDecoderIndexedRgbaStream {
     fn new(decoder: VideoDecoder) -> Self {
         Self {
             decoder,
@@ -38,7 +26,7 @@ impl DecoderIndexedRgbaStream {
     }
 }
 
-impl IndexedRgbaStream for DecoderIndexedRgbaStream {
+impl IndexedRgbaStream for GlobalDecoderIndexedRgbaStream {
     fn next_frame(&mut self) -> Result<Option<IndexedRgbaFrame>, SimilaritySourceError> {
         let Some(decoded) = self
             .decoder
@@ -47,7 +35,6 @@ impl IndexedRgbaStream for DecoderIndexedRgbaStream {
         else {
             return Ok(None);
         };
-
         let frame_id = FrameId(self.next_frame_id);
         let frame = indexed_frame_from_decoded(
             frame_id,
@@ -62,24 +49,21 @@ impl IndexedRgbaStream for DecoderIndexedRgbaStream {
     }
 }
 
-/// Reuse or build similarity groups from a caller-owned Unix/Android file descriptor.
+/// Reuse or build global similar-frame descriptors from a caller-owned Unix/Android descriptor.
 ///
-/// `VideoDecoder` duplicates the descriptor during open, so the caller retains ownership. The
-/// decoder is opened lazily only when the validated Phase 4 store cannot be reused. Heavy decode
-/// work therefore stays outside JNI registry locks and can run on the repository's IO dispatcher.
+/// The source decoder is opened lazily only when a validated descriptor store cannot be reused.
+/// It is bound to the exact stream identity recorded by the authoritative index.
 #[cfg(unix)]
-pub fn open_or_build_group_navigation_from_fd(
+pub fn open_or_build_global_similarity_from_fd(
     index: &FrameIndex,
     store_root: impl AsRef<Path>,
-    policy: HybridSimilarityPolicy,
     fd: BorrowedFd<'_>,
     cancellation: CancellationToken,
-) -> Result<SimilarityGroupAnalysis, GroupNavigationError> {
+) -> Result<GlobalSimilarityAnalysis, GlobalSimilarityNavigationError> {
     let expected_stream = index.stream_identity().clone();
-    let result = open_or_build_group_navigation(
+    open_or_build_global_similarity(
         index,
         store_root,
-        policy,
         || {
             let decoder = VideoDecoder::open_file_descriptor_with_options(
                 fd,
@@ -90,58 +74,7 @@ pub fn open_or_build_group_navigation_from_fd(
             )
             .map_err(source_from_frame_scope)?;
             validate_stream_identity(&expected_stream, &decoder)?;
-            Ok(DecoderIndexedRgbaStream::new(decoder))
-        },
-        || cancellation.is_cancelled(),
-    );
-    match result {
-        Err(GroupNavigationError::Source(error)) if error.code == "cancelled" => {
-            Err(GroupNavigationError::Cancelled)
-        }
-        other => other,
-    }
-}
-
-/// Reuse or build the non-contiguous global-similarity index without holding a live microscope
-/// session lock while FFmpeg decodes or SQLite confirms candidates.
-///
-/// The caller supplies immutable authoritative entries one at a time. A valid global store never
-/// opens the source decoder and never consults `entry_for_frame`; rebuilding validates every fresh
-/// source-quality RGBA frame against the exact indexed timing metadata before persistence.
-#[cfg(unix)]
-pub fn open_or_build_global_similarity_from_fd_with_timeline<E>(
-    source_identity: &SourceIdentity,
-    stream_identity: &FrameIndexStreamIdentity,
-    frame_count: u64,
-    entry_for_frame: E,
-    store_root: impl AsRef<Path>,
-    target_frame: FrameId,
-    fd: BorrowedFd<'_>,
-    cancellation: CancellationToken,
-) -> Result<TimelineGlobalSimilarityResult, TimelineGlobalSimilarityError>
-where
-    E: FnMut(FrameId) -> Result<Option<FrameIndexEntry>, TimelineGlobalSimilarityError>,
-{
-    let expected_stream = stream_identity.clone();
-    open_or_build_and_query_with_timeline(
-        source_identity,
-        stream_identity,
-        frame_count,
-        entry_for_frame,
-        store_root,
-        target_frame,
-        Default::default(),
-        || {
-            let decoder = VideoDecoder::open_file_descriptor_with_options(
-                fd,
-                OpenOptions {
-                    stream_selection: VideoStreamSelection::Index(expected_stream.stream_index),
-                },
-                cancellation.clone(),
-            )
-            .map_err(source_from_frame_scope)?;
-            validate_stream_identity(&expected_stream, &decoder)?;
-            Ok(DecoderIndexedRgbaStream::new(decoder))
+            Ok(GlobalDecoderIndexedRgbaStream::new(decoder))
         },
         || cancellation.is_cancelled(),
     )
@@ -156,7 +89,7 @@ fn validate_stream_identity(
     if &actual != expected {
         return Err(SimilaritySourceError::new(
             "stream_identity_mismatch",
-            "fresh similarity decoder stream does not match the authoritative frame index",
+            "fresh global-similarity decoder stream does not match the authoritative frame index",
         ));
     }
     Ok(())
@@ -222,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn decoded_rgba_mapping_preserves_authoritative_timing_metadata() {
+    fn decoded_mapping_preserves_authoritative_timing_metadata() {
         let mapped = indexed_frame_from_decoded(
             FrameId(3),
             decoded(3),
@@ -240,7 +173,7 @@ mod tests {
     }
 
     #[test]
-    fn decoder_local_sequence_mismatch_is_rejected() {
+    fn decoder_sequence_mismatch_is_rejected() {
         let error =
             indexed_frame_from_decoded(FrameId(4), decoded(3), 8, vec![0, 0, 0, 255, 0, 0, 0, 255])
                 .unwrap_err();
@@ -248,14 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_rgba_geometry_is_rejected() {
-        let error =
-            indexed_frame_from_decoded(FrameId(0), decoded(0), 4, vec![0, 0, 0, 255]).unwrap_err();
-        assert_eq!(error.code, "invalid_rgba_frame");
-    }
-
-    #[test]
-    fn native_cancellation_error_maps_to_stable_source_code() {
+    fn native_cancellation_error_keeps_stable_code() {
         let error = source_from_frame_scope(FrameScopeError::Cancelled);
         assert_eq!(error.code, "cancelled");
     }

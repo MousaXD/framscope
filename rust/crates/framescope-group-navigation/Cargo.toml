@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+path = "src/root.rs"
+
 [dependencies]
 framescope-cache = { path = "../framescope-cache" }
 framescope-core = { path = "../framescope-core" }
