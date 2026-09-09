@@ -15,6 +15,7 @@ import java.io.File
  * Run with:
  *   -e framescope.hwdecode.video /sdcard/Movies/fixture.mp4
  *   -e framescope.hwdecode.maxFrames 600
+ *   -e framescope.hwdecode.seekTargetUs 10000000
  */
 class AndroidMediaCodecDeviceBenchmarkTest {
     @Test
@@ -29,12 +30,16 @@ class AndroidMediaCodecDeviceBenchmarkTest {
         val maxFrames = arguments.getString("framescope.hwdecode.maxFrames")
             ?.toLongOrNull()
             ?.takeIf { it > 0 }
+        val seekTargetUs = arguments.getString("framescope.hwdecode.seekTargetUs")
+            ?.toLongOrNull()
+            ?.takeIf { it >= 0 }
 
         ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
             val result = AndroidMediaCodecBenchmark.decodeByteBuffer(
                 context = instrumentation.targetContext,
                 fileDescriptor = descriptor.fileDescriptor,
                 maxFrames = maxFrames,
+                seekTargetUs = seekTargetUs,
             )
             assertTrue("MediaCodec benchmark produced no frames", result.framesDecoded > 0)
             Log.i(
@@ -47,6 +52,8 @@ class AndroidMediaCodecDeviceBenchmarkTest {
                     .put("wall_ms", result.wallTimeMs)
                     .put("process_cpu_ms", result.processCpuTimeMs)
                     .put("ttff_ms", result.timeToFirstFrameMs)
+                    .put("seek_target_us", seekTargetUs)
+                    .put("seek_settle_ms", result.seekSettleMs)
                     .put("fps", result.framesPerSecond)
                     .put("first_pts_us", result.firstPresentationTimeUs)
                     .put("last_pts_us", result.lastPresentationTimeUs)
