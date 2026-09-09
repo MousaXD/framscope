@@ -2,7 +2,7 @@ package com.framescope.app.data
 
 import org.json.JSONObject
 
-internal data class RamCacheTierMetrics(
+data class RamCacheTierMetrics(
     val budgetBytes: Long,
     val residentBytes: Long,
     val residentFrames: Long,
@@ -15,7 +15,7 @@ internal data class RamCacheTierMetrics(
         get() = hits + misses
 }
 
-internal data class RamAccelerationMetrics(
+data class RamAccelerationMetrics(
     val source: RamCacheTierMetrics,
     val preview: RamCacheTierMetrics,
     val retainedPreviewSessions: Int,
