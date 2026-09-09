@@ -1,5 +1,6 @@
 package com.framescope.app.performance
 
+import android.annotation.TargetApi
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
@@ -13,6 +14,7 @@ import android.util.Log
 import com.framescope.app.data.MicroscopeIndexingProgress
 import com.framescope.app.data.MicroscopeIndexingStage
 import java.io.Closeable
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -335,6 +337,7 @@ private interface AdpfController : Closeable {
 }
 
 /** Loaded only after an API 31+ guard in [ActiveIndexingSession]. */
+@TargetApi(Build.VERSION_CODES.S)
 private class Api31AdpfController(
     context: Context,
     ownerTid: Int,
@@ -385,6 +388,7 @@ private class Api31AdpfController(
 }
 
 /** Loaded only after an API 35+ guard. */
+@TargetApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
 private object Api35AdpfPowerEfficiency {
     fun set(
         session: PerformanceHintManager.Session,
@@ -395,6 +399,7 @@ private object Api35AdpfPowerEfficiency {
 }
 
 /** Loaded only after an API 29+ guard in [FrameScopePerformanceRuntime.initialize]. */
+@TargetApi(Build.VERSION_CODES.Q)
 private class Api29ThermalMonitor(
     context: Context,
     private val onStatus: (Int) -> Unit,
@@ -413,12 +418,14 @@ private class Api29ThermalMonitor(
 }
 
 /** Loaded only after an API 30+ guard. */
+@TargetApi(Build.VERSION_CODES.R)
 private object Api30ThermalHeadroom {
     fun read(context: Context, forecastSeconds: Int): Float? =
         context.getSystemService(PowerManager::class.java)?.getThermalHeadroom(forecastSeconds)
 }
 
 /** Loaded only after an API 29+ guard. */
+@TargetApi(Build.VERSION_CODES.Q)
 private object Api29TraceCounters {
     fun publishProgress(
         indexedFrames: Long,
@@ -462,9 +469,11 @@ private fun MicroscopeIndexingProgress.workUnitsForScheduling(): Long = when (st
 private fun AndroidPerformanceSnapshot.toLogLine(): String = buildString {
     append("indexing op=").append(operationId)
     append(" backend=").append(backend)
-    append(" fps=").append(indexingFps?.let { "%.1f".format(it) } ?: "n/a")
+    append(" fps=").append(indexingFps?.let { String.format(Locale.US, "%.1f", it) } ?: "n/a")
     append(" cpu_core_eq_pct=")
-        .append(processCpuCoreEquivalentPercent?.let { "%.1f".format(it) } ?: "n/a")
+        .append(
+            processCpuCoreEquivalentPercent?.let { String.format(Locale.US, "%.1f", it) } ?: "n/a",
+        )
     append(" pss_mib=").append(processPssBytes?.div(MEBIBYTE) ?: -1L)
     append(" adpf=").append(adpfActive)
     append(" thermal=").append(thermalStatus)
