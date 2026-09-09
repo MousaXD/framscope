@@ -79,13 +79,14 @@ fn persisted_hybrid_metric_version_mismatch_is_invalidated_instead_of_reused() {
     let path = store.path_for(&key);
     let connection = Connection::open(&path).unwrap();
     let key_json: String = connection
-        .query_row("SELECT key_json FROM similarity_meta WHERE id = 1", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT key_json FROM similarity_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let mut persisted: Value = serde_json::from_str(&key_json).unwrap();
-    persisted["config"]["algorithm_version"] =
-        Value::from(HYBRID_SIMILARITY_ALGORITHM_VERSION - 1);
+    persisted["config"]["algorithm_version"] = Value::from(HYBRID_SIMILARITY_ALGORITHM_VERSION - 1);
     connection
         .execute(
             "UPDATE similarity_meta SET key_json = ?1 WHERE id = 1",
@@ -95,9 +96,7 @@ fn persisted_hybrid_metric_version_mismatch_is_invalidated_instead_of_reused() {
     drop(connection);
 
     assert_eq!(
-        store
-            .visit_groups_for_frame_count(&key, 1, |_| {})
-            .unwrap(),
+        store.visit_groups_for_frame_count(&key, 1, |_| {}).unwrap(),
         SimilarityStoreLoad::InvalidatedStale
     );
     assert!(!path.exists());
