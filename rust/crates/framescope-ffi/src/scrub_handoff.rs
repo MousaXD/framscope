@@ -497,15 +497,16 @@ pub extern "system" fn Java_com_framescope_app_data_RamAccelerationBridge_native
         Ok(value) => value.into(),
         Err(_) => return std::ptr::null_mut(),
     };
-    let json = catch_unwind(AssertUnwindSafe(|| ram_acceleration_stats_response(&cache_root)))
-        .unwrap_or_else(|_| {
-            serialize_ram_stats_response(RamAccelerationStatsResponse::Error {
-                engine: ENGINE_VERSION,
-                code: "bridge_error".into(),
-                message: "Native RAM acceleration stats aborted safely after an internal panic."
-                    .into(),
-            })
-        });
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        ram_acceleration_stats_response(&cache_root)
+    }))
+    .unwrap_or_else(|_| {
+        serialize_ram_stats_response(RamAccelerationStatsResponse::Error {
+            engine: ENGINE_VERSION,
+            code: "bridge_error".into(),
+            message: "Native RAM acceleration stats aborted safely after an internal panic.".into(),
+        })
+    });
     to_jstring(&mut env, &json)
 }
 
@@ -553,19 +554,18 @@ fn configure_ram_budgets(
 }
 
 fn ram_acceleration_stats_response(cache_root: &str) -> String {
-    let response = match validate_cache_root(cache_root)
-        .and_then(|root| ram_acceleration_stats(&root))
-    {
-        Ok(ram) => RamAccelerationStatsResponse::Ok {
-            engine: ENGINE_VERSION,
-            ram,
-        },
-        Err(error) => RamAccelerationStatsResponse::Error {
-            engine: ENGINE_VERSION,
-            code: error.code,
-            message: error.message,
-        },
-    };
+    let response =
+        match validate_cache_root(cache_root).and_then(|root| ram_acceleration_stats(&root)) {
+            Ok(ram) => RamAccelerationStatsResponse::Ok {
+                engine: ENGINE_VERSION,
+                ram,
+            },
+            Err(error) => RamAccelerationStatsResponse::Error {
+                engine: ENGINE_VERSION,
+                code: error.code,
+                message: error.message,
+            },
+        };
     serialize_ram_stats_response(response)
 }
 
@@ -577,10 +577,11 @@ fn serialize_ram_stats_response(response: RamAccelerationStatsResponse) -> Strin
     })
 }
 
-fn ram_acceleration_stats(cache_root: &Path) -> Result<RamAccelerationStatsDetails, PreviewFailure> {
-    let source_stats = FrameCacheHierarchy::shared_ram_stats(
-        cache_root.join("microscope-frame-cache"),
-    );
+fn ram_acceleration_stats(
+    cache_root: &Path,
+) -> Result<RamAccelerationStatsDetails, PreviewFailure> {
+    let source_stats =
+        FrameCacheHierarchy::shared_ram_stats(cache_root.join("microscope-frame-cache"));
     let mut preview_resident_bytes = 0usize;
     let mut preview_resident_frames = 0usize;
     let mut preview_hits = 0u64;
