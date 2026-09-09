@@ -298,6 +298,7 @@ fn stream_index_from_name(name: &str) -> Option<u32> {
 
 fn is_safe_source_key(source_key: &str) -> bool {
     !source_key.is_empty()
+        && !source_key.starts_with("unverifiable-")
         && source_key.len() <= 256
         && source_key
             .bytes()
@@ -426,6 +427,24 @@ mod tests {
 
         assert_eq!(entries[0].status, PersistentFrameIndexStatus::InProgress);
         assert_eq!(entries[1].status, PersistentFrameIndexStatus::Stale);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn operation_scoped_unverifiable_indexes_are_not_library_entries() {
+        let root = test_root("operation-scoped");
+        write_index(
+            &root,
+            FRAME_INDEX_SCHEMA_VERSION,
+            "unverifiable-deadbeef-op-9",
+            0,
+            2,
+            4,
+        );
+
+        let entries = FrameIndexCatalog::new(&root).entries().unwrap();
+
+        assert!(entries.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
