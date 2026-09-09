@@ -1,5 +1,7 @@
 package com.framescope.app.ui
 
+import com.framescope.app.data.ScrubPerformanceTelemetry
+
 /**
  * Bounds live-scrub work to one native request in flight plus one replaceable pending request.
  *
@@ -33,7 +35,9 @@ internal class LiveScrubRequestGate {
         )
         nextRequestId = increment(nextRequestId, "live scrub request id")
         latestRequestId = request.requestId
+        val replacedPending = pending != null
         pending = request
+        ScrubPerformanceTelemetry.recordGateSubmission(replacedPending)
         return request
     }
 
@@ -52,9 +56,14 @@ internal class LiveScrubRequestGate {
      */
     @Synchronized
     fun finish(request: LiveScrubRequest): Boolean {
-        if (inFlight?.requestId != request.requestId) return false
+        if (inFlight?.requestId != request.requestId) {
+            ScrubPerformanceTelemetry.recordGateCompletion(publishable = false)
+            return false
+        }
         inFlight = null
-        return request.epoch == epoch && request.requestId == latestRequestId
+        val publishable = request.epoch == epoch && request.requestId == latestRequestId
+        ScrubPerformanceTelemetry.recordGateCompletion(publishable)
+        return publishable
     }
 
     /**
