@@ -12,6 +12,8 @@ import com.framescope.app.data.PersistentFrameIndexCatalog
 import com.framescope.app.data.RecentVideoHistory
 import com.framescope.app.data.RecentVideoRecord
 import com.framescope.app.data.VideoUriPermissionStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class RecentVideoSourceSignature(
     val displayName: String,
@@ -111,13 +113,13 @@ fun RecentVideoSessionEffects(
     LaunchedEffect(microscopeState, videoState, target) {
         val source = target ?: return@LaunchedEffect
         val ready = microscopeState as? MicroscopeUiState.Ready ?: return@LaunchedEffect
-        val frame = ready.session.currentFrame ?: return@LaunchedEffect
-        val resumeTimestampUs = source.resumeTimestampUs
         val inspectedVideo = (videoState as? VideoInspectionState.Ready)?.video
 
         if (boundSessionId != ready.session.sessionId && inspectedVideo != null) {
             val binding = runCatching {
-                indexCatalog.bindingForSession(ready.session.sessionId)
+                withContext(Dispatchers.IO) {
+                    indexCatalog.bindingForSession(ready.session.sessionId)
+                }
             }.getOrNull()
             if (binding != null) {
                 val bound = runCatching {
@@ -128,6 +130,8 @@ fun RecentVideoSessionEffects(
             boundSessionId = ready.session.sessionId
         }
 
+        val frame = ready.session.currentFrame ?: return@LaunchedEffect
+        val resumeTimestampUs = source.resumeTimestampUs
         if (
             resumeTimestampUs != null &&
             source.canResume(inspectedVideo) &&
