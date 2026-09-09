@@ -1,0 +1,37 @@
+name: agent4-diagnostic
+
+on:
+  push:
+    branches:
+      - perf/scrub-ram-acceleration
+
+permissions:
+  contents: read
+
+jobs:
+  rust-clippy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Workspace clippy diagnostics
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets --all-features --exclude framescope-video --exclude framescope-integration -- -D warnings 2>&1 | tee /tmp/agent4-clippy.log
+          status=${PIPESTATUS[0]}
+          {
+            echo '### Agent 4 workspace clippy'
+            echo '```text'
+            tail -n 240 /tmp/agent4-clippy.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
