@@ -14,6 +14,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.framescope.app.data.AndroidFrameScopeRepository
 import com.framescope.app.data.AndroidMicroscopeScrubPreviewSource
 import com.framescope.app.data.AndroidRecentVideoAccessChecker
+import com.framescope.app.data.RamAccelerationRuntime
 import com.framescope.app.data.RecentVideoHistoryRepository
 import com.framescope.app.data.RecentVideoRecord
 import com.framescope.app.data.SharedPreferencesRecentVideoStore
@@ -82,6 +83,11 @@ class MainActivity : ComponentActivity() {
 
     private val batchExportViewModel: BatchExportViewModel by viewModels {
         BatchExportViewModelFactory(repository)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        RamAccelerationRuntime.onForeground()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -164,8 +170,8 @@ class MainActivity : ComponentActivity() {
                         val ready = state.microscopeState as? MicroscopeUiState.Ready
                         batchExportViewModel.onDestinationSelected(
                             treeUri = uri.toString(),
-                            currentSessionId = ready?.session?.sessionId,
-                            currentFrameId = ready?.session?.currentFrame?.frameId,
+                            currentSessionId = ready?.session.sessionId,
+                            currentFrameId = ready?.session.currentFrame?.frameId,
                         )
                     }
                 }
