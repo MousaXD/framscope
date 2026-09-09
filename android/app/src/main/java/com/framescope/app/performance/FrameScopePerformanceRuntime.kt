@@ -30,7 +30,7 @@ object FrameScopePerformanceRuntime {
     private val thermalStatus = AtomicInteger(THERMAL_STATUS_UNKNOWN)
     private val trimMemoryLevel = AtomicInteger(0)
     private val latest = AtomicReference<AndroidPerformanceSnapshot?>(null)
-    private val thermalListenerRegistered = AtomicBoolean(false)
+    private val thermalMonitorInitialized = AtomicBoolean(false)
     private val thermalHeadroomLock = Any()
 
     @Volatile
@@ -40,32 +40,25 @@ object FrameScopePerformanceRuntime {
     private var performanceMode: FrameScopePerformanceMode =
         FrameScopePerformanceMode.SustainedThroughput
 
+    private var thermalMonitor: Closeable? = null
     private var lastThermalHeadroomSampleElapsedMs = Long.MIN_VALUE
     private var cachedThermalHeadroom: Float? = null
-
-    private val thermalListener = PowerManager.OnThermalStatusChangedListener { status ->
-        thermalStatus.set(status)
-        sessions.values.forEach { session -> session.onThermalStatus(status) }
-    }
 
     fun initialize(context: Context) {
         val applicationContext = context.applicationContext
         appContext = applicationContext
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
-        if (!thermalListenerRegistered.compareAndSet(false, true)) return
+        if (!thermalMonitorInitialized.compareAndSet(false, true)) return
 
-        val powerManager = applicationContext.getSystemService(PowerManager::class.java)
-        if (powerManager == null) {
-            thermalListenerRegistered.set(false)
-            return
-        }
-        runCatching {
-            thermalStatus.set(powerManager.currentThermalStatus)
-            powerManager.addThermalStatusListener(thermalListener)
+        thermalMonitor = runCatching {
+            Api29ThermalMonitor(applicationContext) { status ->
+                thermalStatus.set(status)
+                sessions.values.forEach { session -> session.onThermalStatus(status) }
+            }
         }.onFailure { error ->
-            thermalListenerRegistered.set(false)
+            thermalMonitorInitialized.set(false)
             Log.w(TAG, "Thermal telemetry listener unavailable: ${error.message}")
-        }
+        }.getOrNull()
     }
 
     fun setPerformanceMode(mode: FrameScopePerformanceMode) {
@@ -140,8 +133,7 @@ object FrameScopePerformanceRuntime {
             }
             lastThermalHeadroomSampleElapsedMs = nowElapsedMs
             cachedThermalHeadroom = runCatching {
-                context.getSystemService(PowerManager::class.java)
-                    ?.getThermalHeadroom(THERMAL_HEADROOM_FORECAST_SECONDS)
+                Api30ThermalHeadroom.read(context, THERMAL_HEADROOM_FORECAST_SECONDS)
                     ?.takeIf { value -> value.isFinite() }
             }.getOrNull()
             return cachedThermalHeadroom
@@ -166,10 +158,7 @@ private class ActiveIndexingSession(
     private val closed = AtomicBoolean(false)
     private val cycleTracker = IndexingWorkCycleTracker()
     private val hintLock = Any()
-    private var hintSession: PerformanceHintManager.Session? = null
-    private var hintTargetNanos: Long? = null
-    private var preferredHintUpdateRateNanos = 0L
-    private var lastHintReportSampleNanos = Long.MIN_VALUE
+    private var hintController: AdpfController? = null
     private var currentThermalStatus = initialThermalStatus
     private var lastDiagnosticsElapsedMs = Long.MIN_VALUE
     private var lastDiagnosticsWorkUnits: Long? = null
@@ -191,63 +180,36 @@ private class ActiveIndexingSession(
 
     fun onThermalStatus(status: Int) {
         currentThermalStatus = status
-        if (status >= PowerManager.THERMAL_STATUS_SEVERE) {
-            synchronized(hintLock) { closeHintSessionLocked() }
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-            synchronized(hintLock) {
-                runCatching {
-                    hintSession?.setPreferPowerEfficiency(
-                        status >= PowerManager.THERMAL_STATUS_MODERATE,
-                    )
-                }
+        synchronized(hintLock) {
+            if (status >= THERMAL_STATUS_SEVERE) {
+                closeHintControllerLocked()
+            } else {
+                hintController?.updateThermalStatus(status)
             }
         }
     }
 
     private fun reportAdpfCycle(actualDurationNanos: Long, sampleElapsedMs: Long) {
         if (mode != FrameScopePerformanceMode.SustainedThroughput) return
-        if (currentThermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) return
+        if (currentThermalStatus >= THERMAL_STATUS_SEVERE) return
         if (context == null || ownerTid <= 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
 
         synchronized(hintLock) {
             if (closed.get()) return
-            if (hintSession == null) {
+            if (hintController == null) {
                 val target = calibratedTargetDurationNanos(actualDurationNanos)
-                val manager = runCatching {
-                    context.getSystemService(PerformanceHintManager::class.java)
+                hintController = runCatching {
+                    Api31AdpfController(
+                        context = context,
+                        ownerTid = ownerTid,
+                        targetDurationNanos = target,
+                        initialThermalStatus = currentThermalStatus,
+                    )
                 }.getOrNull() ?: return
-                val created = runCatching {
-                    preferredHintUpdateRateNanos = manager.preferredUpdateRateNanos.coerceAtLeast(0L)
-                    manager.createHintSession(intArrayOf(ownerTid), target)
-                }.getOrNull() ?: return
-                hintSession = created
-                hintTargetNanos = target
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-                    runCatching {
-                        created.setPreferPowerEfficiency(
-                            currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE,
-                        )
-                    }
-                }
             }
-
-            val sampleElapsedNanos = millisecondsToNanoseconds(sampleElapsedMs)
-            if (
-                lastHintReportSampleNanos != Long.MIN_VALUE &&
-                preferredHintUpdateRateNanos > 0L &&
-                sampleElapsedNanos - lastHintReportSampleNanos < preferredHintUpdateRateNanos
-            ) {
-                return
-            }
-            val activeSession = hintSession ?: return
-            val reportSucceeded = runCatching {
-                hintTargetNanos?.let(activeSession::updateTargetWorkDuration)
-                activeSession.reportActualWorkDuration(actualDurationNanos)
-            }.isSuccess
-            if (reportSucceeded) {
-                lastHintReportSampleNanos = sampleElapsedNanos
-            } else {
-                closeHintSessionLocked()
+            val active = hintController ?: return
+            if (!active.report(actualDurationNanos, sampleElapsedMs)) {
+                closeHintControllerLocked()
             }
         }
     }
@@ -255,9 +217,11 @@ private class ActiveIndexingSession(
     private fun publishTraceCounters(progress: MicroscopeIndexingProgress) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         runCatching {
-            Trace.setCounter("FrameScope indexed frames", progress.indexedFrames)
-            Trace.setCounter("FrameScope reused frames", progress.reusedFrames)
-            Trace.setCounter("FrameScope thermal status", currentThermalStatus.toLong())
+            Api29TraceCounters.publishProgress(
+                indexedFrames = progress.indexedFrames,
+                reusedFrames = progress.reusedFrames,
+                thermalStatus = currentThermalStatus,
+            )
         }
     }
 
@@ -308,6 +272,7 @@ private class ActiveIndexingSession(
         }.isSuccess
         val processPssBytes = runCatching { Debug.getPss() * KIBIBYTE }.getOrNull()
         val nowElapsedMs = nowElapsedNanos / NANOS_PER_MILLISECOND
+        val activeHintTarget = synchronized(hintLock) { hintController?.targetDurationNanos }
         val snapshot = AndroidPerformanceSnapshot(
             operationId = operationId,
             mode = mode,
@@ -317,8 +282,8 @@ private class ActiveIndexingSession(
                 runCatching { Process.getThreadPriority(tid) }.getOrNull()
             },
             adpfPlatformAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S,
-            adpfActive = synchronized(hintLock) { hintSession != null },
-            adpfTargetNanos = synchronized(hintLock) { hintTargetNanos },
+            adpfActive = activeHintTarget != null,
+            adpfTargetNanos = activeHintTarget,
             progressSequence = progress.sequence,
             indexedFrames = progress.indexedFrames,
             indexingFps = indexingFps,
@@ -341,21 +306,14 @@ private class ActiveIndexingSession(
         )
         publishSnapshot(snapshot)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            runCatching {
-                snapshot.indexingFps?.let { fps ->
-                    Trace.setCounter("FrameScope indexing fps x100", (fps * 100.0).toLong())
-                }
-                snapshot.processPssBytes?.let { bytes ->
-                    Trace.setCounter("FrameScope process PSS KiB", bytes / KIBIBYTE)
-                }
-            }
+            runCatching { Api29TraceCounters.publishDiagnostics(snapshot) }
         }
         if (context != null) Log.i(TAG, snapshot.toLogLine())
     }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        synchronized(hintLock) { closeHintSessionLocked() }
+        synchronized(hintLock) { closeHintControllerLocked() }
         unregister(operationId, this)
         if (priorityApplied && originalPriority != null && ownerTid > 0) {
             runCatching { Process.setThreadPriority(ownerTid, originalPriority) }
@@ -363,11 +321,122 @@ private class ActiveIndexingSession(
         if (traceStarted) runCatching { Trace.endSection() }
     }
 
-    private fun closeHintSessionLocked() {
-        val current = hintSession ?: return
-        hintSession = null
-        hintTargetNanos = null
+    private fun closeHintControllerLocked() {
+        val current = hintController ?: return
+        hintController = null
         runCatching { current.close() }
+    }
+}
+
+private interface AdpfController : Closeable {
+    val targetDurationNanos: Long
+    fun report(actualDurationNanos: Long, sampleElapsedMs: Long): Boolean
+    fun updateThermalStatus(status: Int)
+}
+
+/** Loaded only after an API 31+ guard in [ActiveIndexingSession]. */
+private class Api31AdpfController(
+    context: Context,
+    ownerTid: Int,
+    override val targetDurationNanos: Long,
+    initialThermalStatus: Int,
+) : AdpfController {
+    private val manager = requireNotNull(context.getSystemService(PerformanceHintManager::class.java))
+    private val preferredUpdateRateNanos = manager.preferredUpdateRateNanos.coerceAtLeast(0L)
+    private val session = requireNotNull(
+        manager.createHintSession(intArrayOf(ownerTid), targetDurationNanos),
+    ) { "PerformanceHintManager did not create a session for the indexing thread." }
+    private var lastReportSampleNanos = Long.MIN_VALUE
+
+    init {
+        updateThermalStatus(initialThermalStatus)
+    }
+
+    override fun report(actualDurationNanos: Long, sampleElapsedMs: Long): Boolean {
+        val sampleElapsedNanos = millisecondsToNanoseconds(sampleElapsedMs)
+        if (
+            lastReportSampleNanos != Long.MIN_VALUE &&
+            preferredUpdateRateNanos > 0L &&
+            sampleElapsedNanos - lastReportSampleNanos < preferredUpdateRateNanos
+        ) {
+            return true
+        }
+        return runCatching {
+            session.updateTargetWorkDuration(targetDurationNanos)
+            session.reportActualWorkDuration(actualDurationNanos)
+            lastReportSampleNanos = sampleElapsedNanos
+        }.isSuccess
+    }
+
+    override fun updateThermalStatus(status: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            runCatching {
+                Api35AdpfPowerEfficiency.set(
+                    session = session,
+                    enabled = status >= THERMAL_STATUS_MODERATE,
+                )
+            }
+        }
+    }
+
+    override fun close() {
+        session.close()
+    }
+}
+
+/** Loaded only after an API 35+ guard. */
+private object Api35AdpfPowerEfficiency {
+    fun set(
+        session: PerformanceHintManager.Session,
+        enabled: Boolean,
+    ) {
+        session.setPreferPowerEfficiency(enabled)
+    }
+}
+
+/** Loaded only after an API 29+ guard in [FrameScopePerformanceRuntime.initialize]. */
+private class Api29ThermalMonitor(
+    context: Context,
+    private val onStatus: (Int) -> Unit,
+) : Closeable {
+    private val powerManager = requireNotNull(context.getSystemService(PowerManager::class.java))
+    private val listener = PowerManager.OnThermalStatusChangedListener(onStatus)
+
+    init {
+        onStatus(powerManager.currentThermalStatus)
+        powerManager.addThermalStatusListener(listener)
+    }
+
+    override fun close() {
+        powerManager.removeThermalStatusListener(listener)
+    }
+}
+
+/** Loaded only after an API 30+ guard. */
+private object Api30ThermalHeadroom {
+    fun read(context: Context, forecastSeconds: Int): Float? =
+        context.getSystemService(PowerManager::class.java)?.getThermalHeadroom(forecastSeconds)
+}
+
+/** Loaded only after an API 29+ guard. */
+private object Api29TraceCounters {
+    fun publishProgress(
+        indexedFrames: Long,
+        reusedFrames: Long,
+        thermalStatus: Int,
+    ) {
+        Trace.setCounter("FrameScope indexed frames", indexedFrames)
+        Trace.setCounter("FrameScope reused frames", reusedFrames)
+        Trace.setCounter("FrameScope thermal status", thermalStatus.toLong())
+    }
+
+    fun publishDiagnostics(snapshot: AndroidPerformanceSnapshot) {
+        snapshot.indexingFps?.let { fps ->
+            Trace.setCounter("FrameScope indexing fps x100", (fps * 100.0).toLong())
+        }
+        snapshot.processPssBytes?.let { bytes ->
+            Trace.setCounter("FrameScope process PSS KiB", bytes / KIBIBYTE)
+        }
     }
 }
 
@@ -451,6 +520,8 @@ private const val INDEXING_TRACE_SECTION = "FrameScope#indexing"
 private const val SOFTWARE_BACKEND = "ffmpeg-avcodec"
 private const val INVALID_TID = -1
 private const val THERMAL_STATUS_UNKNOWN = -1
+private const val THERMAL_STATUS_MODERATE = 2
+private const val THERMAL_STATUS_SEVERE = 3
 private const val LOW_MEMORY_SENTINEL = Int.MAX_VALUE
 private const val DIAGNOSTICS_INTERVAL_MS = 5_000L
 private const val THERMAL_HEADROOM_POLL_MS = 10_000L
