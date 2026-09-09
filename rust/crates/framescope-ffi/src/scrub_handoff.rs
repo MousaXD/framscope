@@ -345,9 +345,9 @@ fn configure_ram_budgets(
     );
 
     let states = {
-        let registry = scrub_registry()
-            .lock()
-            .map_err(|_| PreviewFailure::new("bridge_error", "Live preview registry is poisoned."))?;
+        let registry = scrub_registry().lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview registry is poisoned.")
+        })?;
         registry
             .sessions
             .values()
@@ -479,8 +479,9 @@ fn render_preview(
     // Resolve the persistent target under the authoritative session lock, then release it before
     // touching disposable preview state. This keeps preview-cache hits entirely out of the exact
     // navigation critical section.
-    let target = microscope::with_extraction_context(session_id, |_source_fd, index| resolve(index))
-        .map_err(from_microscope_failure)??;
+    let target =
+        microscope::with_extraction_context(session_id, |_source_fd, index| resolve(index))
+            .map_err(from_microscope_failure)??;
     let frame_id = target.frame_id();
     let timestamp_us = target.entry.timestamp_us();
     let state = session_state(session_id, &cache_root)?;
