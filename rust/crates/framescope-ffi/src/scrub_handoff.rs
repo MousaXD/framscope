@@ -105,12 +105,19 @@ struct ActivePreviewOperation {
 struct PreviewCancellationRegistry {
     next_generation: u64,
     active: HashMap<i64, ActivePreviewOperation>,
+    exact_in_flight: HashMap<i64, u32>,
 }
 
 #[derive(Debug)]
 struct PreviewOperationGuard {
     session_id: i64,
     generation: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExactNavigationGuard {
+    session_id: i64,
+    registered: bool,
 }
 
 impl Drop for PreviewOperationGuard {
@@ -124,6 +131,25 @@ impl Drop for PreviewOperationGuard {
             .is_some_and(|operation| operation.generation == self.generation)
         {
             registry.active.remove(&self.session_id);
+        }
+    }
+}
+
+impl Drop for ExactNavigationGuard {
+    fn drop(&mut self) {
+        if !self.registered {
+            return;
+        }
+        let Ok(mut registry) = preview_cancellation_registry().lock() else {
+            return;
+        };
+        let Some(count) = registry.exact_in_flight.get_mut(&self.session_id) else {
+            return;
+        };
+        if *count <= 1 {
+            registry.exact_in_flight.remove(&self.session_id);
+        } else {
+            *count -= 1;
         }
     }
 }
@@ -156,6 +182,16 @@ fn begin_preview_operation(
             "Live preview cancellation state is poisoned.",
         )
     })?;
+    if registry
+        .exact_in_flight
+        .get(&session_id)
+        .is_some_and(|count| *count > 0)
+    {
+        return Err(PreviewFailure::new(
+            "cancelled",
+            "Live preview was superseded by authoritative microscope navigation.",
+        ));
+    }
     if let Some(previous) = registry.active.remove(&session_id) {
         previous.cancellation.cancel();
     }
@@ -180,9 +216,36 @@ fn begin_preview_operation(
     ))
 }
 
+/// Atomically gives authoritative navigation priority over disposable preview work.
+///
+/// The barrier and preview registration share one registry mutex. Therefore either a preview is
+/// already registered and gets cancelled here, or a preview arriving after this point observes the
+/// barrier and exits before it can wait on the authoritative microscope session lock.
+pub(crate) fn begin_exact_navigation(session_id: i64) -> ExactNavigationGuard {
+    if session_id <= 0 {
+        return ExactNavigationGuard {
+            session_id,
+            registered: false,
+        };
+    }
+    let Ok(mut registry) = preview_cancellation_registry().lock() else {
+        return ExactNavigationGuard {
+            session_id,
+            registered: false,
+        };
+    };
+    let count = registry.exact_in_flight.entry(session_id).or_insert(0);
+    *count = count.saturating_add(1);
+    if let Some(operation) = registry.active.get(&session_id) {
+        operation.cancellation.cancel();
+    }
+    ExactNavigationGuard {
+        session_id,
+        registered: true,
+    }
+}
+
 /// Cancels current disposable preview work without acquiring the authoritative session mutex.
-/// Exact microscope navigation calls this before waiting for that mutex, so finger-up work does not
-/// sit behind a stale preview until the stale decoder naturally reaches its target.
 pub(crate) fn cancel_session_preview(session_id: i64) -> bool {
     if session_id <= 0 {
         return false;
@@ -199,7 +262,14 @@ pub(crate) fn cancel_session_preview(session_id: i64) -> bool {
 
 /// Drops disposable per-session scrub caches after the authoritative session has closed.
 pub(crate) fn forget_session_after_close(session_id: i64) -> bool {
-    forget_session(session_id)
+    let removed = forget_session(session_id);
+    if let Ok(mut registry) = preview_cancellation_registry().lock() {
+        if let Some(operation) = registry.active.remove(&session_id) {
+            operation.cancellation.cancel();
+        }
+        registry.exact_in_flight.remove(&session_id);
+    }
+    removed
 }
 
 #[unsafe(no_mangle)]
@@ -816,6 +886,29 @@ mod tests {
         assert!(cancel_session_preview(session_id));
         assert!(second.is_cancelled());
         drop(second_guard);
+    }
+
+    #[test]
+    fn exact_navigation_barrier_rejects_late_preview_until_settle_finishes() {
+        let session_id = 77_779;
+        let exact = begin_exact_navigation(session_id);
+        let failure = begin_preview_operation(session_id).unwrap_err();
+        assert_eq!(failure.code, "cancelled");
+        drop(exact);
+
+        let (token, preview) = begin_preview_operation(session_id).unwrap();
+        assert!(!token.is_cancelled());
+        drop(preview);
+    }
+
+    #[test]
+    fn exact_navigation_barrier_cancels_already_registered_preview() {
+        let session_id = 77_780;
+        let (token, preview) = begin_preview_operation(session_id).unwrap();
+        let exact = begin_exact_navigation(session_id);
+        assert!(token.is_cancelled());
+        drop(exact);
+        drop(preview);
     }
 
     #[test]
