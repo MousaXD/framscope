@@ -351,7 +351,10 @@ mod tests {
             Ok(current.clone())
         }
 
-        fn seek_for_target_navigation(&mut self, _timestamp_us: i64) -> Result<(), FrameScopeError> {
+        fn seek_for_target_navigation(
+            &mut self,
+            _timestamp_us: i64,
+        ) -> Result<(), FrameScopeError> {
             self.current = None;
             while self
                 .frames
