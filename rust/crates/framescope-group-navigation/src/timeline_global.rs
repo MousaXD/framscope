@@ -336,7 +336,10 @@ mod tests {
             || false,
         )
         .unwrap();
-        assert_eq!(result.disposition, TimelineGlobalSimilarityDisposition::Built);
+        assert_eq!(
+            result.disposition,
+            TimelineGlobalSimilarityDisposition::Built
+        );
         assert_eq!(result.query.matches.len(), 1);
         assert_eq!(result.query.matches[0].frame_id, FrameId(2));
         assert_eq!(result.query.matches[0].similarity, 10_000);
@@ -381,7 +384,10 @@ mod tests {
             || false,
         )
         .unwrap();
-        assert_eq!(second.disposition, TimelineGlobalSimilarityDisposition::Reused);
+        assert_eq!(
+            second.disposition,
+            TimelineGlobalSimilarityDisposition::Reused
+        );
         assert!(!source_opened.get());
         assert!(!timeline_read.get());
         let _ = fs::remove_dir_all(root);
