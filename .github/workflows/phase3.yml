@@ -29,7 +29,10 @@ jobs:
 
       - name: Install deterministic fixture tools
         run: |
-          sudo apt-get update
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" \
+            -o Dir::Etc::sourceparts="-" \
+            -o APT::Get::List-Cleanup="0"
           sudo apt-get install --yes --no-install-recommends ffmpeg time
           ffmpeg -version | head -n 1
 
