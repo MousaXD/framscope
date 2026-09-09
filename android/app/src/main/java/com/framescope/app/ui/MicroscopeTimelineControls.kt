@@ -4,8 +4,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RangeSlider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -29,6 +29,13 @@ import com.framescope.app.data.MicroscopeSessionSnapshot
 
 internal const val TIMELINE_SLIDER_TAG = "microscope_timeline_slider"
 internal const val TIMELINE_RANGE_SLIDER_TAG = "microscope_timeline_range_slider"
+internal const val TIMELINE_SETTLING_TAG = "microscope_timeline_settling"
+
+private enum class TimelineInteractionState {
+    Idle,
+    Dragging,
+    AwaitingExactSettle,
+}
 
 @Composable
 internal fun MicroscopeTimelineControls(
@@ -36,8 +43,8 @@ internal fun MicroscopeTimelineControls(
     timelineBounds: IndexedTimelineBounds?,
     rangeSelection: TimelineRangeSelection?,
     enabled: Boolean,
-    onJumpFrame: (Long) -> Unit,
-    onJumpTimestampUs: (Long) -> Unit,
+    exactSettleInProgress: Boolean = false,
+    onStep: (Int) -> Unit,
     onPreviewFrame: (Long) -> Unit,
     onPreviewTimestampUs: (Long) -> Unit,
     onFinishScrubFrame: (Long) -> Unit,
@@ -54,14 +61,16 @@ internal fun MicroscopeTimelineControls(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // Keep high-frequency gesture state below this composition boundary. Range controls and
-        // rapid-step actions do not need to recompose for every pointer sample.
+        // Keep high-frequency gesture state below this composition boundary. Range controls do not
+        // need to recompose for every pointer sample.
         MicroscopeTimelineScrubber(
             session = session,
             bounds = bounds,
             currentFrameTimestampUs = currentFrame.timestampUs,
             currentFrameId = currentFrame.frameId,
             enabled = enabled,
+            exactSettleInProgress = exactSettleInProgress,
+            onStep = onStep,
             onPreviewFrame = onPreviewFrame,
             onPreviewTimestampUs = onPreviewTimestampUs,
             onFinishScrubFrame = onFinishScrubFrame,
@@ -69,87 +78,13 @@ internal fun MicroscopeTimelineControls(
         )
 
         if (bounds != null) {
-            val durationUs = MicroscopeTimelineMath.durationUs(bounds.startUs, bounds.endUs)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = MicroscopePreviewMath.formatTimestampUs(bounds.startUs),
-                    style = MaterialTheme.typography.labelMedium,
-                )
-                Text(
-                    text = durationUs?.let {
-                        "Duration ${MicroscopePreviewMath.formatTimestampUs(it)}"
-                    } ?: "Duration unavailable",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = MicroscopePreviewMath.formatTimestampUs(bounds.endUs),
-                    style = MaterialTheme.typography.labelMedium,
-                )
-            }
-            Text(
-                text = "Drag to preview indexed frames. Release to settle on the exact frame.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             TimelineRangeControls(
                 sessionId = session.sessionId,
                 bounds = bounds,
                 committedRange = committedRange,
-                enabled = enabled,
+                enabled = enabled && !exactSettleInProgress,
                 onCommitRange = onCommitRange,
                 onClearRange = onClearRange,
-            )
-        } else {
-            Text(
-                text = "Drag to preview by presentation order. Release to settle on the exact indexed frame.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        Text(
-            text = "Rapid indexed stepping",
-            style = MaterialTheme.typography.titleSmall,
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            RapidStepButton(
-                label = "−100",
-                delta = -100L,
-                session = session,
-                enabled = enabled,
-                onJumpFrame = onJumpFrame,
-                modifier = Modifier.weight(1f),
-            )
-            RapidStepButton(
-                label = "−10",
-                delta = -10L,
-                session = session,
-                enabled = enabled,
-                onJumpFrame = onJumpFrame,
-                modifier = Modifier.weight(1f),
-            )
-            RapidStepButton(
-                label = "+10",
-                delta = 10L,
-                session = session,
-                enabled = enabled,
-                onJumpFrame = onJumpFrame,
-                modifier = Modifier.weight(1f),
-            )
-            RapidStepButton(
-                label = "+100",
-                delta = 100L,
-                session = session,
-                enabled = enabled,
-                onJumpFrame = onJumpFrame,
-                modifier = Modifier.weight(1f),
             )
         }
     }
@@ -162,6 +97,8 @@ private fun MicroscopeTimelineScrubber(
     currentFrameTimestampUs: Long?,
     currentFrameId: Long,
     enabled: Boolean,
+    exactSettleInProgress: Boolean,
+    onStep: (Int) -> Unit,
     onPreviewFrame: (Long) -> Unit,
     onPreviewTimestampUs: (Long) -> Unit,
     onFinishScrubFrame: (Long) -> Unit,
@@ -183,9 +120,11 @@ private fun MicroscopeTimelineScrubber(
     var scrubFraction by rememberSaveable(session.sessionId) {
         mutableStateOf(authoritativeFraction)
     }
-    // A drag gesture cannot survive disposal/recreation. Persisting this flag could suppress
-    // authoritative synchronization even though no gesture is active anymore.
-    var scrubbing by remember(session.sessionId) { mutableStateOf(false) }
+    var interactionState by remember(session.sessionId) {
+        mutableStateOf(TimelineInteractionState.Idle)
+    }
+    var settleObservedNavigation by remember(session.sessionId) { mutableStateOf(false) }
+    var settleAnchorFrameId by remember(session.sessionId) { mutableStateOf<Long?>(null) }
     val previewAdmissionPolicy = remember(session.sessionId) { LiveScrubAdmissionPolicy() }
     val delayedPreviewAdmission = remember(session.sessionId) { DelayedScrubPreviewAdmission() }
     val thumbDrawTracker = remember(session.sessionId) { ScrubThumbDrawTracker() }
@@ -198,11 +137,42 @@ private fun MicroscopeTimelineScrubber(
         }
     }
 
-    LaunchedEffect(authoritativeFraction, scrubbing) {
-        if (!scrubbing) {
-            scrubFraction = authoritativeFraction
-            delayedPreviewAdmission.cancel()
-            previewAdmissionPolicy.reset()
+    LaunchedEffect(
+        authoritativeFraction,
+        currentFrameId,
+        exactSettleInProgress,
+        interactionState,
+    ) {
+        when (interactionState) {
+            TimelineInteractionState.Idle -> {
+                scrubFraction = authoritativeFraction
+                delayedPreviewAdmission.cancel()
+                previewAdmissionPolicy.reset()
+                settleObservedNavigation = false
+                settleAnchorFrameId = null
+            }
+            TimelineInteractionState.Dragging -> Unit
+            TimelineInteractionState.AwaitingExactSettle -> {
+                if (exactSettleInProgress) {
+                    settleObservedNavigation = true
+                }
+                val authoritativeFrameChanged = settleAnchorFrameId?.let { anchor ->
+                    currentFrameId != anchor
+                } == true
+                if (
+                    !exactSettleInProgress &&
+                    (settleObservedNavigation || authoritativeFrameChanged)
+                ) {
+                    // Only the completed authoritative navigation is allowed to correct the local
+                    // release position. Until then the thumb stays where the finger left it.
+                    scrubFraction = authoritativeFraction
+                    interactionState = TimelineInteractionState.Idle
+                    settleObservedNavigation = false
+                    settleAnchorFrameId = null
+                    delayedPreviewAdmission.cancel()
+                    previewAdmissionPolicy.reset()
+                }
+            }
         }
     }
 
@@ -255,29 +225,34 @@ private fun MicroscopeTimelineScrubber(
         )
     }
 
-    Text(
-        text = if (bounds == null) {
-            "Presentation-order scrub"
-        } else {
-            "Indexed presentation timeline"
-        },
-        style = MaterialTheme.typography.titleSmall,
-    )
-    Text(
-        text = previewTimestampUs?.let { timestamp ->
-            "Preview ${MicroscopePreviewMath.formatTimestampUs(timestamp)}"
-        } ?: previewFrameId?.let { frameId ->
-            MicroscopeTimelineMath.framePositionLabel(frameId, session.frameCount)
-        } ?: "Indexed position unavailable",
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = previewTimestampUs?.let(MicroscopePreviewMath::formatTimestampUs)
+                ?: previewFrameId?.let { frameId ->
+                    MicroscopeTimelineMath.framePositionLabel(frameId, session.frameCount)
+                }
+                ?: "Position unavailable",
+            style = MaterialTheme.typography.labelLarge,
+        )
+        Text(
+            text = bounds?.let { MicroscopePreviewMath.formatTimestampUs(it.endUs) }
+                ?: "${session.frameCount} frames",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
     Slider(
         value = scrubFraction,
         onValueChange = { fraction ->
             val observedAtNanos = System.nanoTime()
             thumbDrawTracker.onPointerInput(observedAtNanos)
-            scrubbing = true
+            interactionState = TimelineInteractionState.Dragging
+            settleObservedNavigation = false
+            settleAnchorFrameId = null
             val nextFraction = fraction.coerceIn(0f, 1f)
             // Gesture state is committed before any preview scheduling. Decoder work therefore
             // cannot own the thumb position or decide whether it moves.
@@ -331,22 +306,29 @@ private fun MicroscopeTimelineScrubber(
             } else {
                 null
             }
-            scrubbing = false
             when {
                 targetTimestampUs != null -> {
+                    settleAnchorFrameId = currentFrameId
+                    settleObservedNavigation = false
+                    interactionState = TimelineInteractionState.AwaitingExactSettle
                     ScrubUxTelemetry.beginExactSettle(session.sessionId)
                     onFinishScrubTimestampUs(targetTimestampUs)
                 }
                 targetFrameId != null -> {
+                    settleAnchorFrameId = currentFrameId
+                    settleObservedNavigation = false
+                    interactionState = TimelineInteractionState.AwaitingExactSettle
                     ScrubUxTelemetry.beginExactSettle(session.sessionId)
                     onFinishScrubFrame(targetFrameId)
                 }
+                else -> interactionState = TimelineInteractionState.Idle
             }
         },
-        enabled = enabled && session.frameCount > 1L,
+        enabled = enabled && !exactSettleInProgress && session.frameCount > 1L,
         valueRange = 0f..1f,
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 48.dp)
             .drawWithContent {
                 drawContent()
                 thumbDrawTracker.onDrawn(System.nanoTime())
@@ -354,6 +336,47 @@ private fun MicroscopeTimelineScrubber(
             .testTag(TIMELINE_SLIDER_TAG)
             .semantics { contentDescription = "Video timeline scrubber" },
     )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        TextButton(
+            onClick = { onStep(-1) },
+            enabled = enabled &&
+                interactionState == TimelineInteractionState.Idle &&
+                session.canStepPrevious,
+        ) {
+            Text("‹ Frame")
+        }
+        if (
+            interactionState == TimelineInteractionState.AwaitingExactSettle ||
+            exactSettleInProgress
+        ) {
+            Text(
+                text = "Settling exact frame…",
+                modifier = Modifier.testTag(TIMELINE_SETTLING_TAG),
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        } else {
+            Text(
+                text = MicroscopeTimelineMath.framePositionLabel(
+                    currentFrameId,
+                    session.frameCount,
+                ),
+                style = MaterialTheme.typography.labelLarge,
+            )
+        }
+        TextButton(
+            onClick = { onStep(1) },
+            enabled = enabled &&
+                interactionState == TimelineInteractionState.Idle &&
+                session.canStepNext,
+        ) {
+            Text("Frame ›")
+        }
+    }
 }
 
 @Composable
@@ -386,14 +409,13 @@ private fun TimelineRangeControls(
 
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        OutlinedButton(
+        TextButton(
             onClick = { rangeVisible = !rangeVisible },
             enabled = enabled,
-            modifier = Modifier.weight(1f),
         ) {
-            Text(if (rangeVisible) "Hide range" else "Select range")
+            Text(if (rangeVisible) "Hide range" else "Range")
         }
         if (committedRange != null) {
             TextButton(
@@ -402,7 +424,6 @@ private fun TimelineRangeControls(
                     onClearRange()
                 },
                 enabled = enabled,
-                modifier = Modifier.weight(1f),
             ) {
                 Text("Clear range")
             }
@@ -438,6 +459,7 @@ private fun TimelineRangeControls(
         valueRange = 0f..1f,
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 48.dp)
             .testTag(TIMELINE_RANGE_SLIDER_TAG)
             .semantics { contentDescription = "Selected timeline range" },
     )
@@ -458,50 +480,23 @@ private fun TimelineRangeControls(
         null
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("Selected range", style = MaterialTheme.typography.titleSmall)
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
         Text(
-            text = "Start: ${previewStartUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "unavailable"}",
-            style = MaterialTheme.typography.bodyMedium,
+            text = previewStartUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "Start unavailable",
+            style = MaterialTheme.typography.labelMedium,
         )
         Text(
-            text = "End: ${previewEndUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "unavailable"}",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            text = "Duration: ${durationUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "unavailable"}",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            text = "Extraction uses inclusive indexed timestamps: start ≤ frame timestamp ≤ end.",
-            style = MaterialTheme.typography.bodySmall,
+            text = durationUs?.let { "${MicroscopePreviewMath.formatTimestampUs(it)} selected" }
+                ?: "Duration unavailable",
+            style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-    }
-}
-
-@Composable
-private fun RapidStepButton(
-    label: String,
-    delta: Long,
-    session: MicroscopeSessionSnapshot,
-    enabled: Boolean,
-    onJumpFrame: (Long) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val currentFrameId = session.currentFrame?.frameId
-    val target = currentFrameId?.let {
-        MicroscopeTimelineMath.boundedStepTarget(
-            currentFrameId = it,
-            frameCount = session.frameCount,
-            delta = delta,
+        Text(
+            text = previewEndUs?.let(MicroscopePreviewMath::formatTimestampUs) ?: "End unavailable",
+            style = MaterialTheme.typography.labelMedium,
         )
-    }
-    OutlinedButton(
-        onClick = { target?.let(onJumpFrame) },
-        enabled = enabled && target != null && target != currentFrameId,
-        modifier = modifier,
-    ) {
-        Text(label)
     }
 }
