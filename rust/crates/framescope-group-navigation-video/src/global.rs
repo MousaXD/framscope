@@ -164,20 +164,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mapped.frame_id, FrameId(3));
-        assert_eq!(mapped.presentation_timestamp, decoded(3).presentation_timestamp);
+        assert_eq!(
+            mapped.presentation_timestamp,
+            decoded(3).presentation_timestamp
+        );
         assert_eq!(mapped.duration, decoded(3).duration);
         assert_eq!(mapped.pixels.byte_len(), 8);
     }
 
     #[test]
     fn decoder_sequence_mismatch_is_rejected() {
-        let error = indexed_frame_from_decoded(
-            FrameId(4),
-            decoded(3),
-            8,
-            vec![0, 0, 0, 255, 0, 0, 0, 255],
-        )
-        .unwrap_err();
+        let error =
+            indexed_frame_from_decoded(FrameId(4), decoded(3), 8, vec![0, 0, 0, 255, 0, 0, 0, 255])
+                .unwrap_err();
         assert_eq!(error.code, "decoder_sequence_mismatch");
     }
 
