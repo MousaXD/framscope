@@ -126,6 +126,10 @@ class LiveScrubViewModelTest {
             return release.await()
         }
 
+        override suspend fun prefetchFrame(sessionId: Long, frameId: Long): Boolean = false
+
+        override fun cancelSession(sessionId: Long): Boolean = false
+
         override suspend fun forgetSession(sessionId: Long) {
             forgottenSessions += sessionId
         }
@@ -146,6 +150,10 @@ class LiveScrubViewModelTest {
         ): Result<MicroscopeScrubPreview> = Result.success(
             preview(sessionId = sessionId, frameId = frameId, timestampUs = frameId * 40_000L),
         )
+
+        override suspend fun prefetchFrame(sessionId: Long, frameId: Long): Boolean = false
+
+        override fun cancelSession(sessionId: Long): Boolean = false
 
         override suspend fun forgetSession(sessionId: Long) = Unit
     }
