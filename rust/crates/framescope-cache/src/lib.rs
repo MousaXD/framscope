@@ -23,14 +23,14 @@ pub use identity::{
     CacheDirectoryLayout, CacheStore, NoopCacheStore, SourceIdentity, SourceVideoIdentity,
 };
 pub use index::{
-    FRAME_INDEX_SCHEMA_VERSION, FRAME_TIMELINE_CONTRACT_GENERATION,
-    PROGRESSIVE_INDEX_SCHEMA_VERSION, STRUCTURAL_INDEX_GENERATION, VISUAL_INDEX_GENERATION,
-    FrameId, FrameIndex, FrameIndexEntry, FrameIndexError, FrameIndexLifecycle,
-    FrameIndexOpenDisposition, FrameIndexStatus, FrameIndexStreamIdentity, KeyframeAnchor,
+    FRAME_INDEX_SCHEMA_VERSION, FRAME_TIMELINE_CONTRACT_GENERATION, FrameId, FrameIndex,
+    FrameIndexEntry, FrameIndexError, FrameIndexLifecycle, FrameIndexOpenDisposition,
+    FrameIndexStatus, FrameIndexStreamIdentity, KeyframeAnchor, PROGRESSIVE_INDEX_SCHEMA_VERSION,
     ProgressiveFrameIndex, ProgressiveIndexError, ProgressiveIndexLayer,
     ProgressiveIndexOpenDisposition, ProgressiveLayerLifecycle, ProgressiveLayerStatus,
-    SimilarityFingerprintStatus, StructuralAnchor, StructuralAnchorKind, TimestampSeekSafety,
-    VisualArtifactKind, VisualArtifactMetadata,
+    STRUCTURAL_INDEX_GENERATION, SimilarityFingerprintStatus, StructuralAnchor,
+    StructuralAnchorKind, TimestampSeekSafety, VISUAL_INDEX_GENERATION, VisualArtifactKind,
+    VisualArtifactMetadata,
 };
 pub use storage_admin::{
     FRAME_INDEX_NAMESPACE, FrameScopeStorageStats, PREVIEW_PROXY_NAMESPACE, StorageAdmin,
