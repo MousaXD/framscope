@@ -35,6 +35,130 @@ const MAX_EXACT_FORWARD_CURSOR_REUSE_FRAMES: u64 = 48;
 static NEXT_SESSION_ID: AtomicI64 = AtomicI64::new(1);
 static MICROSCOPE_SESSIONS: OnceLock<Mutex<HashMap<i64, Arc<Mutex<NavigationSession>>>>> =
     OnceLock::new();
+static FRAME_PREPARATIONS: OnceLock<Mutex<FramePreparationRegistry>> = OnceLock::new();
+
+#[derive(Debug, Default)]
+struct FramePreparationRegistry {
+    next_generation: i64,
+    active: HashMap<i64, ActiveFramePreparation>,
+}
+
+#[derive(Debug)]
+struct ActiveFramePreparation {
+    generation: i64,
+    request_cancellation: CancellationToken,
+    work_cancellation: CancellationToken,
+}
+
+#[derive(Debug)]
+struct FramePreparationGuard {
+    session_id: i64,
+    generation: i64,
+    request_cancellation: CancellationToken,
+}
+
+impl FramePreparationGuard {
+    fn request_cancellation(&self) -> CancellationToken {
+        self.request_cancellation.clone()
+    }
+
+    /// Make a retained decoder's one-shot token the interrupt signal for this request only while
+    /// the request is active. A newer exact navigation can then interrupt warm forward decode
+    /// without cancelling idle cursor state during ordinary sequential navigation.
+    fn adopt_work_cancellation(&self, work_cancellation: CancellationToken) -> bool {
+        if self.request_cancellation.is_cancelled() || work_cancellation.is_cancelled() {
+            return false;
+        }
+        let Ok(mut registry) = frame_preparations().lock() else {
+            return false;
+        };
+        let Some(active) = registry.active.get_mut(&self.session_id) else {
+            return false;
+        };
+        if active.generation != self.generation || active.request_cancellation.is_cancelled() {
+            return false;
+        }
+        active.work_cancellation = work_cancellation;
+        true
+    }
+}
+
+impl Drop for FramePreparationGuard {
+    fn drop(&mut self) {
+        let Ok(mut registry) = frame_preparations().lock() else {
+            return;
+        };
+        let current = registry
+            .active
+            .get(&self.session_id)
+            .is_some_and(|active| active.generation == self.generation);
+        if current {
+            // Normal completion deliberately does not cancel the work token. A retained decoder may
+            // keep using that one-shot token on the next warm request.
+            registry.active.remove(&self.session_id);
+        }
+    }
+}
+
+fn frame_preparations() -> &'static Mutex<FramePreparationRegistry> {
+    FRAME_PREPARATIONS.get_or_init(|| Mutex::new(FramePreparationRegistry::default()))
+}
+
+fn begin_frame_preparation(session_id: i64) -> Result<FramePreparationGuard, MicroscopeFailure> {
+    if session_id <= 0 {
+        return Err(MicroscopeFailure::new(
+            "invalid_request",
+            "microscope session id must be positive",
+        ));
+    }
+    let request_cancellation = CancellationToken::new();
+    let mut registry = frame_preparations().lock().map_err(|_| {
+        MicroscopeFailure::new("bridge_error", "frame preparation state is poisoned")
+    })?;
+    if let Some(previous) = registry.active.remove(&session_id) {
+        previous.request_cancellation.cancel();
+        previous.work_cancellation.cancel();
+    }
+    let generation = registry
+        .next_generation
+        .checked_add(1)
+        .filter(|generation| *generation > 0)
+        .ok_or_else(|| {
+            MicroscopeFailure::new("bridge_error", "frame preparation generation exhausted")
+        })?;
+    registry.next_generation = generation;
+    registry.active.insert(
+        session_id,
+        ActiveFramePreparation {
+            generation,
+            request_cancellation: request_cancellation.clone(),
+            work_cancellation: request_cancellation.clone(),
+        },
+    );
+    Ok(FramePreparationGuard {
+        session_id,
+        generation,
+        request_cancellation,
+    })
+}
+
+/// Cancel expensive source-quality preparation before a newer metadata navigation waits on the
+/// per-session mutex. This is a supersession signal only; normal completion leaves the warm decoder
+/// token uncancelled so locality survives sequential frame stepping.
+fn cancel_active_frame_preparation(session_id: i64) -> bool {
+    if session_id <= 0 {
+        return false;
+    }
+    let Ok(registry) = frame_preparations().lock() else {
+        return false;
+    };
+    let Some(active) = registry.active.get(&session_id) else {
+        return false;
+    };
+    active.request_cancellation.cancel();
+    active.work_cancellation.cancel();
+    true
+}
 
 #[derive(Debug, Serialize)]
 struct FrameDetails {
@@ -343,10 +467,12 @@ pub(crate) fn open_response(fd: i32, operation_id: OperationId, cache_root: &str
 }
 
 pub(crate) fn step_response(session_id: i64, delta: i32) -> String {
+    let _ = cancel_active_frame_preparation(session_id);
     serialize_response(step_session(session_id, delta))
 }
 
 pub(crate) fn jump_frame_response(session_id: i64, frame_id: i64) -> String {
+    let _ = cancel_active_frame_preparation(session_id);
     serialize_response(jump_to_frame(session_id, frame_id))
 }
 
@@ -355,6 +481,7 @@ pub(crate) fn jump_timestamp_response(
     timestamp_us: i64,
     selection: i32,
 ) -> String {
+    let _ = cancel_active_frame_preparation(session_id);
     serialize_response(jump_to_timestamp(session_id, timestamp_us, selection))
 }
 
@@ -362,13 +489,16 @@ pub(crate) fn prepare_frame_response(session_id: i64) -> String {
     // Frame preparation is the expensive authoritative operation, so keep the exact-navigation
     // barrier alive for the decode itself, not only for the preceding metadata step/jump call.
     let _exact_navigation = super::scrub_handoff::begin_exact_navigation(session_id);
-    serialize_prepared_frame_response(prepare_current_frame(session_id))
+    let result = begin_frame_preparation(session_id)
+        .and_then(|preparation| prepare_current_frame(session_id, &preparation));
+    serialize_prepared_frame_response(result)
 }
 
 pub(crate) fn close_session(session_id: i64) -> bool {
     if session_id <= 0 {
         return false;
     }
+    let _ = cancel_active_frame_preparation(session_id);
     microscope_sessions()
         .lock()
         .map(|mut sessions| sessions.remove(&session_id).is_some())
@@ -700,25 +830,65 @@ fn jump_to_timestamp(
 }
 
 #[cfg(unix)]
-fn prepare_current_frame(session_id: i64) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+fn prepare_current_frame(
+    session_id: i64,
+    preparation: &FramePreparationGuard,
+) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+    let request_cancellation = preparation.request_cancellation();
+    if request_cancellation.is_cancelled() {
+        return Err(from_frame_scope(FrameScopeError::Cancelled));
+    }
     with_session_mut(session_id, |session| {
+        if request_cancellation.is_cancelled() {
+            return Err(from_frame_scope(FrameScopeError::Cancelled));
+        }
         let frame_id = session.current.ok_or_else(|| {
             MicroscopeFailure::new("no_frames", "video contains no indexed frames")
         })?;
+
+        let cursor_cancelled = session
+            .decoder_cursor
+            .as_ref()
+            .and_then(|cursor| cursor.cancellation_token())
+            .is_some_and(|cancellation| cancellation.is_cancelled());
+        if cursor_cancelled {
+            session.decoder_cursor = None;
+        }
+        if let Some(cursor_cancellation) = session
+            .decoder_cursor
+            .as_ref()
+            .and_then(|cursor| cursor.cancellation_token())
+        {
+            if !preparation.adopt_work_cancellation(cursor_cancellation) {
+                session.decoder_cursor = None;
+                return Err(from_frame_scope(FrameScopeError::Cancelled));
+            }
+        }
+
         let source_fd = session._source_fd.as_fd();
+        let decoder_cancellation = request_cancellation.clone();
         let mut decoder_reopens = 0_u64;
         let presentation = present_microscope_frame_with_cursor(
             &session.index,
             &mut session.frame_cache,
             &mut session.decoder_cursor,
             || {
+                if decoder_cancellation.is_cancelled()
+                    || !preparation.adopt_work_cancellation(decoder_cancellation.clone())
+                {
+                    return Err(FrameScopeError::Cancelled);
+                }
                 decoder_reopens = decoder_reopens.saturating_add(1);
-                open_decoder(source_fd, CancellationToken::new())
+                open_decoder(source_fd, decoder_cancellation.clone())
             },
             frame_id,
             MAX_EXACT_FORWARD_CURSOR_REUSE_FRAMES,
         )
         .map_err(from_presentation)?;
+        if request_cancellation.is_cancelled() {
+            session.decoder_cursor = None;
+            return Err(from_frame_scope(FrameScopeError::Cancelled));
+        }
         if presentation.pixels.byte_len() > MAX_PRESENTATION_RGBA_BYTES {
             return Err(MicroscopeFailure::new(
                 "frame_too_large",
@@ -744,7 +914,10 @@ fn prepare_current_frame(session_id: i64) -> Result<PreparedFrameDetails, Micros
 }
 
 #[cfg(not(unix))]
-fn prepare_current_frame(_session_id: i64) -> Result<PreparedFrameDetails, MicroscopeFailure> {
+fn prepare_current_frame(
+    _session_id: i64,
+    _preparation: &FramePreparationGuard,
+) -> Result<PreparedFrameDetails, MicroscopeFailure> {
     Err(MicroscopeFailure::new(
         "bridge_error",
         "microscope frame presentation is unavailable on this platform",
@@ -1267,6 +1440,39 @@ mod tests {
     fn presentation_generation_advances_and_rejects_overflow() {
         assert_eq!(next_presentation_generation(1).unwrap(), 2);
         assert!(next_presentation_generation(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn newer_frame_preparation_cancels_request_and_adopted_decoder_work() {
+        let session_id = 91_001;
+        let first = begin_frame_preparation(session_id).unwrap();
+        let retained_decoder = CancellationToken::new();
+        assert!(first.adopt_work_cancellation(retained_decoder.clone()));
+        assert!(!first.request_cancellation().is_cancelled());
+        assert!(!retained_decoder.is_cancelled());
+
+        let second = begin_frame_preparation(session_id).unwrap();
+        assert!(first.request_cancellation().is_cancelled());
+        assert!(retained_decoder.is_cancelled());
+        assert!(!second.request_cancellation().is_cancelled());
+
+        drop(first);
+        assert!(cancel_active_frame_preparation(session_id));
+        assert!(second.request_cancellation().is_cancelled());
+        drop(second);
+        assert!(!cancel_active_frame_preparation(session_id));
+    }
+
+    #[test]
+    fn completed_frame_preparation_keeps_retained_decoder_token_warm() {
+        let session_id = 91_002;
+        let preparation = begin_frame_preparation(session_id).unwrap();
+        let retained_decoder = CancellationToken::new();
+        assert!(preparation.adopt_work_cancellation(retained_decoder.clone()));
+        drop(preparation);
+
+        assert!(!retained_decoder.is_cancelled());
+        assert!(!cancel_active_frame_preparation(session_id));
     }
 
     #[test]
