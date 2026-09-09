@@ -17,6 +17,7 @@ internal data class MediaCodecDecodeBenchmarkResult(
     val wallTimeMs: Double,
     val processCpuTimeMs: Long,
     val timeToFirstFrameMs: Double?,
+    val seekSettleMs: Double?,
     val framesPerSecond: Double,
     val firstPresentationTimeUs: Long?,
     val lastPresentationTimeUs: Long?,
@@ -42,9 +43,11 @@ internal object AndroidMediaCodecBenchmark {
         context: Context,
         fileDescriptor: FileDescriptor,
         maxFrames: Long? = null,
+        seekTargetUs: Long? = null,
         isCancelled: () -> Boolean = { false },
     ): MediaCodecDecodeBenchmarkResult {
         require(maxFrames == null || maxFrames > 0) { "maxFrames must be positive when provided" }
+        require(seekTargetUs == null || seekTargetUs >= 0) { "seekTargetUs must be non-negative" }
 
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
@@ -71,6 +74,11 @@ internal object AndroidMediaCodecBenchmark {
             activeCodec.configure(format, null, null, 0)
             activeCodec.start()
 
+            val seekStartNs = seekTargetUs?.let { targetUs ->
+                val startNs = SystemClock.elapsedRealtimeNanos()
+                extractor.seekTo(targetUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                startNs
+            }
             val bufferInfo = MediaCodec.BufferInfo()
             var inputEnded = false
             var outputEnded = false
@@ -78,6 +86,7 @@ internal object AndroidMediaCodecBenchmark {
             var firstPresentationTimeUs: Long? = null
             var lastPresentationTimeUs: Long? = null
             var firstFrameNs: Long? = null
+            var seekSettleMs: Double? = null
             var outputColorFormat: Int? = null
             val timestampDigest = Fnv1a64()
             var cancelled = false
@@ -145,8 +154,12 @@ internal object AndroidMediaCodecBenchmark {
                         val isEndOfStream = bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                         if (!isCodecConfig && bufferInfo.size > 0) {
                             val ptsUs = bufferInfo.presentationTimeUs
+                            val nowNs = SystemClock.elapsedRealtimeNanos()
                             if (firstFrameNs == null) {
-                                firstFrameNs = SystemClock.elapsedRealtimeNanos()
+                                firstFrameNs = nowNs
+                            }
+                            if (seekSettleMs == null && seekTargetUs != null && ptsUs >= seekTargetUs) {
+                                seekSettleMs = seekStartNs?.let { startNs -> nanosToMillis(nowNs - startNs) }
                             }
                             if (firstPresentationTimeUs == null) {
                                 firstPresentationTimeUs = ptsUs
@@ -175,6 +188,7 @@ internal object AndroidMediaCodecBenchmark {
                 wallTimeMs = wallTimeMs,
                 processCpuTimeMs = Process.getElapsedCpuTime() - processCpuStartMs,
                 timeToFirstFrameMs = firstFrameNs?.let { nanosToMillis(it - wallStartNs) },
+                seekSettleMs = seekSettleMs,
                 framesPerSecond = framesPerSecond,
                 firstPresentationTimeUs = firstPresentationTimeUs,
                 lastPresentationTimeUs = lastPresentationTimeUs,
