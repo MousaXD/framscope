@@ -215,13 +215,18 @@ fn session_index_binding_response(cache_root: &str, session_id: i64) -> String {
         let root = Path::new(cache_root);
         match crate::microscope::with_extraction_context(session_id, |_fd, index| {
             if !index.source_identity().is_reuse_safe() {
-                return Err("the current microscope index is operation-scoped and not persistent".to_string());
+                return Err(
+                    "the current microscope index is operation-scoped and not persistent"
+                        .to_string(),
+                );
             }
             let status = index.status().map_err(|error| error.to_string())?;
             let relative_path = index
                 .path()
                 .strip_prefix(root)
-                .map_err(|_| "microscope index path is outside the configured cache root".to_string())?
+                .map_err(|_| {
+                    "microscope index path is outside the configured cache root".to_string()
+                })?
                 .components()
                 .map(|component| component.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
@@ -504,7 +509,8 @@ mod tests {
     fn wave1_storage_and_live_scrub_exports_are_linked_together() {
         let _storage_stats =
             Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats;
-        let _index_catalog = Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeIndexCatalog;
+        let _index_catalog =
+            Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeIndexCatalog;
         let _session_binding =
             Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeSessionIndexBinding;
         let _preview_frame = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewFrame;
