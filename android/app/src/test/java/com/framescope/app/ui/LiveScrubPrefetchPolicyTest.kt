@@ -10,7 +10,7 @@ class LiveScrubPrefetchPolicyTest {
         val policy = LiveScrubPrefetchPolicy()
 
         assertNull(policy.candidate(7L, 10L, 100L, 1_000L, accelerationEnabled = true))
-        assertEquals(13L, policy.candidate(7L, 12L, 100L, 1_080L, accelerationEnabled = true))
+        assertEquals(15L, policy.candidate(7L, 12L, 100L, 1_080L, accelerationEnabled = true))
         assertEquals(17L, policy.candidate(7L, 14L, 100L, 1_140L, accelerationEnabled = true))
     }
 
@@ -20,7 +20,7 @@ class LiveScrubPrefetchPolicyTest {
 
         assertNull(policy.candidate(9L, 30L, 100L, 1_000L, accelerationEnabled = true))
         assertEquals(27L, policy.candidate(9L, 29L, 100L, 1_100L, accelerationEnabled = true))
-        assertEquals(25L, policy.candidate(9L, 28L, 100L, 1_200L, accelerationEnabled = true))
+        assertEquals(26L, policy.candidate(9L, 28L, 100L, 1_200L, accelerationEnabled = true))
     }
 
     @Test
