@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-pub const GLOBAL_SIMILARITY_ALGORITHM_VERSION: u32 = 2;
-pub const GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION: u32 = 2;
+pub const GLOBAL_SIMILARITY_ALGORITHM_VERSION: u32 = 3;
+pub const GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION: u32 = 3;
 pub const NORMALIZED_SIDE: usize = 16;
 pub const NORMALIZED_RGB_BYTES: usize = NORMALIZED_SIDE * NORMALIZED_SIDE * 3;
 pub const HASH_BANDS_PER_KIND: usize = 4;
@@ -31,6 +31,12 @@ const STATE_COMPLETE: i64 = 2;
 const WRITE_BATCH_DESCRIPTORS: usize = 128;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 const SCALE_INSETS_Q16: [u32; 4] = [0, 32_768, 49_152, 65_536];
+const COLOR_BUCKET_KIND: i64 = 2;
+const COLOR_BUCKET_BAND: i64 = 0;
+const COLOR_BUCKET_SHIFT: u32 = 3;
+const COLOR_BUCKET_COMPONENT_MAX: i32 = 31;
+const COLOR_BUCKET_RADIUS: i32 = 2;
+const INDEX_KEYS_PER_DESCRIPTOR: usize = HASH_BANDS_PER_KIND * 2 + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalSimilarityStoreKey {
@@ -329,6 +335,50 @@ fn score_from_difference(difference: u64, channels: u64) -> u16 {
     (u64::from(SIMILARITY_SCALE) - difference_bps) as u16
 }
 
+fn color_bucket(bytes: &[u8]) -> Result<u16, GlobalSimilarityError> {
+    validate_descriptor_bytes(bytes)?;
+    let pixel_count = (bytes.len() / 3) as u64;
+    let mut sums = [0_u64; 3];
+    for pixel in bytes.chunks_exact(3) {
+        for channel in 0..3 {
+            sums[channel] += u64::from(pixel[channel]);
+        }
+    }
+    let quantized = sums.map(|sum| {
+        let mean = (sum + pixel_count / 2) / pixel_count;
+        ((mean as u16) >> COLOR_BUCKET_SHIFT).min(COLOR_BUCKET_COMPONENT_MAX as u16)
+    });
+    Ok(quantized[0] | (quantized[1] << 5) | (quantized[2] << 10))
+}
+
+fn color_bucket_components(bucket: u16) -> [i32; 3] {
+    [
+        i32::from(bucket & 0x1f),
+        i32::from((bucket >> 5) & 0x1f),
+        i32::from((bucket >> 10) & 0x1f),
+    ]
+}
+
+fn nearby_color_buckets(bucket: u16) -> Vec<u16> {
+    let [red, green, blue] = color_bucket_components(bucket);
+    let mut buckets = Vec::with_capacity(125);
+    for r in (red - COLOR_BUCKET_RADIUS).max(0)..=(red + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX) {
+        for g in (green - COLOR_BUCKET_RADIUS).max(0)..=(green + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX) {
+            for b in (blue - COLOR_BUCKET_RADIUS).max(0)..=(blue + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX) {
+                buckets.push((r as u16) | ((g as u16) << 5) | ((b as u16) << 10));
+            }
+        }
+    }
+    buckets
+}
+
+fn color_buckets_are_neighbors(left: u16, right: u16) -> bool {
+    color_bucket_components(left)
+        .into_iter()
+        .zip(color_bucket_components(right))
+        .all(|(left, right)| (left - right).abs() <= COLOR_BUCKET_RADIUS)
+}
+
 #[derive(Debug, Clone)]
 pub struct GlobalSimilarityStore {
     root: PathBuf,
@@ -492,21 +542,28 @@ impl GlobalSimilarityStore {
                     row.get::<_, i64>(0)
                 })?;
                 for row in rows {
-                    let raw = row?;
-                    let id = u64::try_from(raw).map_err(|_| {
-                        GlobalSimilarityError::InvalidStore(format!(
-                            "negative candidate frame id {raw}"
-                        ))
-                    })?;
-                    if id >= expected_frame_count {
-                        return Err(GlobalSimilarityError::InvalidStore(format!(
-                            "candidate frame id {id} exceeds authoritative frame count {expected_frame_count}"
-                        )));
-                    }
-                    if id != target_frame.0 {
-                        candidate_ids.insert(FrameId(id));
-                    }
+                    collect_candidate(
+                        row?,
+                        target_frame,
+                        expected_frame_count,
+                        &mut candidate_ids,
+                    )?;
                 }
+            }
+        }
+        let target_color_bucket = color_bucket(&target.normalized_rgb)?;
+        for bucket in nearby_color_buckets(target_color_bucket) {
+            let rows = statement.query_map(
+                params![COLOR_BUCKET_KIND, COLOR_BUCKET_BAND, i64::from(bucket)],
+                |row| row.get::<_, i64>(0),
+            )?;
+            for row in rows {
+                collect_candidate(
+                    row?,
+                    target_frame,
+                    expected_frame_count,
+                    &mut candidate_ids,
+                )?;
             }
         }
 
@@ -562,6 +619,26 @@ impl GlobalSimilarityStore {
         }
         Ok(())
     }
+}
+
+fn collect_candidate(
+    raw: i64,
+    target_frame: FrameId,
+    expected_frame_count: u64,
+    candidate_ids: &mut BTreeSet<FrameId>,
+) -> Result<(), GlobalSimilarityError> {
+    let id = u64::try_from(raw).map_err(|_| {
+        GlobalSimilarityError::InvalidStore(format!("negative candidate frame id {raw}"))
+    })?;
+    if id >= expected_frame_count {
+        return Err(GlobalSimilarityError::InvalidStore(format!(
+            "candidate frame id {id} exceeds authoritative frame count {expected_frame_count}"
+        )));
+    }
+    if id != target_frame.0 {
+        candidate_ids.insert(FrameId(id));
+    }
+    Ok(())
 }
 
 pub struct GlobalSimilarityStoreWriter {
@@ -651,6 +728,12 @@ impl GlobalSimilarityStoreWriter {
                         ])?;
                     }
                 }
+                band_statement.execute(params![
+                    COLOR_BUCKET_KIND,
+                    COLOR_BUCKET_BAND,
+                    i64::from(color_bucket(&descriptor.normalized_rgb)?),
+                    to_sql_u64(descriptor.frame_id.0, "frame id")?,
+                ])?;
             }
         }
         transaction.commit()?;
@@ -674,7 +757,7 @@ fn create_schema(connection: &Connection) -> Result<(), GlobalSimilarityError> {
             normalized_rgb BLOB NOT NULL CHECK(length(normalized_rgb) = {NORMALIZED_RGB_BYTES})
          );
          CREATE TABLE global_hash_bands (
-            kind INTEGER NOT NULL CHECK(kind IN (0, 1)),
+            kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 2),
             band INTEGER NOT NULL CHECK(band BETWEEN 0 AND 3),
             band_value INTEGER NOT NULL CHECK(band_value BETWEEN 0 AND 65535),
             frame_id INTEGER NOT NULL CHECK(frame_id >= 0),
@@ -730,7 +813,7 @@ fn validate_rows(
             row.get(0)
         })?;
     let expected_bands = expected_count
-        .checked_mul((HASH_BANDS_PER_KIND * 2) as u64)
+        .checked_mul(INDEX_KEYS_PER_DESCRIPTOR as u64)
         .ok_or(GlobalSimilarityError::NumericRange("hash band count"))?;
     if from_sql_u64(band_count, "hash band count")? != expected_bands {
         return Ok(false);
@@ -742,7 +825,7 @@ fn validate_rows(
             GROUP BY frame_id
             HAVING bands != ?1
          )",
-        params![(HASH_BANDS_PER_KIND * 2) as i64],
+        params![INDEX_KEYS_PER_DESCRIPTOR as i64],
         |row| row.get(0),
     )?;
     Ok(wrong_band_count == 0)
@@ -1006,8 +1089,8 @@ mod tests {
         GlobalSimilarityStoreKey::new(source(tag), stream()).unwrap()
     }
 
-    fn candidate_shares_hash_band(left: &GlobalDescriptor, right: &GlobalDescriptor) -> bool {
-        [
+    fn candidate_shares_index_key(left: &GlobalDescriptor, right: &GlobalDescriptor) -> bool {
+        let shares_hash = [
             (left.average_hash, right.average_hash),
             (left.difference_hash, right.difference_hash),
         ]
@@ -1016,7 +1099,13 @@ mod tests {
             (0..HASH_BANDS_PER_KIND).any(|band| {
                 ((left_hash >> (band * 16)) & 0xffff) == ((right_hash >> (band * 16)) & 0xffff)
             })
-        })
+        });
+        if shares_hash {
+            return true;
+        }
+        let left_color = color_bucket(&left.normalized_rgb).unwrap();
+        let right_color = color_bucket(&right.normalized_rgb).unwrap();
+        color_buckets_are_neighbors(left_color, right_color)
     }
 
     #[test]
@@ -1081,7 +1170,7 @@ mod tests {
                 "positive fixture {name} scored {score}"
             );
             assert!(
-                candidate_shares_hash_band(&reference, &descriptor),
+                candidate_shares_index_key(&reference, &descriptor),
                 "positive fixture {name} missed indexed candidate generation"
             );
         }
