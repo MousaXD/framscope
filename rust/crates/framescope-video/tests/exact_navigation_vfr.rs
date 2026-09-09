@@ -29,7 +29,6 @@ struct FakeDecoder {
     stream: StreamInfo,
     frames: VecDeque<DecodedRgbaFrame>,
     current: Option<DecodedRgbaFrame>,
-    opens: Arc<AtomicU64>,
 }
 
 impl TargetRgbaNavigationDecoder for FakeDecoder {
@@ -61,13 +60,12 @@ impl TargetRgbaNavigationDecoder for FakeDecoder {
 
     fn seek_for_target_navigation(&mut self, timestamp_us: i64) -> Result<(), FrameScopeError> {
         self.current = None;
-        let target_ticks = timestamp_us;
         while self.frames.front().is_some_and(|frame| {
             frame
                 .frame
                 .presentation_timestamp
                 .and_then(|timestamp| timestamp.to_microseconds())
-                .is_some_and(|pts| pts < target_ticks)
+                .is_some_and(|pts| pts < timestamp_us)
         }) {
             self.frames.pop_front();
         }
@@ -197,7 +195,6 @@ fn warm_forward_navigation_preserves_exact_vfr_identity_without_reopen_or_seek()
                 .map(|(id, spec)| rgba_frame(id as u64, *spec))
                 .collect(),
             current: None,
-            opens: opens.clone(),
         })
     };
 
@@ -230,7 +227,6 @@ fn warm_forward_navigation_preserves_exact_vfr_identity_without_reopen_or_seek()
                     .map(|(id, spec)| rgba_frame(id as u64, *spec))
                     .collect(),
                 current: None,
-                opens: opens.clone(),
             })
         },
         FrameId(4),
