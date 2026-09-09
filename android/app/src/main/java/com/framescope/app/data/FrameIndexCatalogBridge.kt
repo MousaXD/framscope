@@ -104,7 +104,7 @@ internal object FrameIndexCatalogBridge : NativeFrameIndexCatalogBridge {
     }
 }
 
-class NativePersistentFrameIndexCatalog(
+internal class NativePersistentFrameIndexCatalog(
     private val cacheRoot: String,
     private val bridge: NativeFrameIndexCatalogBridge = FrameIndexCatalogBridge,
 ) : PersistentFrameIndexCatalog {
