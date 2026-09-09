@@ -11,18 +11,31 @@ import kotlinx.coroutines.flow.asStateFlow
 private const val PREFS_NAME = "framescope_ram_acceleration"
 private const val KEY_MODE = "mode"
 private const val KEY_CUSTOM_MIB = "custom_mib"
-private const val DEFAULT_CUSTOM_MIB = 128
+private const val DEFAULT_CUSTOM_MIB = 256
+private const val PRESSURE_NONE_PERCENT = 100
+private const val PRESSURE_MODERATE_PERCENT = 75
+private const val PRESSURE_STRONG_PERCENT = 50
+private const val PRESSURE_CRITICAL_PERCENT = 25
 
 data class RamAccelerationState(
     val mode: RamAccelerationMode,
     val customTotalMiB: Int,
+    val customMaximumMiB: Int,
     val recommendedTotalMiB: Int,
+    val aggressiveTotalMiB: Int,
+    val requestedTotalMiB: Int,
     val activeTotalMiB: Int,
     val sourceCacheMiB: Int,
     val previewCacheMiB: Int,
+    val availableMemoryMiB: Int,
+    val managedHeapClassMiB: Int,
     val lowRamDevice: Boolean,
     val underMemoryPressure: Boolean,
+    val pressureReductionPercent: Int,
+    val pressureReductionCount: Long,
+    val headroomLimited: Boolean,
     val nativeApplied: Boolean,
+    val metrics: RamAccelerationMetrics?,
 )
 
 class RamAccelerationController internal constructor(
@@ -32,39 +45,83 @@ class RamAccelerationController internal constructor(
     private val preferences: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE),
 ) {
     private val activityManager = context.getSystemService(ActivityManager::class.java)
-    private val profile = readDeviceProfile(activityManager)
-    private var underMemoryPressure = profile.systemLowMemory
+    private var profile = readDeviceProfile(activityManager)
+    private var memoryPressureScalePercent = if (profile.systemLowMemory) {
+        PRESSURE_CRITICAL_PERCENT
+    } else {
+        PRESSURE_NONE_PERCENT
+    }
+    private var pressureReductionCount = if (profile.systemLowMemory) 1L else 0L
+    private var preferredCustomMiB = readStoredCustomMiB()
 
-    private val _state = MutableStateFlow(resolveAndApply(readMode(), readCustomMiB()))
+    private val _state = MutableStateFlow(resolveAndApply(readMode(), preferredCustomMiB))
     val state: StateFlow<RamAccelerationState> = _state.asStateFlow()
 
     fun setMode(mode: RamAccelerationMode) {
         preferences.edit().putString(KEY_MODE, mode.name).apply()
-        _state.value = resolveAndApply(mode, _state.value.customTotalMiB)
+        refreshDeviceProfile()
+        _state.value = resolveAndApply(mode, preferredCustomMiB)
     }
 
     fun setCustomTotalMiB(value: Int) {
-        val clamped = value.coerceIn(
-            RamAccelerationPolicy.MIN_CUSTOM_MIB,
-            RamAccelerationPolicy.MAX_CUSTOM_MIB,
-        )
-        preferences.edit().putInt(KEY_CUSTOM_MIB, clamped).apply()
-        _state.value = resolveAndApply(_state.value.mode, clamped)
+        refreshDeviceProfile()
+        val customMaximum = RamAccelerationPolicy.customMaximumTotalBytes(profile).toWholeMiB()
+            .coerceIn(RamAccelerationPolicy.MIN_CUSTOM_MIB, RamAccelerationPolicy.MAX_CUSTOM_MIB)
+        preferredCustomMiB = value.coerceIn(RamAccelerationPolicy.MIN_CUSTOM_MIB, customMaximum)
+        preferences.edit().putInt(KEY_CUSTOM_MIB, preferredCustomMiB).apply()
+        _state.value = resolveAndApply(_state.value.mode, preferredCustomMiB)
     }
 
     /**
-     * Memory pressure is sticky for this process. Avoiding automatic re-growth prevents allocation
-     * oscillation while Android is reclaiming memory; a process restart re-evaluates live headroom.
+     * Refreshes native cache counters only. This intentionally does not poll ActivityManager: Android
+     * recommends trim callbacks for memory-pressure management rather than frequent memory polling.
      */
+    fun refreshMetrics() {
+        _state.value = _state.value.copy(metrics = bridge.stats(cacheRoot))
+    }
+
+    /**
+     * Re-evaluate live headroom when the app becomes visible again. A previous trim is allowed to
+     * recover only after Android no longer reports low memory, avoiding cache-size oscillation while
+     * the process remains under pressure.
+     */
+    fun onForeground() {
+        refreshDeviceProfile()
+        memoryPressureScalePercent = if (profile.systemLowMemory) {
+            if (memoryPressureScalePercent > PRESSURE_CRITICAL_PERCENT) {
+                pressureReductionCount = pressureReductionCount.saturatingIncrement()
+            }
+            PRESSURE_CRITICAL_PERCENT
+        } else {
+            PRESSURE_NONE_PERCENT
+        }
+        _state.value = resolveAndApply(_state.value.mode, preferredCustomMiB)
+    }
+
     fun onTrimMemory(level: Int) {
-        if (!isMemoryPressureLevel(level)) return
-        underMemoryPressure = true
-        _state.value = resolveAndApply(_state.value.mode, _state.value.customTotalMiB)
+        val requestedScale = pressureScaleForTrimLevel(level) ?: return
+        if (requestedScale >= memoryPressureScalePercent) return
+        memoryPressureScalePercent = requestedScale
+        pressureReductionCount = pressureReductionCount.saturatingIncrement()
+        refreshDeviceProfile()
+        _state.value = resolveAndApply(_state.value.mode, preferredCustomMiB)
     }
 
     fun onLowMemory() {
-        underMemoryPressure = true
-        _state.value = resolveAndApply(_state.value.mode, _state.value.customTotalMiB)
+        if (memoryPressureScalePercent > PRESSURE_CRITICAL_PERCENT) {
+            pressureReductionCount = pressureReductionCount.saturatingIncrement()
+        }
+        memoryPressureScalePercent = PRESSURE_CRITICAL_PERCENT
+        refreshDeviceProfile()
+        _state.value = resolveAndApply(_state.value.mode, preferredCustomMiB)
+    }
+
+    private fun refreshDeviceProfile() {
+        profile = readDeviceProfile(activityManager)
+        if (profile.systemLowMemory && memoryPressureScalePercent > PRESSURE_CRITICAL_PERCENT) {
+            memoryPressureScalePercent = PRESSURE_CRITICAL_PERCENT
+            pressureReductionCount = pressureReductionCount.saturatingIncrement()
+        }
     }
 
     private fun resolveAndApply(
@@ -75,7 +132,7 @@ class RamAccelerationController internal constructor(
             mode = mode,
             profile = profile,
             customTotalMiB = customMiB,
-            underMemoryPressure = underMemoryPressure,
+            memoryPressureScalePercent = memoryPressureScalePercent,
         )
         val applied = bridge.configure(
             cacheRoot = cacheRoot,
@@ -84,14 +141,26 @@ class RamAccelerationController internal constructor(
         )
         return RamAccelerationState(
             mode = mode,
-            customTotalMiB = customMiB,
+            customTotalMiB = minOf(
+                customMiB,
+                budget.customMaximumTotalBytes.toWholeMiB(),
+            ).coerceAtLeast(RamAccelerationPolicy.MIN_CUSTOM_MIB),
+            customMaximumMiB = budget.customMaximumTotalBytes.toWholeMiB(),
             recommendedTotalMiB = budget.recommendedTotalBytes.toWholeMiB(),
+            aggressiveTotalMiB = budget.aggressiveTotalBytes.toWholeMiB(),
+            requestedTotalMiB = budget.requestedTotalBytes.toWholeMiB(),
             activeTotalMiB = budget.totalBytes.toWholeMiB(),
             sourceCacheMiB = budget.sourceCacheBytes.toWholeMiB(),
             previewCacheMiB = budget.previewCacheBytes.toWholeMiB(),
+            availableMemoryMiB = profile.availableRamBytes.toWholeMiB(),
+            managedHeapClassMiB = profile.memoryClassMb.coerceAtLeast(0),
             lowRamDevice = profile.lowRamDevice,
-            underMemoryPressure = budget.pressureReduced,
+            underMemoryPressure = budget.pressureReductionPercent > 0 || profile.systemLowMemory,
+            pressureReductionPercent = budget.pressureReductionPercent,
+            pressureReductionCount = pressureReductionCount,
+            headroomLimited = budget.headroomLimited,
             nativeApplied = applied,
+            metrics = bridge.stats(cacheRoot),
         )
     }
 
@@ -100,20 +169,18 @@ class RamAccelerationController internal constructor(
         ?.let { stored -> runCatching { RamAccelerationMode.valueOf(stored) }.getOrNull() }
         ?: RamAccelerationMode.Automatic
 
-    private fun readCustomMiB(): Int = preferences
+    private fun readStoredCustomMiB(): Int = preferences
         .getInt(KEY_CUSTOM_MIB, DEFAULT_CUSTOM_MIB)
         .coerceIn(RamAccelerationPolicy.MIN_CUSTOM_MIB, RamAccelerationPolicy.MAX_CUSTOM_MIB)
 
     @Suppress("DEPRECATION")
-    private fun isMemoryPressureLevel(level: Int): Boolean = when (level) {
-        ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE,
-        ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
-        ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
-        ComponentCallbacks2.TRIM_MEMORY_BACKGROUND,
-        ComponentCallbacks2.TRIM_MEMORY_MODERATE,
-        ComponentCallbacks2.TRIM_MEMORY_COMPLETE,
-        -> true
-        else -> false
+    private fun pressureScaleForTrimLevel(level: Int): Int? = when {
+        level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND -> PRESSURE_CRITICAL_PERCENT
+        level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> PRESSURE_STRONG_PERCENT
+        level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL -> PRESSURE_CRITICAL_PERCENT
+        level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW -> PRESSURE_STRONG_PERCENT
+        level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE -> PRESSURE_MODERATE_PERCENT
+        else -> null
     }
 }
 
@@ -122,6 +189,7 @@ private fun readDeviceProfile(activityManager: ActivityManager?): RamAcceleratio
         return RamAccelerationDeviceProfile(
             totalRamBytes = 0L,
             availableRamBytes = 0L,
+            lowMemoryThresholdBytes = 0L,
             memoryClassMb = 0,
             lowRamDevice = false,
             systemLowMemory = false,
@@ -132,6 +200,7 @@ private fun readDeviceProfile(activityManager: ActivityManager?): RamAcceleratio
     return RamAccelerationDeviceProfile(
         totalRamBytes = memoryInfo.totalMem,
         availableRamBytes = memoryInfo.availMem,
+        lowMemoryThresholdBytes = memoryInfo.threshold,
         memoryClassMb = activityManager.memoryClass,
         lowRamDevice = activityManager.isLowRamDevice,
         systemLowMemory = memoryInfo.lowMemory,
@@ -140,7 +209,10 @@ private fun readDeviceProfile(activityManager: ActivityManager?): RamAcceleratio
 
 private fun Long.toWholeMiB(): Int = (this / RamAccelerationPolicy.MIB)
     .coerceAtMost(Int.MAX_VALUE.toLong())
+    .coerceAtLeast(0L)
     .toInt()
+
+private fun Long.saturatingIncrement(): Long = if (this == Long.MAX_VALUE) this else this + 1L
 
 object RamAccelerationRuntime {
     @Volatile
@@ -154,6 +226,10 @@ object RamAccelerationRuntime {
     }
 
     fun current(): RamAccelerationController? = controller
+
+    fun onForeground() {
+        controller?.onForeground()
+    }
 
     fun onTrimMemory(level: Int) {
         controller?.onTrimMemory(level)
