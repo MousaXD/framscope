@@ -42,7 +42,7 @@ class HistoryViewModel(
                 throw cancelled
             } catch (error: Exception) {
                 _state.value = HistoryUiState.Error(
-                    error.message ?: "FrameScope could not load recent videos.",
+                    error.message ?: "FrameScope could not load the media library.",
                 )
             }
         }
@@ -57,7 +57,7 @@ class HistoryViewModel(
                 throw cancelled
             } catch (error: Exception) {
                 _state.value = HistoryUiState.Error(
-                    error.message ?: "FrameScope could not remove this recent video.",
+                    error.message ?: "FrameScope could not forget this source record.",
                 )
             }
         }
@@ -67,12 +67,13 @@ class HistoryViewModel(
         viewModelScope.launch {
             try {
                 history.clear()
-                _state.value = HistoryUiState.Ready(emptyList())
+                // Clearing recent source metadata must not make persistent indexes disappear.
+                _state.value = HistoryUiState.Ready(history.entries(refreshAccess = true))
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 _state.value = HistoryUiState.Error(
-                    error.message ?: "FrameScope could not clear recent videos.",
+                    error.message ?: "FrameScope could not clear recent activity.",
                 )
             }
         }
