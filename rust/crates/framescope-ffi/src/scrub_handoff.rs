@@ -414,26 +414,53 @@ fn configure_ram_budgets(
         source_cache_bytes,
     );
 
-    let states = {
-        let registry = scrub_registry().lock().map_err(|_| {
-            PreviewFailure::new("bridge_error", "Live preview registry is poisoned.")
-        })?;
-        registry
-            .sessions
-            .values()
-            .map(|handle| handle.state.clone())
-            .collect::<Vec<_>>()
-    };
-    for state in states {
-        let mut state = state.lock().map_err(|_| {
-            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
-        })?;
+    let mut registry = scrub_registry()
+        .lock()
+        .map_err(|_| PreviewFailure::new("bridge_error", "Live preview registry is poisoned."))?;
+    for handle in registry.sessions.values() {
+        let mut state = lock_scrub_state(&handle.state);
         if state.cache_root == cache_root {
             state.source_cache.set_ram_budget_bytes(source_cache_bytes);
-            state.preview_cache.set_budget_bytes(preview_cache_bytes);
         }
     }
+    rebalance_preview_cache_budgets(&mut registry);
     Ok(())
+}
+
+/// Divides the configured preview allowance across every retained session so the total process
+/// working set cannot multiply with the number of sessions. Remainder bytes are assigned
+/// deterministically by session id. Removed states are separately trimmed to zero before their Arc
+/// can outlive the registry entry.
+fn rebalance_preview_cache_budgets(registry: &mut ScrubRegistry) {
+    if registry.sessions.is_empty() {
+        return;
+    }
+    let total_budget = preview_cache_budget_bytes();
+    let session_count = registry.sessions.len();
+    let base_share = total_budget / session_count;
+    let remainder = total_budget % session_count;
+    let mut session_ids = registry.sessions.keys().copied().collect::<Vec<_>>();
+    session_ids.sort_unstable();
+
+    for (position, session_id) in session_ids.into_iter().enumerate() {
+        let Some(handle) = registry.sessions.get(&session_id) else {
+            continue;
+        };
+        let share = base_share.saturating_add(usize::from(position < remainder));
+        lock_scrub_state(&handle.state)
+            .preview_cache
+            .set_budget_bytes(share);
+    }
+}
+
+fn lock_scrub_state(state: &Arc<Mutex<ScrubSessionState>>) -> std::sync::MutexGuard<'_, ScrubSessionState> {
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn trim_removed_preview_state(handle: ScrubSessionHandle) {
+    lock_scrub_state(&handle.state)
+        .preview_cache
+        .set_budget_bytes(0);
 }
 
 fn with_direct_buffer(
@@ -753,7 +780,9 @@ fn session_state(
         else {
             break;
         };
-        registry.sessions.remove(&oldest);
+        if let Some(removed) = registry.sessions.remove(&oldest) {
+            trim_removed_preview_state(removed);
+        }
     }
 
     let source_cache = FrameCacheHierarchy::open_resilient(
@@ -764,10 +793,8 @@ fn session_state(
     let state = Arc::new(Mutex::new(ScrubSessionState {
         cache_root: cache_root.to_path_buf(),
         source_cache,
-        preview_cache: ScrubPreviewCache::new(
-            preview_cache_budget_bytes(),
-            PREVIEW_CACHE_MAX_FRAMES,
-        ),
+        // Start at zero so adding a session can never transiently oversubscribe the process budget.
+        preview_cache: ScrubPreviewCache::new(0, PREVIEW_CACHE_MAX_FRAMES),
     }));
     registry.sessions.insert(
         session_id,
@@ -776,6 +803,7 @@ fn session_state(
             last_access: access,
         },
     );
+    rebalance_preview_cache_budgets(&mut registry);
     Ok(state)
 }
 
@@ -784,10 +812,15 @@ fn forget_session(session_id: i64) -> bool {
         return false;
     }
     let _ = cancel_session_preview(session_id);
-    scrub_registry()
-        .lock()
-        .map(|mut registry| registry.sessions.remove(&session_id).is_some())
-        .unwrap_or(false)
+    let Ok(mut registry) = scrub_registry().lock() else {
+        return false;
+    };
+    let Some(removed) = registry.sessions.remove(&session_id) else {
+        return false;
+    };
+    trim_removed_preview_state(removed);
+    rebalance_preview_cache_budgets(&mut registry);
+    true
 }
 
 fn from_microscope_failure(error: microscope::MicroscopeFailure) -> PreviewFailure {
@@ -951,6 +984,105 @@ mod tests {
         )
         .unwrap();
         forget_session(88_001);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_budget_is_process_wide_across_retained_sessions() {
+        let _test_guard = SCRUB_TEST_STATE_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "framescope-scrub-process-budget-test-{}",
+            std::process::id()
+        ));
+        {
+            let mut registry = scrub_registry().lock().unwrap();
+            for (_, removed) in registry.sessions.drain() {
+                trim_removed_preview_state(removed);
+            }
+            registry.clock = 0;
+        }
+        configure_ram_budgets(&root, 0, 32).unwrap();
+
+        let first = session_state(88_101, &root).unwrap();
+        let second = session_state(88_102, &root).unwrap();
+        let frame_a = OwnedRgbaFrame::new(2, 2, 8, vec![1; 16]).unwrap();
+        let frame_b = OwnedRgbaFrame::new(2, 2, 8, vec![2; 16]).unwrap();
+        first
+            .lock()
+            .unwrap()
+            .preview_cache
+            .insert(FrameId(1), 320, frame_a);
+        second
+            .lock()
+            .unwrap()
+            .preview_cache
+            .insert(FrameId(1), 320, frame_b);
+
+        let resident = first.lock().unwrap().preview_cache.stats().resident_bytes
+            + second.lock().unwrap().preview_cache.stats().resident_bytes;
+        assert_eq!(resident, 32);
+
+        assert!(forget_session(88_101));
+        assert_eq!(first.lock().unwrap().preview_cache.stats().resident_bytes, 0);
+        let frame_c = OwnedRgbaFrame::new(2, 2, 8, vec![3; 16]).unwrap();
+        second
+            .lock()
+            .unwrap()
+            .preview_cache
+            .insert(FrameId(2), 320, frame_c);
+        assert_eq!(second.lock().unwrap().preview_cache.stats().resident_bytes, 32);
+
+        assert!(forget_session(88_102));
+        configure_ram_budgets(
+            &root,
+            DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES,
+            DEFAULT_PREVIEW_CACHE_BUDGET_BYTES,
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lru_eviction_trims_preview_state_even_if_an_arc_outlives_registry_entry() {
+        let _test_guard = SCRUB_TEST_STATE_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "framescope-scrub-evicted-arc-test-{}",
+            std::process::id()
+        ));
+        {
+            let mut registry = scrub_registry().lock().unwrap();
+            for (_, removed) in registry.sessions.drain() {
+                trim_removed_preview_state(removed);
+            }
+            registry.clock = 0;
+        }
+        configure_ram_budgets(&root, 0, 64).unwrap();
+
+        let oldest = session_state(88_201, &root).unwrap();
+        oldest.lock().unwrap().preview_cache.insert(
+            FrameId(1),
+            320,
+            OwnedRgbaFrame::new(2, 2, 8, vec![4; 16]).unwrap(),
+        );
+        let _second = session_state(88_202, &root).unwrap();
+        let _third = session_state(88_203, &root).unwrap();
+
+        assert_eq!(oldest.lock().unwrap().preview_cache.stats().resident_bytes, 0);
+        oldest.lock().unwrap().preview_cache.insert(
+            FrameId(2),
+            320,
+            OwnedRgbaFrame::new(2, 2, 8, vec![5; 16]).unwrap(),
+        );
+        assert_eq!(oldest.lock().unwrap().preview_cache.stats().resident_bytes, 0);
+
+        forget_session(88_202);
+        forget_session(88_203);
+        configure_ram_budgets(
+            &root,
+            DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES,
+            DEFAULT_PREVIEW_CACHE_BUDGET_BYTES,
+        )
+        .unwrap();
         let _ = fs::remove_dir_all(root);
     }
 
