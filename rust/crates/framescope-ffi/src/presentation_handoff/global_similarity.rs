@@ -120,9 +120,7 @@ fn snapshot_session(session_id: i64) -> Result<SimilaritySessionSnapshot, Simila
     let nested = microscope::with_extraction_context(session_id, |fd, index| {
         let frame_count = index
             .frame_count()
-            .map_err(|error| {
-                SimilarityBridgeFailure::new("index_error", error.to_string())
-            })?
+            .map_err(|error| SimilarityBridgeFailure::new("index_error", error.to_string()))?
             .ok_or_else(|| {
                 SimilarityBridgeFailure::new(
                     "incomplete_index",
@@ -151,7 +149,9 @@ fn snapshot_session(session_id: i64) -> Result<SimilaritySessionSnapshot, Simila
 }
 
 #[cfg(not(unix))]
-fn snapshot_session(_session_id: i64) -> Result<SimilaritySessionSnapshot, SimilarityBridgeFailure> {
+fn snapshot_session(
+    _session_id: i64,
+) -> Result<SimilaritySessionSnapshot, SimilarityBridgeFailure> {
     Err(SimilarityBridgeFailure::new(
         "not_supported",
         "global similarity is available only on Android/Unix microscope sessions",
@@ -281,12 +281,7 @@ fn response_json(
     operation_id: i64,
     cache_root: &str,
 ) -> String {
-    let response = match query_similarity(
-        session_id,
-        target_frame_id,
-        operation_id,
-        cache_root,
-    ) {
+    let response = match query_similarity(session_id, target_frame_id, operation_id, cache_root) {
         Ok(result) => SimilarityResponse::Ok {
             engine: ENGINE_VERSION,
             result,
