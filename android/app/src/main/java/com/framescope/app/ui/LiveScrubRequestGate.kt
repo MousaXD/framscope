@@ -5,9 +5,9 @@ package com.framescope.app.ui
  *
  * Newer submissions replace the single pending slot and make older results ineligible for
  * publication. Releasing the scrub gesture or replacing the source invalidates the current epoch
- * and returns the active request, if any, so the native layer can cooperatively cancel the exact
- * obsolete request. Publication fencing remains independent from native cancellation: a late native
- * result is never allowed to become visible even if cancellation is delayed or unsupported.
+ * and returns the active request, if any, so callers can identify disposable work. Publication
+ * fencing remains independent from native cancellation: a late native result is never allowed to
+ * become visible even if cancellation is delayed or unsupported.
  */
 internal class LiveScrubRequestGate {
     private var nextRequestId = 1L
@@ -58,11 +58,11 @@ internal class LiveScrubRequestGate {
     }
 
     /**
-     * Invalidates queued/current publication and identifies native work that should be preempted.
+     * Invalidates queued/current publication and identifies work that was in flight at invalidation.
      *
-     * The returned request is the only request that can currently be executing in native code. Its
-     * monotonically increasing request id is also used by native cancellation to close the race
-     * where invalidation happens just before that request registers its cancellation token.
+     * Native exact navigation independently installs an admission barrier before authoritative work.
+     * That barrier and the native preview registry share one mutex, so exact-navigation priority does
+     * not depend on this Kotlin-side invalidation racing successfully with preview registration.
      */
     @Synchronized
     fun invalidate(): LiveScrubCancellation? {
