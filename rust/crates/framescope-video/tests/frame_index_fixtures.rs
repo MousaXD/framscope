@@ -3,7 +3,9 @@
 use framescope_cache::{
     FrameId, FrameIndex, FrameIndexLifecycle, FrameIndexStreamIdentity, SourceIdentity,
 };
-use framescope_video::{IndexingOptions, VideoDecoder, build_or_resume_frame_index};
+use framescope_video::{
+    IndexingOptions, IndexingReport, VideoDecoder, build_or_resume_frame_index,
+};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,7 +62,7 @@ fn decoder_timestamps(path: &Path) -> Vec<Option<i64>> {
     timestamps
 }
 
-fn build_fixture_index(name: &str, batch_size: usize) -> (PathBuf, FrameIndex) {
+fn build_fixture_index(name: &str, batch_size: usize) -> (PathBuf, FrameIndex, IndexingReport) {
     let path = fixture(name);
     let decoder = VideoDecoder::open_path(&path).unwrap();
     let stream = FrameIndexStreamIdentity::from_stream(decoder.selected_stream()).unwrap();
@@ -77,15 +79,24 @@ fn build_fixture_index(name: &str, batch_size: usize) -> (PathBuf, FrameIndex) {
     .unwrap();
     assert_eq!(report.status.lifecycle, FrameIndexLifecycle::Complete);
     assert!(report.max_pending_entries <= batch_size);
-    (db, index)
+    (db, index, report)
 }
 
 #[test]
 fn cfr_index_matches_independent_decoder_pts() {
     let path = fixture("h264-cfr.mp4");
     let truth = decoder_timestamps(&path);
-    let (db, index) = build_fixture_index("h264-cfr.mp4", 3);
+    let (db, index, report) = build_fixture_index("h264-cfr.mp4", 3);
     assert_eq!(index.frame_count().unwrap(), Some(12));
+    assert_eq!(report.frames_decoded, 12);
+    assert_eq!(report.sqlite_rows_inserted, 12);
+    assert_eq!(report.batch_commits, 4);
+    assert_eq!(report.decoder_open_count, 1);
+    assert!(!report.pipeline_enabled);
+    assert_eq!(report.pipeline_queue_idle_elapsed_us, 0);
+    assert!(report.sqlite_commit_elapsed_us <= report.sqlite_batch_elapsed_us);
+    assert!(report.sqlite_transaction_begin_elapsed_us <= report.sqlite_batch_elapsed_us);
+    assert!(report.miscellaneous_elapsed_us <= report.total_elapsed_us);
 
     let mut persisted = Vec::new();
     index
@@ -107,8 +118,11 @@ fn cfr_index_matches_independent_decoder_pts() {
 fn vfr_index_preserves_actual_non_uniform_decoded_pts() {
     let path = fixture("h264-vfr.mp4");
     let truth = decoder_timestamps(&path);
-    let (db, index) = build_fixture_index("h264-vfr.mp4", 2);
+    let (db, index, report) = build_fixture_index("h264-vfr.mp4", 2);
     assert_eq!(index.frame_count().unwrap(), Some(8));
+    assert_eq!(report.frames_decoded, 8);
+    assert_eq!(report.sqlite_rows_inserted, 8);
+    assert_eq!(report.batch_commits, 4);
 
     let mut persisted = Vec::new();
     index
@@ -144,8 +158,10 @@ fn index_handles_phase2_edge_fixtures_without_pixel_storage() {
         ("h264-with-audio.mp4", 6),
         ("multi-stream.mkv", 4),
     ] {
-        let (db, index) = build_fixture_index(name, 2);
+        let (db, index, report) = build_fixture_index(name, 2);
         assert_eq!(index.frame_count().unwrap(), Some(expected), "{name}");
+        assert_eq!(report.frames_decoded, expected, "{name}");
+        assert_eq!(report.sqlite_rows_inserted, expected, "{name}");
         drop(index);
         cleanup(&db);
     }

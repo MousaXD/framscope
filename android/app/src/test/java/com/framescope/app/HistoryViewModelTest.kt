@@ -4,6 +4,7 @@ import com.framescope.app.data.InspectedVideo
 import com.framescope.app.data.RecentVideoAvailability
 import com.framescope.app.data.RecentVideoHistory
 import com.framescope.app.data.RecentVideoRecord
+import com.framescope.app.data.SessionIndexBinding
 import com.framescope.app.data.VideoMetadata
 import com.framescope.app.data.VideoUriPermissionStatus
 import com.framescope.app.ui.HistoryUiState
@@ -61,15 +62,19 @@ class HistoryViewModelTest {
     }
 
     @Test
-    fun clearPublishesEmptyHistory() = runTest(dispatcher) {
-        val history = FakeHistory(mutableListOf(record("one")))
+    fun clearReloadsRepositoryInsteadOfAssumingLibraryIsEmpty() = runTest(dispatcher) {
+        val indexOnly = record("index").copy(contentUri = null)
+        val history = FakeHistory(
+            records = mutableListOf(record("one")),
+            entriesAfterClear = listOf(indexOnly),
+        )
         val viewModel = HistoryViewModel(history)
         dispatcher.scheduler.advanceUntilIdle()
 
         viewModel.clear()
         dispatcher.scheduler.advanceUntilIdle()
 
-        assertEquals(HistoryUiState.Ready(emptyList()), viewModel.state.value)
+        assertEquals(HistoryUiState.Ready(listOf(indexOnly)), viewModel.state.value)
     }
 
     @Test
@@ -108,13 +113,15 @@ class HistoryViewModelTest {
     private class FakeHistory(
         val records: MutableList<RecentVideoRecord>,
         private val loadFailure: Throwable? = null,
+        private val entriesAfterClear: List<RecentVideoRecord> = emptyList(),
     ) : RecentVideoHistory {
         var refreshAccessRequested = false
+        private var cleared = false
 
         override suspend fun entries(refreshAccess: Boolean): List<RecentVideoRecord> {
             refreshAccessRequested = refreshAccess
             loadFailure?.let { throw it }
-            return records.toList()
+            return if (cleared) entriesAfterClear else records.toList()
         }
 
         override suspend fun findById(id: String): RecentVideoRecord? =
@@ -135,12 +142,15 @@ class HistoryViewModelTest {
 
         override suspend fun updatePosition(contentUri: String, frameId: Long?, timestampUs: Long?) = Unit
 
+        override suspend fun updateIndexBinding(contentUri: String, binding: SessionIndexBinding) = Unit
+
         override suspend fun remove(recordId: String) {
             records.removeAll { it.id == recordId }
         }
 
         override suspend fun clear() {
             records.clear()
+            cleared = true
         }
     }
 }

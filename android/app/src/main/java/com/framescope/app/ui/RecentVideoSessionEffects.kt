@@ -7,9 +7,13 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.framescope.app.data.InspectedVideo
+import com.framescope.app.data.NoOpPersistentFrameIndexCatalog
+import com.framescope.app.data.PersistentFrameIndexCatalog
 import com.framescope.app.data.RecentVideoHistory
 import com.framescope.app.data.RecentVideoRecord
 import com.framescope.app.data.VideoUriPermissionStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class RecentVideoSourceSignature(
     val displayName: String,
@@ -26,15 +30,16 @@ data class RecentVideoOpenTarget(
     val resumeSourceSignature: RecentVideoSourceSignature? = null,
 )
 
-fun RecentVideoRecord.toOpenTarget(): RecentVideoOpenTarget? =
-    takeIf(RecentVideoRecord::canOpen)?.let { record ->
-        RecentVideoOpenTarget(
-            contentUri = record.contentUri,
-            permissionStatus = record.permissionStatus,
-            resumeTimestampUs = record.lastViewedTimestampUs,
-            resumeSourceSignature = record.resumeSourceSignature(),
-        )
-    }
+fun RecentVideoRecord.toOpenTarget(): RecentVideoOpenTarget? {
+    val uri = contentUri ?: return null
+    if (!canOpen()) return null
+    return RecentVideoOpenTarget(
+        contentUri = uri,
+        permissionStatus = permissionStatus,
+        resumeTimestampUs = lastViewedTimestampUs,
+        resumeSourceSignature = resumeSourceSignature(),
+    )
+}
 
 fun RecentVideoRecord.toReselectTarget(
     newContentUri: String,
@@ -44,7 +49,9 @@ fun RecentVideoRecord.toReselectTarget(
     permissionStatus = permissionStatus,
     resumeTimestampUs = lastViewedTimestampUs,
     replacesRecordId = id,
-    resumeSourceSignature = resumeSourceSignature(),
+    resumeSourceSignature = resumeSourceSignature().takeUnless {
+        contentUri == null && width == 0 && height == 0 && durationUs == null
+    },
 )
 
 internal fun RecentVideoOpenTarget.canResume(inspectedVideo: InspectedVideo?): Boolean {
@@ -70,16 +77,21 @@ fun RecentVideoSessionEffects(
     videoState: VideoInspectionState,
     microscopeState: MicroscopeUiState,
     history: RecentVideoHistory,
+    indexCatalog: PersistentFrameIndexCatalog = NoOpPersistentFrameIndexCatalog,
     onResumeTimestampUs: (Long) -> Unit,
+    onLibraryChanged: () -> Unit = {},
 ) {
     var resumedSessionId by remember(target?.contentUri, target?.resumeTimestampUs) {
+        mutableLongStateOf(NO_SESSION)
+    }
+    var boundSessionId by remember(target?.contentUri) {
         mutableLongStateOf(NO_SESSION)
     }
 
     LaunchedEffect(videoState, target) {
         val source = target ?: return@LaunchedEffect
         val ready = videoState as? VideoInspectionState.Ready ?: return@LaunchedEffect
-        runCatching {
+        val persisted = runCatching {
             if (source.replacesRecordId == null) {
                 history.recordOpened(
                     contentUri = source.contentUri,
@@ -94,16 +106,32 @@ fun RecentVideoSessionEffects(
                     permissionStatus = source.permissionStatus,
                 )
             }
-        }
+        }.isSuccess
+        if (persisted) onLibraryChanged()
     }
 
     LaunchedEffect(microscopeState, videoState, target) {
         val source = target ?: return@LaunchedEffect
         val ready = microscopeState as? MicroscopeUiState.Ready ?: return@LaunchedEffect
-        val frame = ready.session.currentFrame ?: return@LaunchedEffect
-        val resumeTimestampUs = source.resumeTimestampUs
         val inspectedVideo = (videoState as? VideoInspectionState.Ready)?.video
 
+        if (boundSessionId != ready.session.sessionId && inspectedVideo != null) {
+            val binding = runCatching {
+                withContext(Dispatchers.IO) {
+                    indexCatalog.bindingForSession(ready.session.sessionId)
+                }
+            }.getOrNull()
+            if (binding != null) {
+                val bound = runCatching {
+                    history.updateIndexBinding(source.contentUri, binding)
+                }.isSuccess
+                if (bound) onLibraryChanged()
+            }
+            boundSessionId = ready.session.sessionId
+        }
+
+        val frame = ready.session.currentFrame ?: return@LaunchedEffect
+        val resumeTimestampUs = source.resumeTimestampUs
         if (
             resumeTimestampUs != null &&
             source.canResume(inspectedVideo) &&
@@ -129,6 +157,7 @@ fun RecentVideoSessionEffects(
     LaunchedEffect(microscopeState, target?.contentUri) {
         if (microscopeState is MicroscopeUiState.Idle || microscopeState is MicroscopeUiState.Error) {
             resumedSessionId = NO_SESSION
+            boundSessionId = NO_SESSION
         }
     }
 }
