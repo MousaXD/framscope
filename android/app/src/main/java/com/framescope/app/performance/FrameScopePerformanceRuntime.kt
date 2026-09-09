@@ -197,7 +197,8 @@ private class ActiveIndexingSession(
     private fun reportAdpfCycle(actualDurationNanos: Long, sampleElapsedMs: Long) {
         if (mode != FrameScopePerformanceMode.SustainedThroughput) return
         if (currentThermalStatus >= THERMAL_STATUS_SEVERE) return
-        if (context == null || ownerTid <= 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val indexingContext = context ?: return
+        if (ownerTid <= 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
 
         synchronized(hintLock) {
             if (closed.get() || currentThermalStatus >= THERMAL_STATUS_SEVERE) return
@@ -205,7 +206,7 @@ private class ActiveIndexingSession(
                 val target = calibratedTargetDurationNanos(actualDurationNanos)
                 hintController = runCatching {
                     Api31AdpfController(
-                        context = context,
+                        context = indexingContext,
                         ownerTid = ownerTid,
                         targetDurationNanos = target,
                         initialThermalStatus = currentThermalStatus,
@@ -320,8 +321,9 @@ private class ActiveIndexingSession(
         if (!closed.compareAndSet(false, true)) return
         synchronized(hintLock) { closeHintControllerLocked() }
         unregister(operationId, this)
-        if (priorityApplied && originalPriority != null && ownerTid > 0) {
-            runCatching { Process.setThreadPriority(ownerTid, originalPriority) }
+        val priorityToRestore = originalPriority
+        if (priorityApplied && priorityToRestore != null && ownerTid > 0) {
+            runCatching { Process.setThreadPriority(ownerTid, priorityToRestore) }
         }
         if (traceStarted) runCatching { Trace.endSection() }
     }
