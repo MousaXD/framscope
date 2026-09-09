@@ -1,6 +1,7 @@
 package com.framescope.app.ui
 
 import android.graphics.Bitmap
+import android.os.Trace
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +31,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -38,6 +40,7 @@ import com.framescope.app.data.FrameDetails
 import com.framescope.app.data.MicroscopeFrame
 import com.framescope.app.data.MicroscopeScrubPreview
 import com.framescope.app.data.MicroscopeSessionSnapshot
+import com.framescope.app.data.PixelTransportTelemetry
 import java.nio.ByteBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -45,12 +48,15 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
+private const val TRACE_AUTHORITATIVE_BITMAP = "FrameScope.pixels.frame_bitmap"
+
 private sealed interface MicroscopePreviewState {
     data object Loading : MicroscopePreviewState
 
     data class Ready(
         val bitmap: Bitmap,
         val plan: MicroscopePreviewPlan,
+        val sessionId: Long,
         val frameId: Long,
         val liveScrub: Boolean,
     ) : MicroscopePreviewState
@@ -166,15 +172,10 @@ private fun MicroscopeFrameCard(
         initialValue = null,
         key1 = scrubPreview,
     ) {
-        value = scrubPreview?.let { preview ->
-            withContext(Dispatchers.Default) {
-                preview.toBoundedPreview()
-            }
-        }
+        value = scrubPreview?.toBoundedPreview()
     }
 
     RecyclePreviewBitmap(authoritativePreview)
-    livePreview?.let { RecyclePreviewBitmap(it) }
     val displayedPreview = livePreview ?: authoritativePreview
 
     Card(
@@ -224,7 +225,23 @@ private fun MicroscopeFrameCard(
                                     direction > 0 && session.canStepNext -> onStep(1)
                                 }
                             },
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .drawWithContent {
+                                    drawContent()
+                                    val drawnAtNanos = System.nanoTime()
+                                    if (current.liveScrub) {
+                                        ScrubUxTelemetry.recordPreviewPresented(
+                                            sessionId = current.sessionId,
+                                            presentedAtNanos = drawnAtNanos,
+                                        )
+                                    } else if (controlsEnabled) {
+                                        ScrubUxTelemetry.completeExactSettle(
+                                            sessionId = current.sessionId,
+                                            completedAtNanos = drawnAtNanos,
+                                        )
+                                    }
+                                },
                         )
                     }
                 }
@@ -297,6 +314,7 @@ private fun MicroscopeFrameCard(
 @Composable
 private fun RecyclePreviewBitmap(state: MicroscopePreviewState) {
     val ready = state as? MicroscopePreviewState.Ready ?: return
+    if (ready.liveScrub) return
     DisposableEffect(ready.bitmap) {
         onDispose {
             if (!ready.bitmap.isRecycled) {
@@ -413,25 +431,34 @@ private suspend fun MicroscopeFrame.toBoundedPreview(): MicroscopePreviewState {
         height = metadata.height,
         strideBytes = metadata.strideBytes,
         rgba = rgba,
+        sessionId = metadata.sessionId,
         frameId = metadata.frameId,
         liveScrub = false,
         errorMessage = "The authoritative frame could not be converted for display.",
     )
 }
 
-private suspend fun MicroscopeScrubPreview.toBoundedPreview(): MicroscopePreviewState {
+private fun MicroscopeScrubPreview.toBoundedPreview(): MicroscopePreviewState {
     val metadata = descriptor
     if (!metadata.isSane(DEFAULT_SCRUB_PREVIEW_MAX_EDGE)) {
         return MicroscopePreviewState.Error("Live preview metadata is outside display safety bounds.")
     }
-    return rgbaToBoundedPreview(
-        width = metadata.width,
-        height = metadata.height,
-        strideBytes = metadata.strideBytes,
-        rgba = rgba,
+    val displayBitmap = bitmap
+        ?: return MicroscopePreviewState.Error("The live preview transport did not provide a display bitmap.")
+    if (displayBitmap.isRecycled || displayBitmap.width != metadata.width || displayBitmap.height != metadata.height) {
+        return MicroscopePreviewState.Error("The live preview bitmap no longer matches its frame descriptor.")
+    }
+    val plan = MicroscopePreviewMath.plan(metadata.width, metadata.height)
+        ?: return MicroscopePreviewState.Error("Could not plan the bounded live preview.")
+    if (plan.isDownscaled) {
+        return MicroscopePreviewState.Error("The native live preview exceeded the Android display preview budget.")
+    }
+    return MicroscopePreviewState.Ready(
+        bitmap = displayBitmap,
+        plan = plan,
+        sessionId = metadata.sessionId,
         frameId = metadata.frameId,
         liveScrub = true,
-        errorMessage = "The live timeline preview could not be converted for display.",
     )
 }
 
@@ -440,6 +467,7 @@ private suspend fun rgbaToBoundedPreview(
     height: Int,
     strideBytes: Long,
     rgba: ByteBuffer,
+    sessionId: Long,
     frameId: Long,
     liveScrub: Boolean,
     errorMessage: String,
@@ -448,6 +476,11 @@ private suspend fun rgbaToBoundedPreview(
         ?: return MicroscopePreviewState.Error("Could not plan a bounded frame preview.")
 
     var bitmap: Bitmap? = null
+    val conversionStarted = System.nanoTime()
+    val traceStarted = runCatching {
+        Trace.beginSection(TRACE_AUTHORITATIVE_BITMAP)
+        true
+    }.getOrDefault(false)
     try {
         bitmap = Bitmap.createBitmap(plan.targetWidth, plan.targetHeight, Bitmap.Config.ARGB_8888)
         val source = rgba.duplicate()
@@ -481,9 +514,19 @@ private suspend fun rgbaToBoundedPreview(
                 bitmap.setPixels(row, 0, plan.targetWidth, 0, outputY, plan.targetWidth, 1)
             }
         }
+        val copiedBytes = Math.multiplyExact(
+            Math.multiplyExact(plan.targetWidth.toLong(), plan.targetHeight.toLong()),
+            4L,
+        )
+        PixelTransportTelemetry.recordAuthoritativeBitmap(
+            allocationBytes = bitmap.allocationByteCount.toLong(),
+            copiedBytes = copiedBytes,
+            conversionUs = elapsedUs(conversionStarted),
+        )
         return MicroscopePreviewState.Ready(
             bitmap = bitmap,
             plan = plan,
+            sessionId = sessionId,
             frameId = frameId,
             liveScrub = liveScrub,
         )
@@ -498,8 +541,13 @@ private suspend fun rgbaToBoundedPreview(
     } catch (_: RuntimeException) {
         bitmap?.recycle()
         return MicroscopePreviewState.Error(errorMessage)
+    } finally {
+        if (traceStarted) runCatching { Trace.endSection() }
     }
 }
+
+private fun elapsedUs(startedNanos: Long): Long =
+    ((System.nanoTime() - startedNanos).coerceAtLeast(0L)) / 1_000L
 
 @Composable
 private fun MicroscopeBusyCard(message: String) {

@@ -13,7 +13,9 @@ import com.framescope.app.data.ScrubPerformanceTelemetry
  * late native result is never allowed to become visible even if cancellation is delayed or
  * unsupported.
  */
-internal class LiveScrubRequestGate {
+internal class LiveScrubRequestGate(
+    private val nanoTime: () -> Long = { System.nanoTime() },
+) {
     private var nextRequestId = 1L
     private var epoch = 1L
     private var latestRequestId = 0L
@@ -48,6 +50,7 @@ internal class LiveScrubRequestGate {
             epoch = epoch,
             sessionId = sessionId,
             target = target,
+            submittedAtNanos = nanoTime().coerceAtLeast(0L),
         )
         nextRequestId = increment(nextRequestId, "live scrub request id")
         latestRequestId = request.requestId
@@ -80,6 +83,12 @@ internal class LiveScrubRequestGate {
         val request = pending ?: return null
         pending = null
         inFlight = request
+        ScrubUxTelemetry.recordRequestStarted(
+            requestId = request.requestId,
+            sessionId = request.sessionId,
+            submittedAtNanos = request.submittedAtNanos,
+            startedAtNanos = nanoTime().coerceAtLeast(0L),
+        )
         return request
     }
 
@@ -88,13 +97,28 @@ internal class LiveScrubRequestGate {
      */
     @Synchronized
     fun finish(request: LiveScrubRequest): Boolean {
+        val finishedAtNanos = nanoTime().coerceAtLeast(0L)
         if (inFlight?.requestId != request.requestId) {
             ScrubPerformanceTelemetry.recordGateCompletion(publishable = false)
+            ScrubUxTelemetry.recordRequestFinished(
+                requestId = request.requestId,
+                sessionId = request.sessionId,
+                submittedAtNanos = request.submittedAtNanos,
+                finishedAtNanos = finishedAtNanos,
+                publishable = false,
+            )
             return false
         }
         inFlight = null
         val publishable = request.epoch == epoch && request.requestId == latestRequestId
         ScrubPerformanceTelemetry.recordGateCompletion(publishable)
+        ScrubUxTelemetry.recordRequestFinished(
+            requestId = request.requestId,
+            sessionId = request.sessionId,
+            submittedAtNanos = request.submittedAtNanos,
+            finishedAtNanos = finishedAtNanos,
+            publishable = publishable,
+        )
         return publishable
     }
 
@@ -149,6 +173,7 @@ internal data class LiveScrubRequest(
     val epoch: Long,
     val sessionId: Long,
     val target: LiveScrubTarget,
+    val submittedAtNanos: Long,
 )
 
 internal data class LiveScrubCancellation(

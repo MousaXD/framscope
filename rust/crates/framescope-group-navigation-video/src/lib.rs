@@ -5,8 +5,14 @@
 //! presentation timestamps remain authoritative, the selected stream must match the indexed stream,
 //! and pixels are owned RGBA snapshots rather than lossy preview proxies.
 
-use framescope_cache::{FrameId, FrameIndex, FrameIndexStreamIdentity, OwnedRgbaFrame};
+use framescope_cache::{
+    FrameId, FrameIndex, FrameIndexEntry, FrameIndexStreamIdentity, OwnedRgbaFrame, SourceIdentity,
+};
 use framescope_core::{DecodedFrame, FrameScopeError};
+use framescope_group_navigation::timeline_global::{
+    TimelineGlobalSimilarityError, TimelineGlobalSimilarityResult,
+    open_or_build_and_query_with_timeline,
+};
 use framescope_group_navigation::{
     GroupNavigationError, IndexedRgbaFrame, IndexedRgbaStream, SimilarityGroupAnalysis,
     SimilaritySourceError, open_or_build_group_navigation,
@@ -94,6 +100,51 @@ pub fn open_or_build_group_navigation_from_fd(
         }
         other => other,
     }
+}
+
+/// Reuse or build the non-contiguous global-similarity index without holding a live microscope
+/// session lock while FFmpeg decodes or SQLite confirms candidates.
+///
+/// The caller supplies immutable authoritative entries one at a time. A valid global store never
+/// opens the source decoder and never consults `entry_for_frame`; rebuilding validates every fresh
+/// source-quality RGBA frame against the exact indexed timing metadata before persistence.
+#[cfg(unix)]
+pub fn open_or_build_global_similarity_from_fd_with_timeline<E>(
+    source_identity: &SourceIdentity,
+    stream_identity: &FrameIndexStreamIdentity,
+    frame_count: u64,
+    entry_for_frame: E,
+    store_root: impl AsRef<Path>,
+    target_frame: FrameId,
+    fd: BorrowedFd<'_>,
+    cancellation: CancellationToken,
+) -> Result<TimelineGlobalSimilarityResult, TimelineGlobalSimilarityError>
+where
+    E: FnMut(FrameId) -> Result<Option<FrameIndexEntry>, TimelineGlobalSimilarityError>,
+{
+    let expected_stream = stream_identity.clone();
+    open_or_build_and_query_with_timeline(
+        source_identity,
+        stream_identity,
+        frame_count,
+        entry_for_frame,
+        store_root,
+        target_frame,
+        Default::default(),
+        || {
+            let decoder = VideoDecoder::open_file_descriptor_with_options(
+                fd,
+                OpenOptions {
+                    stream_selection: VideoStreamSelection::Index(expected_stream.stream_index),
+                },
+                cancellation.clone(),
+            )
+            .map_err(source_from_frame_scope)?;
+            validate_stream_identity(&expected_stream, &decoder)?;
+            Ok(DecoderIndexedRgbaStream::new(decoder))
+        },
+        || cancellation.is_cancelled(),
+    )
 }
 
 fn validate_stream_identity(

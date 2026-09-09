@@ -1,5 +1,6 @@
 package com.framescope.app.data
 
+import com.framescope.app.performance.FrameScopePerformanceRuntime
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -36,7 +37,12 @@ class MicroscopeSessionController(
         storageGate.beginSessionTransition()
         try {
             val requestRevision = nextRevision() ?: return revisionExhaustedFailure(currentEngine())
-            val result = nativeBridge.openMicroscopeSession(fd, operationId, cacheRoot)
+            val performanceScope = FrameScopePerformanceRuntime.beginIndexing(operationId)
+            val result = try {
+                nativeBridge.openMicroscopeSession(fd, operationId, cacheRoot)
+            } finally {
+                performanceScope.close()
+            }
             val success = when (result) {
                 is NativeMicroscope.Failure -> {
                     return if (revision.get() == requestRevision) {

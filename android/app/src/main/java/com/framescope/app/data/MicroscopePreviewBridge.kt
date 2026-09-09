@@ -1,5 +1,7 @@
 package com.framescope.app.data
 
+import android.graphics.Bitmap
+import android.os.Trace
 import java.nio.ByteBuffer
 import org.json.JSONObject
 
@@ -7,6 +9,8 @@ const val DEFAULT_SCRUB_PREVIEW_MAX_EDGE = 640
 private const val MIN_SCRUB_PREVIEW_MAX_EDGE = 64
 private const val MAX_SCRUB_PREVIEW_MAX_EDGE = 1_024
 private const val RGBA_BYTES_PER_PIXEL = 4L
+private const val TRACE_PREVIEW_JNI = "FrameScope.pixels.preview_jni"
+private const val TRACE_PREVIEW_BITMAP = "FrameScope.pixels.preview_bitmap"
 
 data class MicroscopePreviewDescriptor(
     val sessionId: Long,
@@ -37,11 +41,33 @@ data class MicroscopePreviewDescriptor(
     }
 }
 
-/** One non-authoritative, bounded RGBA image used only while the timeline is being scrubbed. */
-class MicroscopeScrubPreview(
+/**
+ * One non-authoritative, bounded image used only while the timeline is being scrubbed.
+ *
+ * Production previews are materialized into a Bitmap before the JNI scratch-buffer lease is
+ * released. The RGBA constructor is retained only for deterministic JVM fixtures and parser tests.
+ */
+class MicroscopeScrubPreview private constructor(
     val descriptor: MicroscopePreviewDescriptor,
-    val rgba: ByteBuffer,
-)
+    internal val rgba: ByteBuffer?,
+    internal val bitmap: Bitmap?,
+) {
+    constructor(
+        descriptor: MicroscopePreviewDescriptor,
+        rgba: ByteBuffer,
+    ) : this(descriptor = descriptor, rgba = rgba, bitmap = null)
+
+    companion object {
+        internal fun fromBitmap(
+            descriptor: MicroscopePreviewDescriptor,
+            bitmap: Bitmap,
+        ): MicroscopeScrubPreview = MicroscopeScrubPreview(
+            descriptor = descriptor,
+            rgba = null,
+            bitmap = bitmap,
+        )
+    }
+}
 
 sealed interface NativeMicroscopePreview {
     data class Success(
@@ -88,6 +114,7 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
     private val loadFailure: Throwable? = runCatching {
         System.loadLibrary("framescope_ffi")
     }.exceptionOrNull()
+    private val directBufferPool = PreviewDirectBufferPool(maxRetainedBuffers = 2)
 
     @JvmStatic
     private external fun nativeRenderMicroscopePreviewTimestampUs(
@@ -217,8 +244,8 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
                 engine = null,
             )
         }
-        val destination = try {
-            ByteBuffer.allocateDirect(capacity)
+        val lease = try {
+            directBufferPool.borrow(capacity)
         } catch (_: OutOfMemoryError) {
             return NativeMicroscopePreview.Failure(
                 code = "buffer_allocation_failed",
@@ -227,18 +254,95 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
             )
         }
 
-        val raw = runCatching { nativeCall(destination) }.getOrElse {
-            return NativeMicroscopePreview.Failure(
-                code = "jni_error",
-                message = "Rust live preview failed: ${it.message ?: it::class.java.simpleName}",
-                engine = null,
+        lease.use {
+            val destination = lease.buffer
+            val jniStarted = System.nanoTime()
+            val traceStarted = runCatching {
+                Trace.beginSection(TRACE_PREVIEW_JNI)
+                true
+            }.getOrDefault(false)
+            val raw = try {
+                runCatching { nativeCall(destination) }.getOrElse {
+                    return NativeMicroscopePreview.Failure(
+                        code = "jni_error",
+                        message = "Rust live preview failed: ${it.message ?: it::class.java.simpleName}",
+                        engine = null,
+                    )
+                } ?: return NativeMicroscopePreview.Failure(
+                    code = "jni_error",
+                    message = "Rust engine returned a null live preview response.",
+                    engine = null,
+                )
+            } finally {
+                if (traceStarted) runCatching { Trace.endSection() }
+            }
+            val jniUs = elapsedUs(jniStarted)
+            val parsed = parseResponse(raw, destination, sessionId, maxEdge)
+            if (parsed !is NativeMicroscopePreview.Success) return parsed
+            return materializeBitmapPreview(
+                parsed = parsed,
+                directBufferAllocated = lease.allocated,
+                directBufferCapacity = destination.capacity(),
+                jniUs = jniUs,
             )
-        } ?: return NativeMicroscopePreview.Failure(
-            code = "jni_error",
-            message = "Rust engine returned a null live preview response.",
-            engine = null,
+        }
+    }
+
+    private fun materializeBitmapPreview(
+        parsed: NativeMicroscopePreview.Success,
+        directBufferAllocated: Boolean,
+        directBufferCapacity: Int,
+        jniUs: Long,
+    ): NativeMicroscopePreview {
+        val descriptor = parsed.preview.descriptor
+        val rgba = parsed.preview.rgba ?: return NativeMicroscopePreview.Failure(
+            code = "bridge_error",
+            message = "Parsed live preview did not retain its synchronous RGBA transport buffer.",
+            engine = parsed.engine,
         )
-        return parseResponse(raw, destination, sessionId, maxEdge)
+        var bitmap: Bitmap? = null
+        val bitmapStarted = System.nanoTime()
+        val traceStarted = runCatching {
+            Trace.beginSection(TRACE_PREVIEW_BITMAP)
+            true
+        }.getOrDefault(false)
+        return try {
+            bitmap = Bitmap.createBitmap(descriptor.width, descriptor.height, Bitmap.Config.ARGB_8888)
+            val source = rgba.duplicate().apply {
+                position(0)
+                limit(descriptor.byteLen)
+            }
+            bitmap.copyPixelsFromBuffer(source)
+            val bitmapUs = elapsedUs(bitmapStarted)
+            PixelTransportTelemetry.recordPreview(
+                descriptor = descriptor,
+                directBufferAllocated = directBufferAllocated,
+                directBufferCapacity = directBufferCapacity,
+                jniUs = jniUs,
+                bitmapAllocationBytes = bitmap.allocationByteCount.toLong(),
+                bitmapConversionUs = bitmapUs,
+            )
+            NativeMicroscopePreview.Success(
+                preview = MicroscopeScrubPreview.fromBitmap(descriptor, bitmap),
+                engine = parsed.engine,
+            )
+        } catch (_: OutOfMemoryError) {
+            bitmap?.recycle()
+            NativeMicroscopePreview.Failure(
+                code = "bitmap_allocation_failed",
+                message = "Android could not allocate the bounded live preview bitmap.",
+                engine = parsed.engine,
+            )
+        } catch (error: RuntimeException) {
+            bitmap?.recycle()
+            NativeMicroscopePreview.Failure(
+                code = "bitmap_copy_failed",
+                message = "Android could not materialize the live preview bitmap: ${error.message ?: error::class.java.simpleName}",
+                engine = parsed.engine,
+            )
+        } finally {
+            if (traceStarted) runCatching { Trace.endSection() }
+        }
     }
 
     internal fun parseResponse(
@@ -323,6 +427,9 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
             engine = null,
         )
     }
+
+    private fun elapsedUs(startedNanos: Long): Long =
+        ((System.nanoTime() - startedNanos).coerceAtLeast(0L)) / 1_000L
 
     private fun JSONObject.optionalString(key: String): String? =
         if (!has(key) || isNull(key)) null else getString(key).trim().takeIf(String::isNotEmpty)

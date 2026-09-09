@@ -1,0 +1,57 @@
+name: Android hardware decode prototype
+
+on:
+  pull_request:
+    paths:
+      - 'android/app/src/main/java/com/framescope/app/performance/**'
+      - 'android/app/src/test/java/com/framescope/app/performance/**'
+      - 'android/app/src/androidTest/java/com/framescope/app/performance/**'
+      - 'scripts/build-ffmpeg-android-hwdecode-probe.sh'
+      - 'scripts/build-android-hwdecode-bench.sh'
+      - 'tools/android-hwdecode/**'
+      - '.github/workflows/android-hwdecode-prototype.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-hwdecode-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_NDK_VERSION: '27.3.13750724'
+  FRAMESCOPE_FFMPEG_JOBS: '2'
+
+jobs:
+  native-prototype-build:
+    name: native-prototype-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: ''
+
+      - name: Install Android NDK
+        run: |
+          sdkmanager "ndk;$ANDROID_NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Validate shell entry points
+        run: |
+          bash -n ./scripts/build-ffmpeg-android-hwdecode-probe.sh
+          bash -n ./scripts/build-android-hwdecode-bench.sh
+
+      - name: Build isolated FFmpeg MediaCodec probe and benchmark executable
+        run: bash ./scripts/build-android-hwdecode-bench.sh
+
+      - name: Verify benchmark binary
+        run: |
+          test -x ./.native/hwdecode-bench/arm64-v8a/framescope-decode-bench
+          file ./.native/hwdecode-bench/arm64-v8a/framescope-decode-bench

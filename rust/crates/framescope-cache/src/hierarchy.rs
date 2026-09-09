@@ -164,6 +164,19 @@ impl FrameCacheHierarchy {
         }
     }
 
+    /// Returns live source-quality RAM statistics for a shared namespace without opening a disk
+    /// cache or creating a new RAM allocation. An inactive namespace reports zero residency.
+    pub fn shared_ram_stats(disk_root: impl AsRef<Path>) -> RamCacheStats {
+        let live = {
+            let registry = lock_registry();
+            registry
+                .get(disk_root.as_ref())
+                .and_then(|entry| entry.cache.upgrade())
+        };
+        live.map(|cache| lock_ram(&cache).stats())
+            .unwrap_or_default()
+    }
+
     pub fn lookup(&mut self, key: &FrameCacheKey) -> Result<CacheLookup, DiskCacheError> {
         if let Some(frame) = lock_ram(&self.ram).get(key) {
             return Ok(CacheLookup::Full(frame));
@@ -352,6 +365,24 @@ mod tests {
         assert_eq!(scrub.stats().ram.resident_frames, 1);
         assert_eq!(scrub.ram_budget_bytes(), 64);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shared_ram_stats_reports_the_live_namespace_without_opening_another_hierarchy() {
+        let root = temp_root("shared-stats");
+        let source = strong_source("shared-stats-source");
+        let key = FrameCacheKey::new(&source, 0, FrameId(4)).unwrap();
+        let mut cache = FrameCacheHierarchy::open(&root, 64, 0).unwrap();
+        cache.insert_full(rgba_frame(key));
+
+        let stats = FrameCacheHierarchy::shared_ram_stats(&root);
+        assert_eq!(stats.resident_bytes, 16);
+        assert_eq!(stats.resident_frames, 1);
+        assert_eq!(
+            FrameCacheHierarchy::shared_ram_stats(root.join("other")),
+            RamCacheStats::default()
+        );
         let _ = fs::remove_dir_all(root);
     }
 

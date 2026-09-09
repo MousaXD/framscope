@@ -63,7 +63,7 @@ class MicroscopeTimelineControlsTest {
     }
 
     @Test
-    fun indexedProgressChangeDispatchesPreviewWithoutAuthoritativeRelease() {
+    fun indexedProgressChangeMovesLocalTargetAndDispatchesPreviewWithoutAuthoritativeRelease() {
         val previewTimestamps = mutableListOf<Long>()
         val finishedTimestamps = mutableListOf<Long>()
         composeRule.setContent {
@@ -94,6 +94,7 @@ class MicroscopeTimelineControlsTest {
                 setProgress(0.75f)
             }
 
+        composeRule.onNodeWithText("Preview 00:00.400000").assertExists()
         composeRule.runOnIdle {
             assertEquals(listOf(400_000L), previewTimestamps)
             assertTrue(finishedTimestamps.isEmpty())

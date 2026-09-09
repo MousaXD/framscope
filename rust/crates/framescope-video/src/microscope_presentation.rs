@@ -1,6 +1,8 @@
 use crate::{
-    CachedFrameSource, CachedNavigationError, MicroscopeNavigationError, MicroscopeTarget,
-    RgbaNavigationDecoder, microscope_target, navigate_to_frame_cached,
+    CachedFrameSource, CachedNavigationError, CachedNavigationResult, MicroscopeNavigationError,
+    MicroscopeTarget, RgbaNavigationDecoder, TargetRgbaNavigationCursor,
+    TargetRgbaNavigationDecoder, microscope_target, navigate_to_frame_cached,
+    navigate_to_frame_cached_target_only_with_cursor,
 };
 use framescope_cache::{FrameCacheHierarchy, FrameId, FrameIndex, OwnedRgbaFrame, RamInsertResult};
 use framescope_core::FrameScopeError;
@@ -56,7 +58,49 @@ where
 {
     let target = microscope_target(index, frame_id)?;
     let navigation = navigate_to_frame_cached(index, cache, open_fresh_decoder, frame_id)?;
+    presentation_from_navigation(target, navigation)
+}
 
+/// Resolve and decode an authoritative microscope frame while retaining a verified decoder cursor.
+///
+/// The cursor is only eligible for strictly-forward FrameId movement within `max_forward_frames`.
+/// Every crossed presentation frame is reconciled against the persistent index before the requested
+/// target is materialized as RGBA. Reversal, same-frame requests, large jumps, timeline divergence,
+/// EOF, decoder errors, and cancellation all follow the fail-closed reset behavior implemented by
+/// [`navigate_to_frame_cached_target_only_with_cursor`].
+///
+/// This is intentionally separate from the legacy presentation function so callers that cannot own
+/// decoder lifetime retain the old API. Session-oriented callers should prefer this path: a warm
+/// adjacent request can advance the already-open codec without another container seek or decoder
+/// construction, while random seeks still use the persisted timestamp-seek-safety contract.
+pub fn present_microscope_frame_with_cursor<D, F>(
+    index: &FrameIndex,
+    cache: &mut FrameCacheHierarchy,
+    cursor: &mut Option<TargetRgbaNavigationCursor<D>>,
+    open_fresh_decoder: F,
+    frame_id: FrameId,
+    max_forward_frames: u64,
+) -> Result<MicroscopeFramePresentation, MicroscopePresentationError>
+where
+    D: TargetRgbaNavigationDecoder,
+    F: FnMut() -> Result<D, FrameScopeError>,
+{
+    let target = microscope_target(index, frame_id)?;
+    let navigation = navigate_to_frame_cached_target_only_with_cursor(
+        index,
+        cache,
+        cursor,
+        open_fresh_decoder,
+        frame_id,
+        max_forward_frames,
+    )?;
+    presentation_from_navigation(target, navigation)
+}
+
+fn presentation_from_navigation(
+    target: MicroscopeTarget,
+    navigation: CachedNavigationResult,
+) -> Result<MicroscopeFramePresentation, MicroscopePresentationError> {
     if navigation.frame_id != target.frame_id() || navigation.index_entry != target.entry {
         return Err(MicroscopePresentationError::IdentityMismatch);
     }

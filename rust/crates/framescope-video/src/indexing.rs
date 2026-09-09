@@ -125,6 +125,14 @@ pub struct IndexingReport {
     pub decoder_open_count: u64,
     /// Presentation frames emitted by indexing decoders during this operation.
     pub frames_decoded: u64,
+    /// Wall time spent in decoder `next_frame` calls.
+    ///
+    /// This is the current authoritative decoder-stack boundary and therefore includes FFmpeg
+    /// demux/input, packet submission, codec work, and the narrow native/Rust call boundary. Native
+    /// sub-stage counters can refine this field later without changing index semantics.
+    pub decoder_next_frame_elapsed_us: u64,
+    /// Time spent turning decoded presentation metadata into validated persistent index entries.
+    pub frame_metadata_elapsed_us: u64,
     /// Decoded frames replayed solely to validate an already-persisted prefix.
     pub validation_frames_replayed: u64,
     /// Aggregate SQLite time spent loading persisted rows for reconciliation.
@@ -133,8 +141,30 @@ pub struct IndexingReport {
     pub reconciliation_range_queries: u64,
     /// Aggregate time spent appending SQLite frame batches, including transaction commit.
     pub sqlite_batch_elapsed_us: u64,
+    /// Time spent acquiring SQLite IMMEDIATE transactions for frame-batch appends. This includes
+    /// busy-wait/blocking at the writer boundary and is a subset of `sqlite_batch_elapsed_us`.
+    pub sqlite_transaction_begin_elapsed_us: u64,
+    /// Time spent inside SQLite commit calls for successful frame-batch appends. This is a subset of
+    /// `sqlite_batch_elapsed_us`.
+    pub sqlite_commit_elapsed_us: u64,
+    /// Authoritative rows inserted by successful batch commits.
+    pub sqlite_rows_inserted: u64,
     /// Number of non-empty SQLite frame batches committed.
     pub batch_commits: u64,
+    /// Time spent publishing progress through the thread-scoped observer.
+    pub progress_observer_elapsed_us: u64,
+    /// Queue-idle time for a future decode/persist pipeline. The current implementation remains
+    /// synchronous, so this is zero by definition and provides an explicit baseline for Agent 12.
+    pub pipeline_queue_idle_elapsed_us: u64,
+    /// Whether decode/persistence overlap was active for this report.
+    pub pipeline_enabled: bool,
+    /// Average presentation frames decoded per second, multiplied by 1000 to remain integer-valued.
+    pub decoded_frames_per_second_milli: u64,
+    /// Average newly persisted frames per second, multiplied by 1000.
+    pub new_frames_per_second_milli: u64,
+    /// Residual wall time not attributed to the non-overlapping top-level counters above. This
+    /// includes lifecycle writes, seek/checkpoint work, control flow, and timing overhead.
+    pub miscellaneous_elapsed_us: u64,
     /// Whether an Agent-1-approved timestamp checkpoint was actually sought.
     pub bounded_resume_attempted: bool,
     /// Whether bounded overlap established exact authoritative alignment through the saved boundary.
@@ -153,11 +183,17 @@ struct IndexingCounters {
     decoder_open_elapsed_us: u64,
     decoder_open_count: u64,
     frames_decoded: u64,
+    decoder_next_frame_elapsed_us: u64,
+    frame_metadata_elapsed_us: u64,
     validation_frames_replayed: u64,
     reconciliation_sqlite_elapsed_us: u64,
     reconciliation_range_queries: u64,
     sqlite_batch_elapsed_us: u64,
+    sqlite_transaction_begin_elapsed_us: u64,
+    sqlite_commit_elapsed_us: u64,
+    sqlite_rows_inserted: u64,
     batch_commits: u64,
+    progress_observer_elapsed_us: u64,
     bounded_resume_attempted: bool,
     bounded_resume_succeeded: bool,
     bounded_resume_fell_back: bool,
@@ -175,22 +211,48 @@ impl IndexingCounters {
         restarted_after_partial_mismatch: bool,
         max_pending_entries: usize,
     ) -> IndexingReport {
+        let total_elapsed_us = duration_us(operation_started.elapsed());
+        let accounted_elapsed_us = self
+            .index_status_elapsed_us
+            .saturating_add(self.decoder_open_elapsed_us)
+            .saturating_add(self.decoder_next_frame_elapsed_us)
+            .saturating_add(self.frame_metadata_elapsed_us)
+            .saturating_add(self.reconciliation_sqlite_elapsed_us)
+            .saturating_add(self.sqlite_batch_elapsed_us)
+            .saturating_add(self.progress_observer_elapsed_us);
         IndexingReport {
             status,
             reused_existing_frames,
             newly_indexed_frames,
             restarted_after_partial_mismatch,
             max_pending_entries,
-            total_elapsed_us: duration_us(operation_started.elapsed()),
+            total_elapsed_us,
             index_status_elapsed_us: self.index_status_elapsed_us,
             decoder_open_elapsed_us: self.decoder_open_elapsed_us,
             decoder_open_count: self.decoder_open_count,
             frames_decoded: self.frames_decoded,
+            decoder_next_frame_elapsed_us: self.decoder_next_frame_elapsed_us,
+            frame_metadata_elapsed_us: self.frame_metadata_elapsed_us,
             validation_frames_replayed: self.validation_frames_replayed,
             reconciliation_sqlite_elapsed_us: self.reconciliation_sqlite_elapsed_us,
             reconciliation_range_queries: self.reconciliation_range_queries,
             sqlite_batch_elapsed_us: self.sqlite_batch_elapsed_us,
+            sqlite_transaction_begin_elapsed_us: self.sqlite_transaction_begin_elapsed_us,
+            sqlite_commit_elapsed_us: self.sqlite_commit_elapsed_us,
+            sqlite_rows_inserted: self.sqlite_rows_inserted,
             batch_commits: self.batch_commits,
+            progress_observer_elapsed_us: self.progress_observer_elapsed_us,
+            pipeline_queue_idle_elapsed_us: 0,
+            pipeline_enabled: false,
+            decoded_frames_per_second_milli: rate_per_second_milli(
+                self.frames_decoded,
+                total_elapsed_us,
+            ),
+            new_frames_per_second_milli: rate_per_second_milli(
+                newly_indexed_frames,
+                total_elapsed_us,
+            ),
+            miscellaneous_elapsed_us: total_elapsed_us.saturating_sub(accounted_elapsed_us),
             bounded_resume_attempted: self.bounded_resume_attempted,
             bounded_resume_succeeded: self.bounded_resume_succeeded,
             bounded_resume_fell_back: self.bounded_resume_fell_back,
@@ -273,34 +335,43 @@ where
     let status_started = Instant::now();
     let initial_status = index.status()?;
     counters.index_status_elapsed_us = duration_us(status_started.elapsed());
-    emit_progress(IndexingProgress {
-        stage: IndexingProgressStage::CheckingExistingIndex,
-        indexed_frames: initial_status.indexed_frames,
-        reused_frames: 0,
-        expected_reuse_frames: initial_status.indexed_frames,
-        current_timestamp_us: initial_status
-            .last_presentation_timestamp
-            .and_then(|timestamp| timestamp.to_microseconds()),
-    });
+    emit_progress_measured(
+        &mut counters,
+        IndexingProgress {
+            stage: IndexingProgressStage::CheckingExistingIndex,
+            indexed_frames: initial_status.indexed_frames,
+            reused_frames: 0,
+            expected_reuse_frames: initial_status.indexed_frames,
+            current_timestamp_us: initial_status
+                .last_presentation_timestamp
+                .and_then(|timestamp| timestamp.to_microseconds()),
+        },
+    );
     if initial_status.lifecycle == FrameIndexLifecycle::Complete {
-        emit_progress(IndexingProgress {
-            stage: IndexingProgressStage::ReusingExistingIndex,
-            indexed_frames: initial_status.indexed_frames,
-            reused_frames: initial_status.indexed_frames,
-            expected_reuse_frames: initial_status.indexed_frames,
-            current_timestamp_us: initial_status
-                .last_presentation_timestamp
-                .and_then(|timestamp| timestamp.to_microseconds()),
-        });
-        emit_progress(IndexingProgress {
-            stage: IndexingProgressStage::Finalizing,
-            indexed_frames: initial_status.indexed_frames,
-            reused_frames: initial_status.indexed_frames,
-            expected_reuse_frames: initial_status.indexed_frames,
-            current_timestamp_us: initial_status
-                .last_presentation_timestamp
-                .and_then(|timestamp| timestamp.to_microseconds()),
-        });
+        emit_progress_measured(
+            &mut counters,
+            IndexingProgress {
+                stage: IndexingProgressStage::ReusingExistingIndex,
+                indexed_frames: initial_status.indexed_frames,
+                reused_frames: initial_status.indexed_frames,
+                expected_reuse_frames: initial_status.indexed_frames,
+                current_timestamp_us: initial_status
+                    .last_presentation_timestamp
+                    .and_then(|timestamp| timestamp.to_microseconds()),
+            },
+        );
+        emit_progress_measured(
+            &mut counters,
+            IndexingProgress {
+                stage: IndexingProgressStage::Finalizing,
+                indexed_frames: initial_status.indexed_frames,
+                reused_frames: initial_status.indexed_frames,
+                expected_reuse_frames: initial_status.indexed_frames,
+                current_timestamp_us: initial_status
+                    .last_presentation_timestamp
+                    .and_then(|timestamp| timestamp.to_microseconds()),
+            },
+        );
         return Ok(counters.report(operation_started, initial_status, 0, 0, false, 0));
     }
 
@@ -346,28 +417,34 @@ where
         let mut last_timestamp_us = None;
 
         if expected_existing > 0 {
-            emit_progress(IndexingProgress {
-                stage: IndexingProgressStage::ValidatingExistingIndex,
-                indexed_frames: expected_existing,
-                reused_frames: reused,
-                expected_reuse_frames: expected_existing,
-                current_timestamp_us: None,
-            });
+            emit_progress_measured(
+                &mut counters,
+                IndexingProgress {
+                    stage: IndexingProgressStage::ValidatingExistingIndex,
+                    indexed_frames: expected_existing,
+                    reused_frames: reused,
+                    expected_reuse_frames: expected_existing,
+                    current_timestamp_us: None,
+                },
+            );
         } else {
-            emit_progress(IndexingProgress {
-                stage: IndexingProgressStage::Indexing,
-                indexed_frames: 0,
-                reused_frames: 0,
-                expected_reuse_frames: 0,
-                current_timestamp_us: None,
-            });
+            emit_progress_measured(
+                &mut counters,
+                IndexingProgress {
+                    stage: IndexingProgressStage::Indexing,
+                    indexed_frames: 0,
+                    reused_frames: 0,
+                    expected_reuse_frames: 0,
+                    current_timestamp_us: None,
+                },
+            );
         }
 
         loop {
             let decoded = if let Some(decoded) = pending_decoded.take() {
                 Some(decoded)
             } else {
-                match decoder.next_frame_for_index() {
+                match next_frame_measured(&mut decoder, &mut counters) {
                     Ok(value) => value,
                     Err(FrameScopeError::Cancelled) => {
                         flush_batch(index, &mut batch, &mut added, &mut counters)?;
@@ -395,13 +472,16 @@ where
                     counters.bounded_resume_succeeded = true;
                 }
                 flush_batch(index, &mut batch, &mut added, &mut counters)?;
-                emit_progress(IndexingProgress {
-                    stage: IndexingProgressStage::Finalizing,
-                    indexed_frames: reused.saturating_add(added),
-                    reused_frames: reused,
-                    expected_reuse_frames: expected_existing,
-                    current_timestamp_us: last_timestamp_us,
-                });
+                emit_progress_measured(
+                    &mut counters,
+                    IndexingProgress {
+                        stage: IndexingProgressStage::Finalizing,
+                        indexed_frames: reused.saturating_add(added),
+                        reused_frames: reused,
+                        expected_reuse_frames: expected_existing,
+                        current_timestamp_us: last_timestamp_us,
+                    },
+                );
                 index.mark_complete()?;
                 let status = index.status()?;
                 return Ok(counters.report(
@@ -416,8 +496,13 @@ where
 
             counters.frames_decoded = counters.frames_decoded.saturating_add(1);
             last_timestamp_us = decoded.timestamp_us();
+            let metadata_started = Instant::now();
             let entry = entry_from_decoded(frame_id, &decoded, &mut anchor);
-            entry.validate(index.stream_identity())?;
+            let validation = entry.validate(index.stream_identity());
+            counters.frame_metadata_elapsed_us = counters
+                .frame_metadata_elapsed_us
+                .saturating_add(duration_us(metadata_started.elapsed()));
+            validation?;
 
             if frame_id.0 < expected_existing {
                 counters.validation_frames_replayed =
@@ -459,19 +544,22 @@ where
                 || processed == expected_existing.saturating_add(1)
                 || processed % PROGRESS_FRAME_INTERVAL == 0
             {
-                emit_progress(IndexingProgress {
-                    stage,
-                    indexed_frames: if stage == IndexingProgressStage::ValidatingExistingIndex {
-                        expected_existing
-                    } else {
-                        reused
-                            .saturating_add(added)
-                            .saturating_add(batch.len() as u64)
+                emit_progress_measured(
+                    &mut counters,
+                    IndexingProgress {
+                        stage,
+                        indexed_frames: if stage == IndexingProgressStage::ValidatingExistingIndex {
+                            expected_existing
+                        } else {
+                            reused
+                                .saturating_add(added)
+                                .saturating_add(batch.len() as u64)
+                        },
+                        reused_frames: reused,
+                        expected_reuse_frames: expected_existing,
+                        current_timestamp_us: last_timestamp_us,
                     },
-                    reused_frames: reused,
-                    expected_reuse_frames: expected_existing,
-                    current_timestamp_us: last_timestamp_us,
-                });
+                );
             }
 
             frame_id = FrameId(
@@ -489,13 +577,16 @@ where
         }
 
         if expected_existing > 0 && !restarted {
-            emit_progress(IndexingProgress {
-                stage: IndexingProgressStage::RebuildingIndex,
-                indexed_frames: 0,
-                reused_frames: 0,
-                expected_reuse_frames: 0,
-                current_timestamp_us: None,
-            });
+            emit_progress_measured(
+                &mut counters,
+                IndexingProgress {
+                    stage: IndexingProgressStage::RebuildingIndex,
+                    indexed_frames: 0,
+                    reused_frames: 0,
+                    expected_reuse_frames: 0,
+                    current_timestamp_us: None,
+                },
+            );
             index.clear_for_rebuild()?;
             expected_existing = 0;
             restarted = true;
@@ -554,7 +645,7 @@ where
     }
 
     for _ in 0..RESUME_SEEK_SCAN_LIMIT {
-        let candidate = match decoder.next_frame_for_index() {
+        let candidate = match next_frame_measured(&mut decoder, counters) {
             Ok(Some(candidate)) => candidate,
             Ok(None) => {
                 counters.bounded_resume_fell_back = true;
@@ -648,6 +739,18 @@ where
     Ok(decoder)
 }
 
+fn next_frame_measured<D: FrameIndexDecoder>(
+    decoder: &mut D,
+    counters: &mut IndexingCounters,
+) -> Result<Option<DecodedFrame>, FrameScopeError> {
+    let started = Instant::now();
+    let result = decoder.next_frame_for_index();
+    counters.decoder_next_frame_elapsed_us = counters
+        .decoder_next_frame_elapsed_us
+        .saturating_add(duration_us(started.elapsed()));
+    result
+}
+
 fn load_reconciliation_chunk(
     index: &FrameIndex,
     start: FrameId,
@@ -686,22 +789,52 @@ fn flush_batch(
     }
     let count = batch.len() as u64;
     let batch_started = Instant::now();
-    let result = index.append_batch(batch);
+    let result = index.append_batch_profiled(batch);
     counters.sqlite_batch_elapsed_us = counters
         .sqlite_batch_elapsed_us
         .saturating_add(duration_us(batch_started.elapsed()));
-    counters.batch_commits = counters.batch_commits.saturating_add(1);
-    if let Err(error) = result {
-        let _ = index.mark_failed_recoverable(&error.to_string());
-        return Err(IndexingError::Storage(error));
+    match result {
+        Ok((transaction_begin_elapsed_us, commit_elapsed_us)) => {
+            counters.sqlite_transaction_begin_elapsed_us = counters
+                .sqlite_transaction_begin_elapsed_us
+                .saturating_add(transaction_begin_elapsed_us);
+            counters.sqlite_commit_elapsed_us = counters
+                .sqlite_commit_elapsed_us
+                .saturating_add(commit_elapsed_us);
+            counters.sqlite_rows_inserted = counters.sqlite_rows_inserted.saturating_add(count);
+            counters.batch_commits = counters.batch_commits.saturating_add(1);
+        }
+        Err(error) => {
+            let _ = index.mark_failed_recoverable(&error.to_string());
+            return Err(IndexingError::Storage(error));
+        }
     }
     batch.clear();
     *added = added.saturating_add(count);
     Ok(())
 }
 
+fn emit_progress_measured(counters: &mut IndexingCounters, progress: IndexingProgress) {
+    let started = Instant::now();
+    emit_progress(progress);
+    counters.progress_observer_elapsed_us = counters
+        .progress_observer_elapsed_us
+        .saturating_add(duration_us(started.elapsed()));
+}
+
 fn duration_us(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn rate_per_second_milli(count: u64, elapsed_us: u64) -> u64 {
+    if elapsed_us == 0 {
+        return 0;
+    }
+    let scaled = u128::from(count)
+        .saturating_mul(1_000_000_000)
+        .checked_div(u128::from(elapsed_us))
+        .unwrap_or(0);
+    u64::try_from(scaled).unwrap_or(u64::MAX)
 }
 
 fn matches_index_entry(decoded: &DecodedFrame, indexed: &FrameIndexEntry) -> bool {
@@ -880,7 +1013,13 @@ mod tests {
         assert_eq!(report.validation_frames_replayed, 0);
         assert_eq!(report.reconciliation_range_queries, 0);
         assert_eq!(report.batch_commits, 3);
+        assert_eq!(report.sqlite_rows_inserted, 5);
         assert_eq!(report.decoder_open_count, 1);
+        assert!(!report.pipeline_enabled);
+        assert_eq!(report.pipeline_queue_idle_elapsed_us, 0);
+        assert!(report.sqlite_commit_elapsed_us <= report.sqlite_batch_elapsed_us);
+        assert!(report.sqlite_transaction_begin_elapsed_us <= report.sqlite_batch_elapsed_us);
+        assert!(report.miscellaneous_elapsed_us <= report.total_elapsed_us);
         let ticks = (0..5)
             .map(|id| {
                 index
