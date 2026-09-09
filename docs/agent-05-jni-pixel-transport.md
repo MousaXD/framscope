@@ -42,7 +42,7 @@ This report covers Rust ↔ JNI ↔ Kotlin pixel transport only. It does not cha
 | Preview cache insert/get | no pixel allocation after backing exists | none | Arc clone only. |
 | Preview → JNI direct buffer | pool allocation only on cold/mismatched capacity | one full preview copy | Pool retains at most two best-fit direct buffers. |
 | JNI direct buffer → Bitmap | 1 Bitmap | one full preview copy | Bitmap becomes the published display object. |
-| Compose display | no FrameScope-managed pixel copy identified | none in this bridge | Bitmap is retired with Compose `DisposableEffect` cleanup. |
+| Compose display | no FrameScope-managed pixel copy identified | none in this bridge | Live Bitmap remains owned by ViewModel state; reclamation is left to Android/GC after the state and composition release it. |
 
 ### Live scrub preview, preview-cache hit
 
@@ -59,7 +59,7 @@ After the pool warms, the direct transport allocation itself is reused. The Bitm
 - Active leases cannot be reused. A buffer returns to the pool only after the synchronous Bitmap copy finishes.
 - No raw native pointer or mutable pooled buffer escapes into ViewModel/UI state.
 - Live previews are published as their final Bitmap instead of publishing the JNI scratch ByteBuffer.
-- Compose recycles a retired live-preview Bitmap only from `DisposableEffect.onDispose`, after that exact Bitmap leaves composition.
+- Live preview Bitmaps are not manually recycled by the composable because the same `MicroscopeScrubPreview` can remain retained in ViewModel state across recomposition/configuration changes. Old previews become collectible after both state and composition release them; recycling earlier could expose a retained recycled Bitmap.
 - Authoritative full-resolution buffers remain caller-owned and unpooled.
 
 ## Instrumentation
@@ -121,7 +121,7 @@ Do not claim a speedup from this branch until a physical Android device captures
 
 ## Remaining risks
 
-- Per-preview Bitmap allocation remains and can still contribute to allocation churn.
+- Per-preview Bitmap allocation remains and can still contribute to allocation/GC churn.
 - Full-resolution authoritative presentation still performs a full JNI copy and Bitmap copy.
 - FFmpeg currently constructs/frees an `SwsContext` for every RGBA snapshot instead of retaining a session-owned cached context.
 - A Surface path can reduce live-preview copies further, but belongs with hardware decode/presentation integration rather than being bolted onto the authoritative RGBA path.
