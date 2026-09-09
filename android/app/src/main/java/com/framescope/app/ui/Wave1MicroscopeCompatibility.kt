@@ -57,8 +57,14 @@ internal fun MicroscopeTimelineControls(
         timelineBounds = timelineBounds,
         rangeSelection = rangeSelection,
         enabled = enabled,
-        onJumpFrame = onJumpFrame,
-        onJumpTimestampUs = onJumpTimestampUs,
+        onStep = { delta ->
+            session.currentFrame?.frameId?.let { currentFrameId ->
+                val targetFrameId = currentFrameId + delta.toLong()
+                if (targetFrameId in 0L until session.frameCount) {
+                    onJumpFrame(targetFrameId)
+                }
+            }
+        },
         onPreviewFrame = {},
         onPreviewTimestampUs = {},
         onFinishScrubFrame = onJumpFrame,
