@@ -148,7 +148,9 @@ pub enum GlobalSimilarityError {
     InvalidDescriptorLength(usize),
     #[error("target frame {0:?} is not present in the global-similarity store")]
     MissingTarget(FrameId),
-    #[error("global-similarity descriptor frame IDs are not contiguous: expected {expected:?}, got {actual:?}")]
+    #[error(
+        "global-similarity descriptor frame IDs are not contiguous: expected {expected:?}, got {actual:?}"
+    )]
     NonContiguousFrameIds { expected: FrameId, actual: FrameId },
     #[error("global-similarity numeric value is outside the supported SQLite range: {0}")]
     NumericRange(&'static str),
@@ -226,10 +228,7 @@ pub fn descriptor_for_frame(
 ///
 /// A one-cell normalized translation search absorbs small crop/resampling shifts. Only overlapping
 /// cells are compared for a shifted candidate, avoiding artificial border duplication.
-pub fn confirmation_similarity(
-    left: &[u8],
-    right: &[u8],
-) -> Result<u16, GlobalSimilarityError> {
+pub fn confirmation_similarity(left: &[u8], right: &[u8]) -> Result<u16, GlobalSimilarityError> {
     validate_descriptor_bytes(left)?;
     validate_descriptor_bytes(right)?;
 
@@ -249,8 +248,7 @@ pub fn confirmation_similarity(
                         continue;
                     }
                     let left_index = (y * NORMALIZED_SIDE + x) * 3;
-                    let right_index =
-                        (right_y as usize * NORMALIZED_SIDE + right_x as usize) * 3;
+                    let right_index = (right_y as usize * NORMALIZED_SIDE + right_x as usize) * 3;
                     for channel in 0..3 {
                         difference += u64::from(
                             left[left_index + channel].abs_diff(right[right_index + channel]),
@@ -436,10 +434,9 @@ impl GlobalSimilarityStore {
         ] {
             for band in 0..HASH_BANDS_PER_KIND {
                 let band_value = ((hash >> (band * 16)) & 0xffff) as i64;
-                let rows = statement.query_map(
-                    params![kind, band as i64, band_value],
-                    |row| row.get::<_, i64>(0),
-                )?;
+                let rows = statement.query_map(params![kind, band as i64, band_value], |row| {
+                    row.get::<_, i64>(0)
+                })?;
                 for row in rows {
                     let raw = row?;
                     let id = u64::try_from(raw).map_err(|_| {
@@ -496,10 +493,7 @@ impl GlobalSimilarityStore {
         })
     }
 
-    pub fn invalidate_source(
-        &self,
-        source: &SourceIdentity,
-    ) -> Result<(), GlobalSimilarityError> {
+    pub fn invalidate_source(&self, source: &SourceIdentity) -> Result<(), GlobalSimilarityError> {
         let source_key = source.stable_key();
         for schema_version in 1..=GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION {
             let path = self
@@ -638,11 +632,7 @@ fn create_schema(connection: &Connection) -> Result<(), GlobalSimilarityError> {
          CREATE INDEX global_hash_band_lookup
             ON global_hash_bands(kind, band, band_value, frame_id);",
     )?;
-    connection.pragma_update(
-        None,
-        "user_version",
-        GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION,
-    )?;
+    connection.pragma_update(None, "user_version", GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -686,7 +676,9 @@ fn validate_rows(
     }
 
     let band_count: i64 =
-        connection.query_row("SELECT COUNT(*) FROM global_hash_bands", [], |row| row.get(0))?;
+        connection.query_row("SELECT COUNT(*) FROM global_hash_bands", [], |row| {
+            row.get(0)
+        })?;
     let expected_bands = expected_count
         .checked_mul((HASH_BANDS_PER_KIND * 2) as u64)
         .ok_or(GlobalSimilarityError::NumericRange("hash band count"))?;
@@ -769,22 +761,15 @@ fn resample_rgb(
             let x1 = (x0 + 1).min(width - 1);
             let fx = (source_x & 0xffff) as u32;
             for channel in 0..3 {
-                let p00 =
-                    u64::from(frame.pixels()[y0 * frame.stride_bytes + x0 * 4 + channel]);
-                let p10 =
-                    u64::from(frame.pixels()[y0 * frame.stride_bytes + x1 * 4 + channel]);
-                let p01 =
-                    u64::from(frame.pixels()[y1 * frame.stride_bytes + x0 * 4 + channel]);
-                let p11 =
-                    u64::from(frame.pixels()[y1 * frame.stride_bytes + x1 * 4 + channel]);
+                let p00 = u64::from(frame.pixels()[y0 * frame.stride_bytes + x0 * 4 + channel]);
+                let p10 = u64::from(frame.pixels()[y0 * frame.stride_bytes + x1 * 4 + channel]);
+                let p01 = u64::from(frame.pixels()[y1 * frame.stride_bytes + x0 * 4 + channel]);
+                let p11 = u64::from(frame.pixels()[y1 * frame.stride_bytes + x1 * 4 + channel]);
                 let top = p00 * u64::from(65_536 - fx) + p10 * u64::from(fx);
                 let bottom = p01 * u64::from(65_536 - fx) + p11 * u64::from(fx);
-                let value = (top * u64::from(65_536 - fy)
-                    + bottom * u64::from(fy)
-                    + (1_u64 << 31))
-                    >> 32;
-                output[(output_y * output_width + output_x) * 3 + channel] =
-                    value.min(255) as u8;
+                let value =
+                    (top * u64::from(65_536 - fy) + bottom * u64::from(fy) + (1_u64 << 31)) >> 32;
+                output[(output_y * output_width + output_x) * 3 + channel] = value.min(255) as u8;
             }
         }
     }
@@ -981,8 +966,7 @@ mod tests {
         .into_iter()
         .any(|(left_hash, right_hash)| {
             (0..HASH_BANDS_PER_KIND).any(|band| {
-                ((left_hash >> (band * 16)) & 0xffff)
-                    == ((right_hash >> (band * 16)) & 0xffff)
+                ((left_hash >> (band * 16)) & 0xffff) == ((right_hash >> (band * 16)) & 0xffff)
             })
         })
     }
@@ -1040,11 +1024,9 @@ mod tests {
         ];
         for (offset, (name, candidate)) in positives.iter().enumerate() {
             let descriptor = descriptor_for_frame(FrameId(offset as u64 + 1), candidate).unwrap();
-            let score = confirmation_similarity(
-                &reference.normalized_rgb,
-                &descriptor.normalized_rgb,
-            )
-            .unwrap();
+            let score =
+                confirmation_similarity(&reference.normalized_rgb, &descriptor.normalized_rgb)
+                    .unwrap();
             assert!(
                 score >= DEFAULT_MINIMUM_SIMILARITY,
                 "positive fixture {name} scored {score}"
@@ -1110,8 +1092,18 @@ mod tests {
         assert!(result.candidate_count >= 2);
         assert_eq!(result.matches[0].frame_id, FrameId(7));
         assert_eq!(result.matches[0].similarity, SIMILARITY_SCALE);
-        assert!(result.matches.iter().any(|item| item.frame_id == FrameId(2)));
-        assert!(!result.matches.iter().any(|item| item.frame_id == FrameId(0)));
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|item| item.frame_id == FrameId(2))
+        );
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|item| item.frame_id == FrameId(0))
+        );
     }
 
     #[test]
