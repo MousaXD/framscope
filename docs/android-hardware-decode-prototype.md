@@ -12,7 +12,7 @@ Indexing calls the metadata-only `next_frame` API, so it does not pay the RGBA/s
 
 Nothing in this branch changes the production decoder used by indexing, exact navigation, extraction, or scrub presentation.
 
-Hardware decode remains a benchmark/prototype candidate until a physical-device corpus proves the required semantics. A faster result is not acceptable if it changes frame count, presentation ordering, VFR timestamps, duration, clean-keyframe identity, corrupt-frame state, cancellation behavior, or the persistent FrameId contract.
+Hardware decode remains a benchmark/prototype candidate until a physical-device corpus proves the required semantics. A faster result is not acceptable if it changes frame count, presentation ordering, VFR timestamps, PTS/DTS behavior, duration, clean-keyframe identity, corrupt-frame state, cancellation behavior, or the persistent FrameId contract.
 
 No root access, privileged Android permission, governor change, thermal override, cpuset modification, swap/zram change, or kernel tuning is used or required.
 
@@ -22,12 +22,12 @@ The matrix is intentionally runtime-driven rather than a claim that every Androi
 
 | Codec | Production software fallback | Direct Android MediaCodec candidate | FFmpeg MediaCodec probe | Automatic hardware classification |
 | --- | --- | --- | --- | --- |
-| H.264 / `video/avc` | `h264` | yes, when enumerated | `h264_mediacodec` | API 29+ explicit platform flag only |
-| HEVC / `video/hevc` | `hevc` | yes, when enumerated | `hevc_mediacodec` | API 29+ explicit platform flag only |
-| VP9 / `video/x-vnd.on2.vp9` | `vp9` | yes, when enumerated | `vp9_mediacodec` | API 29+ explicit platform flag only |
-| AV1 / `video/av01` | `av1` | yes, when enumerated | `av1_mediacodec` | API 29+ explicit platform flag only |
+| H.264 / `video/avc` | `h264` | yes, when enumerated | `h264_mediacodec` | API 29+ explicit API flag only |
+| HEVC / `video/hevc` | `hevc` | yes, when enumerated | `hevc_mediacodec` | API 29+ explicit API flag only |
+| VP9 / `video/x-vnd.on2.vp9` | `vp9` | yes, when enumerated | `vp9_mediacodec` | API 29+ explicit API flag only |
+| AV1 / `video/av01` | `av1` | yes, when enumerated | `av1_mediacodec` | API 29+ explicit API flag only |
 
-Android 10 / API 29 added `MediaCodecInfo.isHardwareAccelerated`, `isSoftwareOnly`, `isVendor`, and `isAlias`. On FrameScope's API 26-28 floor the prototype reports acceleration as `Unknown` rather than inferring it from component names. The existing FFmpeg software path is the fallback.
+Android 10 / API 29 added `MediaCodecInfo.isHardwareAccelerated`, `isSoftwareOnly`, `isVendor`, and `isAlias`. FrameScope uses those flags as a candidate filter, not as proof of performance or correctness. On the API 26-28 floor the prototype reports acceleration as `Unknown` rather than inferring it from component names. The existing FFmpeg software path is the fallback.
 
 ## Prototype A: current FFmpeg software decoder
 
@@ -52,11 +52,15 @@ The process CPU measurement does not include work performed in a codec service o
 - frames decoded and frames/second;
 - wall time and process CPU time;
 - time to first output frame;
+- optional seek-to-target settle time;
 - first/last output presentation timestamp plus a sequence digest;
 - negotiated output color format;
-- app-visible thermal status before and after the run.
+- app-visible thermal status before and after the run;
+- permission-free `BatteryManager` energy-counter samples when the device implements them, plus a derived whole-device average battery-power estimate for a discharging run.
 
-The opt-in instrumentation entry point is `AndroidMediaCodecDeviceBenchmarkTest`. CI compiles it but does not fabricate physical performance results.
+Battery energy/power fields are nullable. They are whole-device observations, can be too coarse for short runs, and are not attributed solely to FrameScope or the codec. The benchmark never substitutes process CPU or GPU utilization for a power measurement.
+
+The opt-in instrumentation entry point is `AndroidMediaCodecDeviceBenchmarkTest`. CI compiles it but does not fabricate physical performance results. The input fixture must already be readable by the debug app; the benchmark does not request storage or privileged permissions.
 
 Direct MediaCodec is currently a **preview candidate, not an authoritative indexing candidate**. `MediaCodec.BufferInfo` gives output presentation time and flags, but it does not reproduce all fields in FrameScope's persistent `FrameIndexEntry` contract, notably frame duration and the current FFmpeg corrupt/decode-error state. A timestamp sequence alone is therefore insufficient proof for authoritative indexing.
 
@@ -71,7 +75,7 @@ The benchmark forces FFmpeg's `ndk_codec=1` option for the MediaCodec pass. This
 Build the probe executable:
 
 ```bash
-./scripts/build-android-hwdecode-bench.sh
+bash ./scripts/build-android-hwdecode-bench.sh
 ```
 
 A non-root physical-device run can then use ordinary `adb` developer tooling, for example:
@@ -83,13 +87,16 @@ adb shell chmod 755 /data/local/tmp/framescope-decode-bench
 adb shell /data/local/tmp/framescope-decode-bench compare /data/local/tmp/fixture.mp4 3000
 ```
 
-The `compare` mode decodes the same prefix once with FFmpeg software and once with FFmpeg MediaCodec. It compares, frame by frame, the exact metadata used by the current persistent index contract:
+The `compare` mode decodes the same prefix once with FFmpeg software and once with FFmpeg MediaCodec. It compares, frame by frame:
 
 - presentation timestamp selection (`best_effort_timestamp`, falling back to `pts`);
+- decoded-frame `pkt_dts` presence/value;
 - positive frame duration;
 - keyframe flag;
 - corrupt/decode-error state;
 - decoded presentation-frame count/order.
+
+The presentation timestamp, duration, keyframe and corrupt fields are the current persistent-index-driving metadata. DTS is additionally compared because the remediation wave requires it to remain correct even though it is not currently persisted in `FrameIndexEntry`.
 
 Any first mismatch returns exit status 2. Decoder/open failures return exit status 1. This is intentionally fail-closed.
 
@@ -112,11 +119,11 @@ At minimum, collect software, direct MediaCodec, and FFmpeg MediaCodec results o
 4. AV1 where a true hardware component is reported;
 5. a VFR fixture with non-uniform presentation intervals;
 6. an intentionally damaged/corrupt fixture already accepted by the software test corpus;
-7. repeated warm and cold runs long enough to observe thermal behavior.
+7. repeated warm and cold runs long enough to observe thermal behavior and, where supported, battery-energy-counter movement.
 
-For authoritative-index consideration, FFmpeg MediaCodec must produce an exact metadata-row match against software on the entire fixture, not only an equal frame count. For preview consideration, record visual correctness, stale-request behavior, cancellation latency, seek latency, TTFF, FPS, process CPU, thermal start/end, and device/model/build information.
+For authoritative-index consideration, FFmpeg MediaCodec must produce an exact metadata-row match against software on the entire fixture, not only an equal frame count. For preview consideration, record visual correctness, stale-request behavior, cancellation latency, seek latency, TTFF, FPS, process CPU, thermal start/end, supported battery-energy/power observations, and device/model/build information.
 
-Power is not claimed by the current harness. If power instrumentation is added, use an app/device-supported measurement surface and state its scope. Do not infer power from GPU utilization or process CPU alone.
+Power remains a best-effort physical-device metric. If the battery energy counter is unavailable or too coarse, report it as unavailable rather than inferring power from GPU utilization or process CPU alone.
 
 ## Recommendation by stage
 
