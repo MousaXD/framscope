@@ -66,9 +66,10 @@ internal object AndroidMediaCodecBenchmark {
                 requireByteBufferOutput = true,
             ) ?: error("no explicitly hardware-accelerated ByteBuffer decoder is available for $mimeType")
 
-            codec = MediaCodec.createByCodecName(capability.codecName)
-            codec.configure(format, null, null, 0)
-            codec.start()
+            val activeCodec = MediaCodec.createByCodecName(capability.codecName)
+            codec = activeCodec
+            activeCodec.configure(format, null, null, 0)
+            activeCodec.start()
 
             val bufferInfo = MediaCodec.BufferInfo()
             var inputEnded = false
@@ -78,7 +79,7 @@ internal object AndroidMediaCodecBenchmark {
             var lastPresentationTimeUs: Long? = null
             var firstFrameNs: Long? = null
             var outputColorFormat: Int? = null
-            var timestampDigest = Fnv1a64()
+            val timestampDigest = Fnv1a64()
             var cancelled = false
 
             while (!outputEnded) {
@@ -91,15 +92,15 @@ internal object AndroidMediaCodecBenchmark {
                 }
 
                 if (!inputEnded) {
-                    val inputIndex = codec.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                    val inputIndex = activeCodec.dequeueInputBuffer(CODEC_TIMEOUT_US)
                     if (inputIndex >= 0) {
-                        val inputBuffer = requireNotNull(codec.getInputBuffer(inputIndex)) {
+                        val inputBuffer = requireNotNull(activeCodec.getInputBuffer(inputIndex)) {
                             "MediaCodec returned a null input buffer"
                         }
                         inputBuffer.clear()
                         val sampleSize = extractor.readSampleData(inputBuffer, 0)
                         if (sampleSize < 0) {
-                            codec.queueInputBuffer(
+                            activeCodec.queueInputBuffer(
                                 inputIndex,
                                 0,
                                 0,
@@ -116,15 +117,21 @@ internal object AndroidMediaCodecBenchmark {
                             } else {
                                 0
                             }
-                            codec.queueInputBuffer(inputIndex, 0, sampleSize, sampleTimeUs, inputFlags)
+                            activeCodec.queueInputBuffer(
+                                inputIndex,
+                                0,
+                                sampleSize,
+                                sampleTimeUs,
+                                inputFlags,
+                            )
                             extractor.advance()
                         }
                     }
                 }
 
-                when (val outputIndex = codec.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)) {
+                when (val outputIndex = activeCodec.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)) {
                     MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        val outputFormat = codec.outputFormat
+                        val outputFormat = activeCodec.outputFormat
                         outputColorFormat = if (outputFormat.containsKey(MediaFormat.KEY_COLOR_FORMAT)) {
                             outputFormat.getInteger(MediaFormat.KEY_COLOR_FORMAT)
                         } else {
@@ -132,8 +139,7 @@ internal object AndroidMediaCodecBenchmark {
                         }
                     }
                     MediaCodec.INFO_TRY_AGAIN_LATER,
-                    MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED,
-                    -> Unit
+                    MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> Unit
                     else -> if (outputIndex >= 0) {
                         val isCodecConfig = bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
                         val isEndOfStream = bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
@@ -149,7 +155,7 @@ internal object AndroidMediaCodecBenchmark {
                             timestampDigest.update(ptsUs)
                             framesDecoded += 1
                         }
-                        codec.releaseOutputBuffer(outputIndex, false)
+                        activeCodec.releaseOutputBuffer(outputIndex, false)
                         outputEnded = isEndOfStream
                     }
                 }
