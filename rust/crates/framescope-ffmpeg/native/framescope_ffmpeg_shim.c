@@ -121,6 +121,7 @@ struct FsSession {
     AVCodecContext *codec;
     AVPacket *packet;
     AVFrame *frame;
+    struct SwsContext *rgba_scaler;
     AVIOContext *avio;
     FsFdInput *fd_input;
     int32_t selected_stream_index;
@@ -223,6 +224,10 @@ static void fs_session_destroy(FsSession *session) {
         return;
     }
 
+    if (session->rgba_scaler != NULL) {
+        sws_freeContext(session->rgba_scaler);
+        session->rgba_scaler = NULL;
+    }
     if (session->codec != NULL) {
         avcodec_free_context(&session->codec);
     }
@@ -898,7 +903,6 @@ int32_t framescope_ffmpeg_copy_current_frame_rgba(
     FsError *error
 ) {
     FsSession *session = (FsSession *)opaque;
-    struct SwsContext *scaler;
     uint8_t *destination_data[4] = {NULL, NULL, NULL, NULL};
     int destination_linesize[4] = {0, 0, 0, 0};
     size_t stride;
@@ -930,7 +934,8 @@ int32_t framescope_ffmpeg_copy_current_frame_rgba(
         return -1;
     }
 
-    scaler = sws_getContext(
+    session->rgba_scaler = sws_getCachedContext(
+        session->rgba_scaler,
         session->frame->width,
         session->frame->height,
         (enum AVPixelFormat)session->frame->format,
@@ -942,15 +947,15 @@ int32_t framescope_ffmpeg_copy_current_frame_rgba(
         NULL,
         NULL
     );
-    if (scaler == NULL) {
-        fs_set_error(error, FS_ERR_DECODER, AVERROR(ENOMEM), "failed to create RGBA conversion context");
+    if (session->rgba_scaler == NULL) {
+        fs_set_error(error, FS_ERR_DECODER, AVERROR(ENOMEM), "failed to create or reuse RGBA conversion context");
         return -1;
     }
 
     destination_data[0] = output;
     destination_linesize[0] = (int)stride;
     scaled_rows = sws_scale(
-        scaler,
+        session->rgba_scaler,
         (const uint8_t *const *)session->frame->data,
         session->frame->linesize,
         0,
@@ -958,7 +963,6 @@ int32_t framescope_ffmpeg_copy_current_frame_rgba(
         destination_data,
         destination_linesize
     );
-    sws_freeContext(scaler);
 
     if (scaled_rows != session->frame->height) {
         fs_set_error(error, FS_ERR_DECODER, 0, "FFmpeg did not convert the complete decoded frame to RGBA");
