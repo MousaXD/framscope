@@ -6,10 +6,12 @@ import com.framescope.app.data.ScrubPerformanceTelemetry
  * Bounds live-scrub work to one native request in flight plus one replaceable pending request.
  *
  * Newer submissions replace the single pending slot and make older results ineligible for
- * publication. Releasing the scrub gesture or replacing the source invalidates the current epoch
- * and returns the active request, if any, so callers can identify disposable work. Publication
- * fencing remains independent from native cancellation: a late native result is never allowed to
- * become visible even if cancellation is delayed or unsupported.
+ * publication. Repeated submissions for the same session/target reuse existing pending or in-flight
+ * work instead of creating redundant native decodes. Releasing the scrub gesture or replacing the
+ * source invalidates the current epoch and returns the active request, if any, so callers can
+ * identify disposable work. Publication fencing remains independent from native cancellation: a
+ * late native result is never allowed to become visible even if cancellation is delayed or
+ * unsupported.
  */
 internal class LiveScrubRequestGate {
     private var nextRequestId = 1L
@@ -27,6 +29,20 @@ internal class LiveScrubRequestGate {
             }
             is LiveScrubTarget.Timestamp -> Unit
         }
+
+        pending?.takeIf { it.sessionId == sessionId && it.target == target }?.let { existing ->
+            return existing
+        }
+        inFlight?.takeIf { it.sessionId == sessionId && it.target == target }?.let { existing ->
+            val replacedPending = pending != null
+            pending = null
+            latestRequestId = existing.requestId
+            if (replacedPending) {
+                ScrubPerformanceTelemetry.recordGateSubmission(replacedPending = true)
+            }
+            return existing
+        }
+
         val request = LiveScrubRequest(
             requestId = nextRequestId,
             epoch = epoch,
