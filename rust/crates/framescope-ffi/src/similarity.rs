@@ -12,7 +12,7 @@ use jni::sys::{jboolean, jlong, jstring};
 use serde::Serialize;
 use std::collections::HashMap;
 #[cfg(unix)]
-use std::os::fd::{BorrowedFd, BorrowedFd as _, RawFd};
+use std::os::fd::{BorrowedFd, RawFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
