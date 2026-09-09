@@ -403,8 +403,8 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
-            r#"\"message\":\"failed to serialize microscope response\"}"#,
+            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
+            r#""message":"failed to serialize microscope response"}"#,
         )
         .into()
     })
@@ -426,8 +426,8 @@ fn serialize_prepared_frame_response(
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
-            r#"\"message\":\"failed to serialize frame preparation response\"}"#,
+            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
+            r#""message":"failed to serialize frame preparation response"}"#,
         )
         .into()
     })
@@ -786,7 +786,7 @@ pub(crate) fn copy_prepared_frame(
         if destination.len() < pixels.len() {
             return Err(MicroscopeFailure::new(
                 "buffer_too_small",
-                "Android's direct frame buffer is smaller than the prepared RGBA payload",
+                "direct frame buffer is smaller than the prepared RGBA payload",
             ));
         }
         destination[..pixels.len()].copy_from_slice(pixels);
