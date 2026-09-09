@@ -126,6 +126,7 @@ class LiveScrubViewModelTest {
             return release.await()
         }
 
+        // This fixture exercises demand publication only; speculative work stays deliberately inert.
         override suspend fun prefetchFrame(sessionId: Long, frameId: Long): Boolean = false
 
         override fun cancelSession(sessionId: Long): Boolean = false
@@ -151,6 +152,7 @@ class LiveScrubViewModelTest {
             preview(sessionId = sessionId, frameId = frameId, timestampUs = frameId * 40_000L),
         )
 
+        // This fixture exercises demand publication only; speculative work stays deliberately inert.
         override suspend fun prefetchFrame(sessionId: Long, frameId: Long): Boolean = false
 
         override fun cancelSession(sessionId: Long): Boolean = false
