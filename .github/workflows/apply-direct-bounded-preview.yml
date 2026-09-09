@@ -1,0 +1,47 @@
+name: Apply direct bounded scrub preview patch
+
+on:
+  push:
+    branches:
+      - perf/direct-bounded-scrub-preview
+    paths:
+      - .github/workflows/apply-direct-bounded-preview.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: perf/direct-bounded-scrub-preview
+          fetch-depth: 0
+
+      - name: Apply source patch
+        run: python3 scripts/apply_direct_preview_patch.py
+
+      - name: Format Rust
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal --component rustfmt
+          cd rust
+          cargo +1.85.1 fmt --all
+
+      - name: Verify patch shape
+        run: |
+          git diff --check
+          git diff --stat
+          ! git diff --name-only | grep -Ev '^(rust/crates/framescope-ffmpeg/native/framescope_ffmpeg_shim.c|rust/crates/framescope-ffmpeg/src/lib.rs|rust/crates/framescope-video/src/(engine.rs|lib.rs|scrub_preview.rs|target_rgba_navigation.rs)|rust/crates/framescope-video/tests/rgba_fixtures.rs|rust/crates/framescope-ffi/src/scrub_handoff.rs)$'
+
+      - name: Commit source changes and remove helper
+        run: |
+          rm scripts/apply_direct_preview_patch.py
+          rm .github/workflows/apply-direct-bounded-preview.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Convert scrub misses directly to bounded RGBA'
+          git push origin HEAD:perf/direct-bounded-scrub-preview
