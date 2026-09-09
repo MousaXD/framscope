@@ -10,25 +10,96 @@ permissions:
   contents: write
 
 jobs:
-  rustfmt:
+  patch:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: perf/scrub-ram-acceleration
+      - name: Apply active native cancellation handoff
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/data/MicroscopePreviewBridge.kt",
+              """    fun forgetSession(sessionId: Long): Boolean\n}""",
+              """    fun cancelSession(sessionId: Long): Boolean\n\n    fun forgetSession(sessionId: Long): Boolean\n}""",
+          )
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/data/MicroscopePreviewBridge.kt",
+              """    @JvmStatic\n    private external fun nativeForgetMicroscopePreviewSession(sessionId: Long): Boolean\n""",
+              """    @JvmStatic\n    private external fun nativeCancelMicroscopePreviewSession(sessionId: Long): Boolean\n\n    @JvmStatic\n    private external fun nativeForgetMicroscopePreviewSession(sessionId: Long): Boolean\n""",
+          )
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/data/MicroscopePreviewBridge.kt",
+              """    override fun forgetSession(sessionId: Long): Boolean {\n        if (sessionId <= 0L || loadFailure != null) return false\n        return runCatching { nativeForgetMicroscopePreviewSession(sessionId) }.getOrDefault(false)\n    }\n""",
+              """    override fun cancelSession(sessionId: Long): Boolean {\n        if (sessionId <= 0L || loadFailure != null) return false\n        return runCatching { nativeCancelMicroscopePreviewSession(sessionId) }.getOrDefault(false)\n    }\n\n    override fun forgetSession(sessionId: Long): Boolean {\n        if (sessionId <= 0L || loadFailure != null) return false\n        return runCatching { nativeForgetMicroscopePreviewSession(sessionId) }.getOrDefault(false)\n    }\n""",
+          )
+
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/data/MicroscopeScrubPreviewSource.kt",
+              """    suspend fun forgetSession(sessionId: Long)\n}""",
+              """    fun cancelSession(sessionId: Long): Boolean\n\n    suspend fun forgetSession(sessionId: Long)\n}""",
+          )
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/data/MicroscopeScrubPreviewSource.kt",
+              """    override suspend fun forgetSession(sessionId: Long) = Unit\n}""",
+              """    override fun cancelSession(sessionId: Long): Boolean = false\n\n    override suspend fun forgetSession(sessionId: Long) = Unit\n}""",
+          )
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/data/MicroscopeScrubPreviewSource.kt",
+              """    override suspend fun forgetSession(sessionId: Long) {\n        if (sessionId <= 0L) return\n        withContext(ioDispatcher) {\n            bridge.forgetSession(sessionId)\n        }\n    }\n""",
+              """    override fun cancelSession(sessionId: Long): Boolean =\n        sessionId > 0L && bridge.cancelSession(sessionId)\n\n    override suspend fun forgetSession(sessionId: Long) {\n        if (sessionId <= 0L) return\n        withContext(ioDispatcher) {\n            bridge.forgetSession(sessionId)\n        }\n    }\n""",
+          )
+
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/ui/LiveScrubRequestGate.kt",
+              """    /** Returns work only when no native preview request is already running. */\n""",
+              """    /**\n     * Returns the active native request that [latest] superseded, if any.\n     *\n     * The caller may use this identity to cancel disposable native work immediately. Publication\n     * safety does not depend on cancellation succeeding; [finish] still fences stale results.\n     */\n    @Synchronized\n    fun cancellationForSupersededInFlight(latest: LiveScrubRequest): LiveScrubCancellation? {\n        val active = inFlight ?: return null\n        if (active.requestId == latest.requestId) return null\n        return LiveScrubCancellation(\n            sessionId = active.sessionId,\n            requestId = active.requestId,\n        )\n    }\n\n    /** Returns work only when no native preview request is already running. */\n""",
+          )
+
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/ui/MainViewModel.kt",
+              """    private fun enqueueLiveScrub(target: LiveScrubTarget) {\n        val ready = _uiState.value.microscopeState as? MicroscopeUiState.Ready ?: return\n        scrubGate.submit(ready.session.sessionId, target)\n        scrubSignal.trySend(Unit)\n    }\n""",
+              """    private fun enqueueLiveScrub(target: LiveScrubTarget) {\n        val ready = _uiState.value.microscopeState as? MicroscopeUiState.Ready ?: return\n        val request = scrubGate.submit(ready.session.sessionId, target)\n        scrubGate.cancellationForSupersededInFlight(request)?.let { cancellation ->\n            scrubPreviewSource.cancelSession(cancellation.sessionId)\n        }\n        scrubSignal.trySend(Unit)\n    }\n""",
+          )
+          replace_once(
+              "android/app/src/main/java/com/framescope/app/ui/MainViewModel.kt",
+              """    private fun invalidateLiveScrub(clearPreview: Boolean) {\n        scrubGate.invalidate()\n        if (clearPreview) {\n            _uiState.update { it.copy(scrubPreview = null) }\n        }\n    }\n""",
+              """    private fun invalidateLiveScrub(clearPreview: Boolean) {\n        scrubGate.invalidate()?.let { cancellation ->\n            scrubPreviewSource.cancelSession(cancellation.sessionId)\n        }\n        if (clearPreview) {\n            _uiState.update { it.copy(scrubPreview = null) }\n        }\n    }\n""",
+          )
+
+          replace_once(
+              "rust/crates/framescope-ffi/src/scrub_handoff.rs",
+              """#[unsafe(no_mangle)]\npub extern \"system\" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nativeForgetMicroscopePreviewSession(\n""",
+              """#[unsafe(no_mangle)]\npub extern \"system\" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nativeCancelMicroscopePreviewSession(\n    _env: JNIEnv,\n    _class: JClass,\n    session_id: jlong,\n) -> jboolean {\n    let cancelled =\n        catch_unwind(AssertUnwindSafe(|| cancel_session_preview(session_id))).unwrap_or(false);\n    if cancelled { 1 } else { 0 }\n}\n\n#[unsafe(no_mangle)]\npub extern \"system\" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nativeForgetMicroscopePreviewSession(\n""",
+          )
+
+          replace_once(
+              "android/app/src/test/java/com/framescope/app/ui/LiveScrubRequestGateTest.kt",
+              """    @Test\n    fun repeatedPendingTargetReusesRequestWithoutAddingWork() {\n""",
+              """    @Test\n    fun newerTargetIdentifiesObsoleteInFlightNativeWorkForCancellation() {\n        val gate = LiveScrubRequestGate()\n        val active = gate.submit(\n            sessionId = 41L,\n            target = LiveScrubTarget.Frame(8L),\n        )\n        assertEquals(active, gate.beginNext())\n\n        val latest = gate.submit(\n            sessionId = 41L,\n            target = LiveScrubTarget.Frame(9L),\n        )\n\n        assertEquals(\n            LiveScrubCancellation(sessionId = 41L, requestId = active.requestId),\n            gate.cancellationForSupersededInFlight(latest),\n        )\n        assertNull(gate.cancellationForSupersededInFlight(active))\n    }\n\n    @Test\n    fun repeatedPendingTargetReusesRequestWithoutAddingWork() {\n""",
+          )
+          PY
       - name: Install pinned Rust formatter
         run: rustup toolchain install 1.85.1 --profile minimal --component rustfmt
       - name: Format Rust workspace
         working-directory: rust
         run: cargo +1.85.1 fmt --all
-      - name: Commit formatting if needed
+      - name: Commit cancellation handoff
         run: |
-          if git diff --quiet; then
-            exit 0
-          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add rust
-          git commit -m 'style(agent4): rustfmt continuation changes'
+          git add android rust
+          git commit -m 'fix(agent4): cancel superseded native scrub work'
           git push origin HEAD:perf/scrub-ram-acceleration
