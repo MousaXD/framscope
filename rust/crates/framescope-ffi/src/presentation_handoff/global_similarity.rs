@@ -3,19 +3,25 @@ use framescope_group_navigation::timeline_global::{
     TimelineGlobalSimilarityDisposition, TimelineGlobalSimilarityError,
 };
 use framescope_group_navigation_video::open_or_build_global_similarity_from_fd_with_timeline;
+use framescope_video::CancellationToken;
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::{jboolean, jlong, jstring};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::ptr;
+use std::sync::{Mutex, OnceLock};
 
-use crate::{ENGINE_VERSION, cancel_operation, microscope, operation_token, to_jstring};
+use crate::{ENGINE_VERSION, microscope, to_jstring};
 
 const MAX_CACHE_ROOT_LENGTH: usize = 4_096;
 const MINIMUM_SIMILARITY: u16 = 9_300;
+const MAX_SIMILARITY_OPERATIONS: usize = 16;
+
+static SIMILARITY_TOKENS: OnceLock<Mutex<HashMap<i64, CancellationToken>>> = OnceLock::new();
 
 #[derive(Debug)]
 struct SimilaritySessionSnapshot {
@@ -38,6 +44,74 @@ impl SimilarityBridgeFailure {
             message: message.into(),
         }
     }
+}
+
+struct SimilarityOperation {
+    id: i64,
+}
+
+impl Drop for SimilarityOperation {
+    fn drop(&mut self) {
+        if let Ok(mut tokens) = similarity_tokens().lock() {
+            tokens.remove(&self.id);
+        }
+    }
+}
+
+fn similarity_tokens() -> &'static Mutex<HashMap<i64, CancellationToken>> {
+    SIMILARITY_TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn operation_token(
+    operation_id: i64,
+) -> Result<(CancellationToken, SimilarityOperation), SimilarityBridgeFailure> {
+    if operation_id <= 0 {
+        return Err(SimilarityBridgeFailure::new(
+            "invalid_request",
+            "similarity operation id must be positive",
+        ));
+    }
+    let mut tokens = similarity_tokens().lock().map_err(|_| {
+        SimilarityBridgeFailure::new(
+            "similarity_busy",
+            "similarity cancellation state is unavailable",
+        )
+    })?;
+    if tokens.len() >= MAX_SIMILARITY_OPERATIONS && !tokens.contains_key(&operation_id) {
+        tokens.retain(|_, token| !token.is_cancelled());
+    }
+    if tokens.len() >= MAX_SIMILARITY_OPERATIONS && !tokens.contains_key(&operation_id) {
+        return Err(SimilarityBridgeFailure::new(
+            "similarity_busy",
+            "too many similarity operations are active",
+        ));
+    }
+    let token = tokens
+        .entry(operation_id)
+        .or_insert_with(CancellationToken::new)
+        .clone();
+    Ok((token, SimilarityOperation { id: operation_id }))
+}
+
+fn cancel_similarity_operation(operation_id: i64) -> bool {
+    if operation_id <= 0 {
+        return false;
+    }
+    let Ok(mut tokens) = similarity_tokens().lock() else {
+        return false;
+    };
+    if tokens.len() >= MAX_SIMILARITY_OPERATIONS && !tokens.contains_key(&operation_id) {
+        tokens.retain(|_, token| !token.is_cancelled());
+    }
+    if tokens.len() >= MAX_SIMILARITY_OPERATIONS && !tokens.contains_key(&operation_id) {
+        return false;
+    }
+    let token = tokens
+        .entry(operation_id)
+        .or_insert_with(CancellationToken::new)
+        .clone();
+    token.cancel();
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -166,8 +240,7 @@ fn query_similarity(
     cache_root: &str,
 ) -> Result<SimilarityResultPayload, SimilarityBridgeFailure> {
     let target_frame = validate_request(session_id, target_frame_id, operation_id, cache_root)?;
-    let (cancellation, _operation) = operation_token(operation_id)
-        .map_err(|error| SimilarityBridgeFailure::new(error.code(), error.to_string()))?;
+    let (cancellation, _operation) = operation_token(operation_id)?;
     let snapshot = snapshot_session(session_id)?;
     if !snapshot.source_identity.is_reuse_safe() {
         return Err(SimilarityBridgeFailure::new(
@@ -337,8 +410,8 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopeSimilarityBridge_n
     _class: JClass,
     operation_id: jlong,
 ) -> jboolean {
-    let cancelled =
-        catch_unwind(AssertUnwindSafe(|| cancel_operation(operation_id))).unwrap_or(false);
+    let cancelled = catch_unwind(AssertUnwindSafe(|| cancel_similarity_operation(operation_id)))
+        .unwrap_or(false);
     if cancelled { 1 } else { 0 }
 }
 
@@ -362,5 +435,15 @@ mod tests {
     fn cancellation_error_has_stable_wire_code() {
         let failure = map_timeline_error(TimelineGlobalSimilarityError::Cancelled);
         assert_eq!(failure.code, "cancelled");
+    }
+
+    #[test]
+    fn cancellation_requested_before_native_start_is_preserved_and_removed_on_drop() {
+        let operation_id = 880_001;
+        assert!(cancel_similarity_operation(operation_id));
+        let (token, operation) = operation_token(operation_id).unwrap();
+        assert!(token.is_cancelled());
+        drop(operation);
+        assert!(!similarity_tokens().lock().unwrap().contains_key(&operation_id));
     }
 }
