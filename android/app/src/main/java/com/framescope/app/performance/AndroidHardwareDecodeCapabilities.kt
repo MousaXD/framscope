@@ -39,12 +39,12 @@ internal object AndroidHardwareDecodeCapabilities {
         MediaCodecList(MediaCodecList.ALL_CODECS)
             .codecInfos
             .asSequence()
-            .filterNot(MediaCodecInfo::isEncoder)
+            .filter { codecInfo -> !codecInfo.isEncoder }
             .flatMap { codecInfo ->
                 codecInfo.supportedTypes
                     .asSequence()
-                    .map(String::lowercase)
-                    .filter(targetMimeTypes::contains)
+                    .map { type -> type.lowercase() }
+                    .filter { type -> targetMimeTypes.contains(type) }
                     .mapNotNull { mime -> capability(codecInfo, mime) }
             }
             .sortedWith(compareBy(AndroidVideoDecoderCapability::mimeType, AndroidVideoDecoderCapability::codecName))
@@ -57,8 +57,18 @@ internal object AndroidHardwareDecodeCapabilities {
     fun preferredHardwareDecoder(
         mimeType: String,
         requireByteBufferOutput: Boolean,
+    ): AndroidVideoDecoderCapability? = selectPreferredHardwareDecoder(
+        candidates = discover(),
+        mimeType = mimeType,
+        requireByteBufferOutput = requireByteBufferOutput,
+    )
+
+    internal fun selectPreferredHardwareDecoder(
+        candidates: List<AndroidVideoDecoderCapability>,
+        mimeType: String,
+        requireByteBufferOutput: Boolean,
     ): AndroidVideoDecoderCapability? =
-        discover()
+        candidates
             .asSequence()
             .filter { capability -> capability.mimeType == mimeType.lowercase() }
             .filter { capability -> capability.acceleration == DecoderAccelerationClass.Hardware }
