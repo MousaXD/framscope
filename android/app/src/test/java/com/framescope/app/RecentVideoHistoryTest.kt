@@ -183,7 +183,7 @@ class RecentVideoHistoryTest {
     }
 
     @Test
-    fun indexOnlyReselectKeepsRecordIdButWaitsForVerifiedNewBinding() = runTest {
+    fun indexOnlyReselectUsesIndependentRecordIdUntilVerifiedBinding() = runTest {
         val catalog = FakeCatalog(listOf(descriptor("source-a", 0, 42)))
         val history = repository(MemoryStore(), catalog = catalog)
         val indexOnly = history.entries(refreshAccess = false).single()
@@ -195,7 +195,7 @@ class RecentVideoHistoryTest {
             permissionStatus = VideoUriPermissionStatus.Persisted,
         )
 
-        assertEquals(indexOnly.id, reselected.id)
+        assertTrue(indexOnly.id != reselected.id)
         assertEquals(RecentVideoIndexStatus.Unknown, reselected.indexStatus)
         assertNull(reselected.sourceIdentityKey)
         val beforeProof = history.entries(refreshAccess = false)
@@ -205,6 +205,7 @@ class RecentVideoHistoryTest {
         history.updateIndexBinding("content://provider/video", binding("source-a", 0, 42))
         val afterProof = history.entries(refreshAccess = false)
         assertEquals(1, afterProof.size)
+        assertEquals(reselected.id, afterProof.single().id)
         assertEquals("content://provider/video", afterProof.single().contentUri)
         assertEquals("source-a", afterProof.single().sourceIdentityKey)
     }
