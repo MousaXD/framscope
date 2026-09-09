@@ -1,5 +1,6 @@
 use framescope_cache::{
-    FrameScopeStorageStats, StorageAdmin, StorageAdminError, StorageClearReport, StorageClearScope,
+    FrameIndexCatalog, FrameIndexCatalogError, FrameScopeStorageStats, PersistentFrameIndexDescriptor,
+    StorageAdmin, StorageAdminError, StorageClearReport, StorageClearScope,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
@@ -50,6 +51,20 @@ enum StorageResponse {
         storage: FrameScopeStorageStats,
         #[serde(skip_serializing_if = "Option::is_none")]
         cleared: Option<StorageClearDetails>,
+    },
+    Error {
+        engine: &'static str,
+        code: &'static str,
+        message: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum IndexCatalogResponse {
+    Ok {
+        engine: &'static str,
+        indexes: Vec<PersistentFrameIndexDescriptor>,
     },
     Error {
         engine: &'static str,
@@ -128,6 +143,39 @@ fn stats_response(cache_root: &str) -> String {
         Err(InvalidCacheRoot) => invalid_cache_root_response(),
     };
     serialize_response(response)
+}
+
+fn index_catalog_response(cache_root: &str) -> String {
+    let response = if validate_cache_root(cache_root).is_err() {
+        IndexCatalogResponse::Error {
+            engine: ENGINE_VERSION,
+            code: "invalid_cache_root",
+            message: "FrameScope cache root is invalid".into(),
+        }
+    } else {
+        match FrameIndexCatalog::new(cache_root).entries() {
+            Ok(indexes) => IndexCatalogResponse::Ok {
+                engine: ENGINE_VERSION,
+                indexes,
+            },
+            Err(error) => {
+                let code = match &error {
+                    FrameIndexCatalogError::RootIsSymlink(_) => "unsafe_cache_root",
+                    FrameIndexCatalogError::Io { .. } => "storage_io",
+                };
+                IndexCatalogResponse::Error {
+                    engine: ENGINE_VERSION,
+                    code,
+                    message: error.to_string(),
+                }
+            }
+        }
+    };
+    serde_json::to_string(&response).unwrap_or_else(|_| {
+        format!(
+            "{{\"status\":\"error\",\"engine\":\"{ENGINE_VERSION}\",\"code\":\"bridge_error\",\"message\":\"failed to serialize frame-index catalog\"}}"
+        )
+    })
 }
 
 fn with_destructive_access(operation: impl FnOnce() -> StorageResponse) -> StorageResponse {
@@ -216,6 +264,15 @@ fn panic_response() -> String {
     })
 }
 
+fn panic_catalog_response() -> String {
+    serde_json::to_string(&IndexCatalogResponse::Error {
+        engine: ENGINE_VERSION,
+        code: "bridge_error",
+        message: "native frame-index catalog aborted safely after an internal panic".into(),
+    })
+    .unwrap_or_else(|_| "{\"status\":\"error\",\"code\":\"bridge_error\"}".into())
+}
+
 fn jstring_value(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, ()> {
     env.get_string(&value)
         .map(|value| value.into())
@@ -234,6 +291,21 @@ pub extern "system" fn Java_com_framescope_app_data_FrameScopeStorageBridge_nati
     };
     let json = catch_unwind(AssertUnwindSafe(|| stats_response(&cache_root)))
         .unwrap_or_else(|_| panic_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeIndexCatalog(
+    mut env: JNIEnv,
+    _class: JClass,
+    cache_root: JString,
+) -> jstring {
+    let cache_root = match jstring_value(&mut env, cache_root) {
+        Ok(value) => value,
+        Err(()) => return ptr::null_mut(),
+    };
+    let json = catch_unwind(AssertUnwindSafe(|| index_catalog_response(&cache_root)))
+        .unwrap_or_else(|_| panic_catalog_response());
     to_jstring(&mut env, &json)
 }
 
@@ -291,6 +363,8 @@ mod tests {
     fn invalid_root_fails_before_touching_storage() {
         let json = stats_response("");
         assert!(json.contains("invalid_cache_root"));
+        let catalog_json = index_catalog_response("");
+        assert!(catalog_json.contains("invalid_cache_root"));
     }
 
     #[test]
@@ -312,6 +386,7 @@ mod tests {
     fn wave1_storage_and_live_scrub_exports_are_linked_together() {
         let _storage_stats =
             Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats;
+        let _index_catalog = Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeIndexCatalog;
         let _preview_frame = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewFrame;
         let _preview_timestamp = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewTimestampUs;
     }
