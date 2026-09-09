@@ -32,20 +32,12 @@ jobs:
                   raise SystemExit(f'{label}: expected one match, found {count}')
               return text.replace(old, new, 1)
 
-          # Bounded navigation owns only exact decode/materialization. Full-quality RAM lookup
-          # belongs to the FFI orchestration layer so expensive downscale never runs under the
-          # authoritative microscope-session lock.
           target = Path('rust/crates/framescope-video/src/target_rgba_navigation.rs')
           text = target.read_text()
           start = text.index('pub fn navigate_to_frame_bounded_preview_with_cursor<D, F>(')
           end = text.index('fn navigate_target_preview_retained<D, F>(', start)
           body = text[start:end]
-          body = replace_once(
-              body,
-              '    cache: &mut FrameCacheHierarchy,\n',
-              '',
-              'bounded cache parameter',
-          )
+          body = replace_once(body, '    cache: &mut FrameCacheHierarchy,\n', '', 'bounded cache parameter')
           key_start = body.index('    let key = match FrameCacheKey::new(')
           can_start = body.index('    let can_continue = cursor', key_start)
           body = body[:key_start] + body[can_start:]
@@ -54,19 +46,11 @@ jobs:
           body = body[:ram_start] + body[decoded_start:]
           text = text[:start] + body + text[end:]
 
-          # Update the focused test call to the new cache-independent bounded decode API.
-          test_marker = 'fn bounded_preview_miss_never_populates_full_quality_cache()'
-          test_start = text.index(test_marker)
-          call_start = text.index('navigate_to_frame_bounded_preview_with_cursor(', test_start)
-          call_end = text.index(')', call_start)
-          call = text[call_start:call_end]
-          call = replace_once(
-              call,
-              '            &mut cache,\n',
-              '',
-              'bounded test cache argument',
-          )
-          text = text[:call_start] + call + text[call_end:]
+          test_start = text.index('fn bounded_preview_miss_never_populates_full_quality_cache()')
+          test_end = text.index('        drop(index);', test_start)
+          test_body = text[test_start:test_end]
+          test_body = replace_once(test_body, '            &mut cache,\n', '', 'bounded test cache argument')
+          text = text[:test_start] + test_body + text[test_end:]
           target.write_text(text)
 
           ffi = Path('rust/crates/framescope-ffi/src/scrub_handoff.rs')
@@ -84,7 +68,7 @@ jobs:
               'ffi video imports',
           )
 
-          insertion_marker = '#[cfg(unix)]\nfn render_preview('
+          render_marker = '#[cfg(unix)]\nfn render_preview('
           helper = '''#[cfg(unix)]
           fn source_quality_ram_hit(
               session_id: i64,
@@ -99,9 +83,7 @@ jobs:
                   ) {
                       Ok(key) => key,
                       Err(FrameCacheError::UnsafeSourceIdentity) => return Ok(None),
-                      Err(error) => {
-                          return Err(PreviewFailure::new("cache_error", error.to_string()));
-                      }
+                      Err(error) => return Err(PreviewFailure::new("cache_error", error.to_string())),
                   };
                   let mut state = state.lock().map_err(|_| {
                       PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
@@ -112,24 +94,17 @@ jobs:
           }
 
           '''
-          if text.count(insertion_marker) != 1:
-              raise SystemExit('render_preview insertion marker is not unique')
-          text = text.replace(insertion_marker, helper + insertion_marker, 1)
+          text = replace_once(text, render_marker, helper + render_marker, 'render helper insertion')
 
-          preview_miss_marker = '''    if let Some(preview) = cached_preview {
-              ensure_not_cancelled(&cancellation)?;
-              return finish_preview(
-                  session_id,
-                  frame_id,
-                  timestamp_us,
-                  preview,
-                  "preview_ram",
-                  0,
-                  destination,
-              );
-          }
+          render_start = text.index(render_marker)
+          render_end = text.index('#[cfg(not(unix))]\nfn render_preview(', render_start)
+          render = text[render_start:render_end]
 
+          old_comment = '''    // Only source-cache lookup/decode needs the authoritative source/index borrow. The shared RAM
+              // hierarchy means exact navigation and scrub can hit the same immutable RGBA allocation. The
+              // session lock is released before downscaling, preview-cache insertion, and JNI buffer copy.
           '''
+          comment_pos = render.index(old_comment)
           ram_path = '''    ensure_not_cancelled(&cancellation)?;
           if let Some(source_pixels) = source_quality_ram_hit(session_id, frame_id, &state)? {
               ensure_not_cancelled(&cancellation)?;
@@ -154,77 +129,34 @@ jobs:
           }
 
           '''
-          if text.count(preview_miss_marker) != 1:
-              raise SystemExit('preview-cache hit block is not unique')
-          text = text.replace(preview_miss_marker, preview_miss_marker + ram_path, 1)
-
-          text = replace_once(
-              text,
-              '''    // Only source-cache lookup/decode needs the authoritative source/index borrow. The shared RAM
-              // hierarchy means exact navigation and scrub can hit the same immutable RGBA allocation. The
-              // session lock is released before downscaling, preview-cache insertion, and JNI buffer copy.
-          ''',
+          render = render[:comment_pos] + ram_path + render[comment_pos:]
+          render = replace_once(
+              render,
+              old_comment,
               '''    // A source-quality RAM hit was already handled above and scaled outside the authoritative
               // microscope lock. Only an actual preview miss re-enters the source/index borrow for exact
               // metadata reconciliation plus direct bounded native conversion.
           ''',
               'render lock comment',
           )
-
-          # Patch only the interactive bounded call, not the later full-quality prefetch call.
-          bounded_call_start = text.index('navigate_to_frame_bounded_preview_with_cursor(')
-          bounded_call_end = text.index(')', bounded_call_start)
-          bounded_call = text[bounded_call_start:bounded_call_end]
-          bounded_call = replace_once(
-              bounded_call,
-              '            source_cache,\n',
-              '',
-              'interactive bounded cache argument',
-          )
-          text = text[:bounded_call_start] + bounded_call + text[bounded_call_end:]
-
-          # The interactive closure no longer borrows source_cache; background prefetch retains its
-          # separate full-quality destructuring later in the file.
-          first_destructure = '''        let ScrubSessionState {
+          render = replace_once(
+              render,
+              '''        let ScrubSessionState {
               source_cache,
               decoder_cursor,
               ..
           } = &mut *state;
-          navigate_to_frame_bounded_preview_with_cursor(
-          '''
-          replacement = '''        let ScrubSessionState { decoder_cursor, .. } = &mut *state;
-          navigate_to_frame_bounded_preview_with_cursor(
-          '''
-          text = replace_once(text, first_destructure, replacement, 'interactive state destructure')
+          ''',
+              '        let ScrubSessionState { decoder_cursor, .. } = &mut *state;\n',
+              'interactive state destructure',
+          )
+          render = replace_once(render, '            source_cache,\n', '', 'interactive bounded cache argument')
 
-          old_source = '''    let source = match navigated.source {
-              CachedFrameSource::Ram => "source_ram",
-              CachedFrameSource::Decoded => "decoded",
-          };
-          let decoded_frames = navigated.decoded_frames;
-          '''
-          text = replace_once(
-              text,
-              old_source,
-              '    let decoded_frames = navigated.decoded_frames;\n',
-              'interactive source match',
-          )
-          text = replace_once(
-              text,
-              '''        preview,
-                  source,
-                  decoded_frames,
-                  destination,
-              )
-          ''',
-              '''        preview,
-                  "decoded",
-                  decoded_frames,
-                  destination,
-              )
-          ''',
-              'interactive finish source',
-          )
+          source_start = render.index('    let source = match navigated.source {')
+          decoded_line = render.index('    let decoded_frames = navigated.decoded_frames;', source_start)
+          render = render[:source_start] + render[decoded_line:]
+          render = replace_once(render, '        source,\n', '        "decoded",\n', 'interactive finish source')
+          text = text[:render_start] + render + text[render_end:]
           ffi.write_text(text)
           PY
 
