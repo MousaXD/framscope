@@ -362,9 +362,15 @@ fn color_bucket_components(bucket: u16) -> [i32; 3] {
 fn nearby_color_buckets(bucket: u16) -> Vec<u16> {
     let [red, green, blue] = color_bucket_components(bucket);
     let mut buckets = Vec::with_capacity(125);
-    for r in (red - COLOR_BUCKET_RADIUS).max(0)..=(red + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX) {
-        for g in (green - COLOR_BUCKET_RADIUS).max(0)..=(green + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX) {
-            for b in (blue - COLOR_BUCKET_RADIUS).max(0)..=(blue + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX) {
+    for r in (red - COLOR_BUCKET_RADIUS).max(0)
+        ..=(red + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX)
+    {
+        for g in (green - COLOR_BUCKET_RADIUS).max(0)
+            ..=(green + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX)
+        {
+            for b in (blue - COLOR_BUCKET_RADIUS).max(0)
+                ..=(blue + COLOR_BUCKET_RADIUS).min(COLOR_BUCKET_COMPONENT_MAX)
+            {
                 buckets.push((r as u16) | ((g as u16) << 5) | ((b as u16) << 10));
             }
         }
@@ -558,12 +564,7 @@ impl GlobalSimilarityStore {
                 |row| row.get::<_, i64>(0),
             )?;
             for row in rows {
-                collect_candidate(
-                    row?,
-                    target_frame,
-                    expected_frame_count,
-                    &mut candidate_ids,
-                )?;
+                collect_candidate(row?, target_frame, expected_frame_count, &mut candidate_ids)?;
             }
         }
 
