@@ -25,7 +25,12 @@ pub use identity::{
 pub use index::{
     FRAME_INDEX_SCHEMA_VERSION, FRAME_TIMELINE_CONTRACT_GENERATION, FrameId, FrameIndex,
     FrameIndexEntry, FrameIndexError, FrameIndexLifecycle, FrameIndexOpenDisposition,
-    FrameIndexStatus, FrameIndexStreamIdentity, KeyframeAnchor, TimestampSeekSafety,
+    FrameIndexStatus, FrameIndexStreamIdentity, KeyframeAnchor, PROGRESSIVE_INDEX_SCHEMA_VERSION,
+    ProgressiveFrameIndex, ProgressiveIndexError, ProgressiveIndexLayer,
+    ProgressiveIndexOpenDisposition, ProgressiveLayerLifecycle, ProgressiveLayerStatus,
+    STRUCTURAL_INDEX_GENERATION, SimilarityFingerprintStatus, StructuralAnchor,
+    StructuralAnchorKind, TimestampSeekSafety, VISUAL_INDEX_GENERATION, VisualArtifactKind,
+    VisualArtifactMetadata,
 };
 pub use storage_admin::{
     FRAME_INDEX_NAMESPACE, FrameScopeStorageStats, PREVIEW_PROXY_NAMESPACE, StorageAdmin,
