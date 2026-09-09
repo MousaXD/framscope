@@ -248,6 +248,7 @@ mod tests {
     use framescope_similarity_store::global::GlobalSimilarityPolicy;
     use std::cell::Cell;
     use std::collections::VecDeque;
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
