@@ -1,3 +1,5 @@
+mod global_similarity;
+
 use framescope_video::MicroscopeFramePresentation;
 use std::fmt;
 
