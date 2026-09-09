@@ -1,9 +1,11 @@
 package com.framescope.app.data
 
+import android.os.Trace
 import java.nio.ByteBuffer
 import org.json.JSONObject
 
 private const val MAX_PRESENTATION_RGBA_BYTES = 256L * 1024L * 1024L
+private const val TRACE_FRAME_JNI = "FrameScope.pixels.frame_jni"
 
 /** Operation counters emitted by the authoritative exact-navigation engine. */
 data class ExactNavigationDiagnostics(
@@ -172,14 +174,28 @@ object MicroscopeFrameBridge : NativeMicroscopeFrameBridge {
                 message = "Android could not allocate memory for this frame.",
             )
         }
-        val copied = runCatching {
-            nativeCopyMicroscopeFrameRgba(frame.sessionId, frame.generation, destination)
-        }.getOrElse {
-            return NativeFrameCopy.Failure(
-                code = "jni_error",
-                message = "Rust frame copy failed: ${it.message ?: it::class.java.simpleName}",
-            )
+        PixelTransportTelemetry.recordAuthoritativeBufferAllocation(frame.byteLen)
+        val started = System.nanoTime()
+        val traceStarted = runCatching {
+            Trace.beginSection(TRACE_FRAME_JNI)
+            true
+        }.getOrDefault(false)
+        val copied = try {
+            runCatching {
+                nativeCopyMicroscopeFrameRgba(frame.sessionId, frame.generation, destination)
+            }.getOrElse {
+                return NativeFrameCopy.Failure(
+                    code = "jni_error",
+                    message = "Rust frame copy failed: ${it.message ?: it::class.java.simpleName}",
+                )
+            }
+        } finally {
+            if (traceStarted) runCatching { Trace.endSection() }
         }
+        PixelTransportTelemetry.recordAuthoritativeJniCopy(
+            bytes = copied.coerceAtLeast(0L),
+            jniUs = elapsedUs(started),
+        )
         return interpretCopyResult(frame, destination, copied)
     }
 
@@ -304,6 +320,9 @@ object MicroscopeFrameBridge : NativeMicroscopeFrameBridge {
         )
         else -> NativeFrameCopy.Failure("bridge_error", "Native frame copy failed safely.")
     }
+
+    private fun elapsedUs(startedNanos: Long): Long =
+        ((System.nanoTime() - startedNanos).coerceAtLeast(0L)) / 1_000L
 
     private fun JSONObject.optionalString(key: String): String? =
         if (!has(key) || isNull(key)) null else getString(key).trim().takeIf(String::isNotEmpty)

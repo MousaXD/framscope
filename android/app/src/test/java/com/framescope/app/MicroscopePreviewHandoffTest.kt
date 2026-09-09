@@ -4,6 +4,7 @@ import com.framescope.app.data.MicroscopePreviewBridge
 import com.framescope.app.data.NativeMicroscopePreview
 import java.nio.ByteBuffer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -25,10 +26,11 @@ class MicroscopePreviewHandoffTest {
         assertEquals(123_456L, result.preview.descriptor.timestampUs)
         assertEquals("decoded", result.preview.descriptor.source)
         assertEquals(3L, result.preview.descriptor.decodedFrames)
-        assertTrue(result.preview.rgba.isDirect)
-        assertTrue(result.preview.rgba.isReadOnly)
-        assertEquals(0, result.preview.rgba.position())
-        assertEquals(16, result.preview.rgba.limit())
+        val rgba = assertNotNull(result.preview.rgba).let { result.preview.rgba!! }
+        assertTrue(rgba.isDirect)
+        assertTrue(rgba.isReadOnly)
+        assertEquals(0, rgba.position())
+        assertEquals(16, rgba.limit())
     }
 
     @Test
