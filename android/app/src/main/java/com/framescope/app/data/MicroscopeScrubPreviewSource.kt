@@ -58,15 +58,16 @@ class AndroidMicroscopeScrubPreviewSource(
         selection: TimestampSelectionPolicy,
     ): Result<MicroscopeScrubPreview> = withContext(ioDispatcher) {
         currentCoroutineContext().ensureActive()
-        bridgeResult(
+        val nativeResult = ScrubPerformanceTelemetry.measureRender {
             bridge.renderTimestamp(
                 sessionId = sessionId,
                 timestampUs = timestampUs,
                 selection = selection,
                 cacheRoot = cacheRoot,
-            ),
-            expectedSessionId = sessionId,
-        )
+            )
+        }
+        currentCoroutineContext().ensureActive()
+        bridgeResult(nativeResult, expectedSessionId = sessionId)
     }
 
     override suspend fun renderFrame(
@@ -74,14 +75,15 @@ class AndroidMicroscopeScrubPreviewSource(
         frameId: Long,
     ): Result<MicroscopeScrubPreview> = withContext(ioDispatcher) {
         currentCoroutineContext().ensureActive()
-        bridgeResult(
+        val nativeResult = ScrubPerformanceTelemetry.measureRender {
             bridge.renderFrame(
                 sessionId = sessionId,
                 frameId = frameId,
                 cacheRoot = cacheRoot,
-            ),
-            expectedSessionId = sessionId,
-        )
+            )
+        }
+        currentCoroutineContext().ensureActive()
+        bridgeResult(nativeResult, expectedSessionId = sessionId)
     }
 
     override suspend fun forgetSession(sessionId: Long) {
