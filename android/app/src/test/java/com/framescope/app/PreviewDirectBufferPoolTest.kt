@@ -57,4 +57,34 @@ class PreviewDirectBufferPoolTest {
         assertTrue(large.allocated)
         large.close()
     }
+
+    @Test
+    fun largerReturnedBufferReplacesSmallerRetainedCapacity() {
+        val pool = PreviewDirectBufferPool(maxRetainedBuffers = 1)
+        val small = pool.borrow(64)
+        small.close()
+
+        val large = pool.borrow(256)
+        val largeBuffer = large.buffer
+        large.close()
+
+        val reused = pool.borrow(128)
+        assertSame(largeBuffer, reused.buffer)
+        assertFalse(reused.allocated)
+        reused.close()
+    }
+
+    @Test
+    fun zeroRetentionPoolNeverPublishesAClosedLeaseForReuse() {
+        val pool = PreviewDirectBufferPool(maxRetainedBuffers = 0)
+        val first = pool.borrow(64)
+        val firstBuffer = first.buffer
+        first.close()
+
+        assertEquals(0, pool.retainedCountForTest())
+        val second = pool.borrow(64)
+        assertNotSame(firstBuffer, second.buffer)
+        assertTrue(second.allocated)
+        second.close()
+    }
 }
