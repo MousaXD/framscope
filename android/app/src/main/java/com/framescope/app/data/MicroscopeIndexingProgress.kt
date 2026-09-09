@@ -1,5 +1,6 @@
 package com.framescope.app.data
 
+import com.framescope.app.performance.FrameScopePerformanceRuntime
 import org.json.JSONObject
 
 enum class MicroscopeIndexingStage(
@@ -119,7 +120,13 @@ object RustMicroscopeIndexingProgressSource : MicroscopeIndexingProgressSource {
                 "Rust engine returned a null indexing progress response."
             }
             val parsed = parseResponse(raw, operationId)
-            Result.success(freshness.onSuccess(operationId, parsed))
+            val fresh = freshness.onSuccess(operationId, parsed)
+            fresh?.let { progress ->
+                // Performance scheduling is observational with respect to progress transport. Any
+                // platform-specific failure must not turn valid native progress into a UI failure.
+                runCatching { FrameScopePerformanceRuntime.onIndexingProgress(progress) }
+            }
+            Result.success(fresh)
         } catch (error: Throwable) {
             val stale = freshness.onFailure(operationId)
             if (stale != null) Result.success(stale) else Result.failure(error)
