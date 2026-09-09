@@ -1,5 +1,6 @@
 package com.framescope.app.ui
 
+import android.os.Build
 import android.os.Trace
 import android.util.Log
 import java.util.concurrent.atomic.AtomicLong
@@ -227,9 +228,10 @@ internal object ScrubUxTelemetry {
         pendingExactSettle.set(null)
     }
 
-    @Suppress("NewApi")
     private fun traceCounter(name: String, value: Long) {
-        runCatching { Trace.setCounter(name, value) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && Trace.isEnabled()) {
+            Trace.setCounter(name, value)
+        }
     }
 
     private fun debugLog(message: String) {
