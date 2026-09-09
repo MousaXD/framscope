@@ -33,7 +33,8 @@ struct SharedRamRegistration {
     cache: Weak<Mutex<RamFrameCache>>,
 }
 
-static SHARED_RAM_CACHES: OnceLock<Mutex<HashMap<PathBuf, SharedRamRegistration>>> = OnceLock::new();
+static SHARED_RAM_CACHES: OnceLock<Mutex<HashMap<PathBuf, SharedRamRegistration>>> =
+    OnceLock::new();
 
 fn shared_ram_registry() -> &'static Mutex<HashMap<PathBuf, SharedRamRegistration>> {
     SHARED_RAM_CACHES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -144,17 +145,16 @@ impl FrameCacheHierarchy {
     /// Set the persistent desired RAM budget for a cache namespace and synchronously trim any live
     /// hierarchy sharing it. The desired value survives periods with no open hierarchy, so Off and
     /// Custom modes remain effective when the next video session opens.
-    pub fn configure_shared_ram_budget(
-        disk_root: impl AsRef<Path>,
-        ram_budget_bytes: usize,
-    ) {
+    pub fn configure_shared_ram_budget(disk_root: impl AsRef<Path>, ram_budget_bytes: usize) {
         let root = disk_root.as_ref().to_path_buf();
         let mut registry = lock_registry();
-        let entry = registry.entry(root).or_insert_with(|| SharedRamRegistration {
-            desired_budget_bytes: ram_budget_bytes,
-            explicitly_configured: true,
-            cache: Weak::new(),
-        });
+        let entry = registry
+            .entry(root)
+            .or_insert_with(|| SharedRamRegistration {
+                desired_budget_bytes: ram_budget_bytes,
+                explicitly_configured: true,
+                cache: Weak::new(),
+            });
         entry.desired_budget_bytes = ram_budget_bytes;
         entry.explicitly_configured = true;
         let live = entry.cache.upgrade();
@@ -344,7 +344,10 @@ mod tests {
         let mut exact = FrameCacheHierarchy::open(&root, 64, 0).unwrap();
         let mut scrub = FrameCacheHierarchy::open(&root, 0, 0).unwrap();
 
-        assert_eq!(exact.insert_full(rgba_frame(key.clone())), RamInsertResult::Inserted);
+        assert_eq!(
+            exact.insert_full(rgba_frame(key.clone())),
+            RamInsertResult::Inserted
+        );
         assert!(scrub.lookup_full(&key).is_some());
         assert_eq!(scrub.stats().ram.resident_frames, 1);
         assert_eq!(scrub.ram_budget_bytes(), 64);
@@ -382,7 +385,10 @@ mod tests {
         let mut cache = FrameCacheHierarchy::open(&root, 1024, 0).unwrap();
 
         assert_eq!(cache.ram_budget_bytes(), 0);
-        assert_eq!(cache.insert_full(rgba_frame(key)), RamInsertResult::TooLarge);
+        assert_eq!(
+            cache.insert_full(rgba_frame(key)),
+            RamInsertResult::TooLarge
+        );
         let _ = fs::remove_dir_all(root);
     }
 
