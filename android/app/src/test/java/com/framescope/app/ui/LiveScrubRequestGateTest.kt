@@ -45,6 +45,27 @@ class LiveScrubRequestGateTest {
     }
 
     @Test
+    fun newerTargetIdentifiesObsoleteInFlightNativeWorkForCancellation() {
+        val gate = LiveScrubRequestGate()
+        val active = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(8L),
+        )
+        assertEquals(active, gate.beginNext())
+
+        val latest = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+
+        assertEquals(
+            LiveScrubCancellation(sessionId = 41L, requestId = active.requestId),
+            gate.cancellationForSupersededInFlight(latest),
+        )
+        assertNull(gate.cancellationForSupersededInFlight(active))
+    }
+
+    @Test
     fun repeatedPendingTargetReusesRequestWithoutAddingWork() {
         val gate = LiveScrubRequestGate()
         val first = gate.submit(

@@ -604,7 +604,10 @@ class MainViewModel(
 
     private fun enqueueLiveScrub(target: LiveScrubTarget) {
         val ready = _uiState.value.microscopeState as? MicroscopeUiState.Ready ?: return
-        scrubGate.submit(ready.session.sessionId, target)
+        val request = scrubGate.submit(ready.session.sessionId, target)
+        scrubGate.cancellationForSupersededInFlight(request)?.let { cancellation ->
+            scrubPreviewSource.cancelSession(cancellation.sessionId)
+        }
         scrubSignal.trySend(Unit)
     }
 
@@ -651,7 +654,9 @@ class MainViewModel(
     }
 
     private fun invalidateLiveScrub(clearPreview: Boolean) {
-        scrubGate.invalidate()
+        scrubGate.invalidate()?.let { cancellation ->
+            scrubPreviewSource.cancelSession(cancellation.sessionId)
+        }
         if (clearPreview) {
             _uiState.update { it.copy(scrubPreview = null) }
         }

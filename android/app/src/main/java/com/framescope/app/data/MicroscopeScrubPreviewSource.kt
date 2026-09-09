@@ -18,6 +18,8 @@ interface MicroscopeScrubPreviewSource {
         frameId: Long,
     ): Result<MicroscopeScrubPreview>
 
+    fun cancelSession(sessionId: Long): Boolean
+
     suspend fun forgetSession(sessionId: Long)
 }
 
@@ -39,6 +41,8 @@ object UnsupportedMicroscopeScrubPreviewSource : MicroscopeScrubPreviewSource {
         sessionId: Long,
         frameId: Long,
     ): Result<MicroscopeScrubPreview> = unsupported()
+
+    override fun cancelSession(sessionId: Long): Boolean = false
 
     override suspend fun forgetSession(sessionId: Long) = Unit
 }
@@ -85,6 +89,9 @@ class AndroidMicroscopeScrubPreviewSource(
         currentCoroutineContext().ensureActive()
         bridgeResult(nativeResult, expectedSessionId = sessionId)
     }
+
+    override fun cancelSession(sessionId: Long): Boolean =
+        sessionId > 0L && bridge.cancelSession(sessionId)
 
     override suspend fun forgetSession(sessionId: Long) {
         if (sessionId <= 0L) return

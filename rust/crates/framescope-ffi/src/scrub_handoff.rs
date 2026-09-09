@@ -347,6 +347,17 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nati
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nativeCancelMicroscopePreviewSession(
+    _env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+) -> jboolean {
+    let cancelled =
+        catch_unwind(AssertUnwindSafe(|| cancel_session_preview(session_id))).unwrap_or(false);
+    if cancelled { 1 } else { 0 }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nativeForgetMicroscopePreviewSession(
     _env: JNIEnv,
     _class: JClass,

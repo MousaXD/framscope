@@ -57,6 +57,22 @@ internal class LiveScrubRequestGate {
         return request
     }
 
+    /**
+     * Returns the active native request that [latest] superseded, if any.
+     *
+     * The caller may use this identity to cancel disposable native work immediately. Publication
+     * safety does not depend on cancellation succeeding; [finish] still fences stale results.
+     */
+    @Synchronized
+    fun cancellationForSupersededInFlight(latest: LiveScrubRequest): LiveScrubCancellation? {
+        val active = inFlight ?: return null
+        if (active.requestId == latest.requestId) return null
+        return LiveScrubCancellation(
+            sessionId = active.sessionId,
+            requestId = active.requestId,
+        )
+    }
+
     /** Returns work only when no native preview request is already running. */
     @Synchronized
     fun beginNext(): LiveScrubRequest? {

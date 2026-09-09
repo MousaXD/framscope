@@ -72,6 +72,8 @@ interface NativeMicroscopePreviewBridge {
         maxEdge: Int = DEFAULT_SCRUB_PREVIEW_MAX_EDGE,
     ): NativeMicroscopePreview
 
+    fun cancelSession(sessionId: Long): Boolean
+
     fun forgetSession(sessionId: Long): Boolean
 }
 
@@ -99,6 +101,9 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
         cacheRoot: String,
         destination: ByteBuffer,
     ): String?
+
+    @JvmStatic
+    private external fun nativeCancelMicroscopePreviewSession(sessionId: Long): Boolean
 
     @JvmStatic
     private external fun nativeForgetMicroscopePreviewSession(sessionId: Long): Boolean
@@ -142,6 +147,11 @@ object MicroscopePreviewBridge : NativeMicroscopePreviewBridge {
                 destination,
             )
         }
+    }
+
+    override fun cancelSession(sessionId: Long): Boolean {
+        if (sessionId <= 0L || loadFailure != null) return false
+        return runCatching { nativeCancelMicroscopePreviewSession(sessionId) }.getOrDefault(false)
     }
 
     override fun forgetSession(sessionId: Long): Boolean {
