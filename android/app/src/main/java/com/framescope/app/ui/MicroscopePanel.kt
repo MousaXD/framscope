@@ -30,6 +30,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -51,6 +52,7 @@ private sealed interface MicroscopePreviewState {
     data class Ready(
         val bitmap: Bitmap,
         val plan: MicroscopePreviewPlan,
+        val sessionId: Long,
         val frameId: Long,
         val liveScrub: Boolean,
     ) : MicroscopePreviewState
@@ -224,7 +226,26 @@ private fun MicroscopeFrameCard(
                                     direction > 0 && session.canStepNext -> onStep(1)
                                 }
                             },
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .drawWithContent {
+                                    drawContent()
+                                    val drawnAtNanos = System.nanoTime()
+                                    if (current.liveScrub) {
+                                        ScrubUxTelemetry.recordPreviewPresented(
+                                            sessionId = current.sessionId,
+                                            presentedAtNanos = drawnAtNanos,
+                                        )
+                                    } else if (controlsEnabled) {
+                                        // Navigating keeps the previous authoritative frame visible
+                                        // with controls disabled. Only the new Ready frame may close
+                                        // the finger-up exact-settle sample.
+                                        ScrubUxTelemetry.completeExactSettle(
+                                            sessionId = current.sessionId,
+                                            completedAtNanos = drawnAtNanos,
+                                        )
+                                    }
+                                },
                         )
                     }
                 }
@@ -413,6 +434,7 @@ private suspend fun MicroscopeFrame.toBoundedPreview(): MicroscopePreviewState {
         height = metadata.height,
         strideBytes = metadata.strideBytes,
         rgba = rgba,
+        sessionId = metadata.sessionId,
         frameId = metadata.frameId,
         liveScrub = false,
         errorMessage = "The authoritative frame could not be converted for display.",
@@ -429,6 +451,7 @@ private suspend fun MicroscopeScrubPreview.toBoundedPreview(): MicroscopePreview
         height = metadata.height,
         strideBytes = metadata.strideBytes,
         rgba = rgba,
+        sessionId = metadata.sessionId,
         frameId = metadata.frameId,
         liveScrub = true,
         errorMessage = "The live timeline preview could not be converted for display.",
@@ -440,6 +463,7 @@ private suspend fun rgbaToBoundedPreview(
     height: Int,
     strideBytes: Long,
     rgba: ByteBuffer,
+    sessionId: Long,
     frameId: Long,
     liveScrub: Boolean,
     errorMessage: String,
@@ -484,6 +508,7 @@ private suspend fun rgbaToBoundedPreview(
         return MicroscopePreviewState.Ready(
             bitmap = bitmap,
             plan = plan,
+            sessionId = sessionId,
             frameId = frameId,
             liveScrub = liveScrub,
         )
