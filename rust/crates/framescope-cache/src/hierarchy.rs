@@ -173,7 +173,8 @@ impl FrameCacheHierarchy {
                 .get(disk_root.as_ref())
                 .and_then(|entry| entry.cache.upgrade())
         };
-        live.map(|cache| lock_ram(&cache).stats()).unwrap_or_default()
+        live.map(|cache| lock_ram(&cache).stats())
+            .unwrap_or_default()
     }
 
     pub fn lookup(&mut self, key: &FrameCacheKey) -> Result<CacheLookup, DiskCacheError> {
@@ -378,7 +379,10 @@ mod tests {
         let stats = FrameCacheHierarchy::shared_ram_stats(&root);
         assert_eq!(stats.resident_bytes, 16);
         assert_eq!(stats.resident_frames, 1);
-        assert_eq!(FrameCacheHierarchy::shared_ram_stats(root.join("other")), RamCacheStats::default());
+        assert_eq!(
+            FrameCacheHierarchy::shared_ram_stats(root.join("other")),
+            RamCacheStats::default()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
