@@ -12,9 +12,11 @@ import java.io.File
 
 /**
  * Opt-in physical-device benchmark. CI compiles this test but does not fabricate performance data.
+ * The fixture path must already be readable by the debug app; no storage or privileged permission
+ * is requested by this benchmark.
  *
  * Run with:
- *   -e framescope.hwdecode.video /sdcard/Movies/fixture.mp4
+ *   -e framescope.hwdecode.video <app-readable-fixture-path>
  *   -e framescope.hwdecode.maxFrames 600
  *   -e framescope.hwdecode.seekTargetUs 10000000
  */
@@ -53,7 +55,7 @@ class AndroidMediaCodecDeviceBenchmarkTest {
         assumeTrue("physical benchmark fixture was not provided", !videoPath.isNullOrBlank())
 
         val file = File(requireNotNull(videoPath))
-        assumeTrue("benchmark fixture does not exist: $file", file.isFile)
+        assumeTrue("benchmark fixture does not exist or is not app-readable: $file", file.isFile)
         val maxFrames = arguments.getString("framescope.hwdecode.maxFrames")
             ?.toLongOrNull()
             ?.takeIf { it > 0 }
@@ -89,6 +91,10 @@ class AndroidMediaCodecDeviceBenchmarkTest {
                     .put("output_color_format", result.outputColorFormat)
                     .put("thermal_before", result.thermalStatusBefore)
                     .put("thermal_after", result.thermalStatusAfter)
+                    .put("battery_energy_before_nwh", result.batteryEnergyBeforeNwh)
+                    .put("battery_energy_after_nwh", result.batteryEnergyAfterNwh)
+                    .put("battery_energy_consumed_nwh", result.batteryEnergyConsumedNwh)
+                    .put("average_battery_power_mw", result.averageBatteryPowerMw)
                     .put("cancelled", result.cancelled)
                     .toString(),
             )
