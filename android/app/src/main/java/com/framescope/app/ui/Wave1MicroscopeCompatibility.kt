@@ -94,50 +94,56 @@ internal fun MicroscopeInspectorPanel(
         else -> null
     }
     val enabled = state is MicroscopeUiState.Ready
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         ) {
-            Text(
-                text = "Frame timing & navigation",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            val frame = session?.currentFrame
-            if (session == null || frame == null) {
-                Text("No authoritative frame is available yet.")
-            } else {
-                Text("Frame ${frame.frameId + 1} / ${session.frameCount}")
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 Text(
-                    frame.timestampUs?.let { "Timestamp ${MicroscopePreviewMath.formatTimestampUs(it)} ($it µs)" }
-                        ?: "Timestamp unavailable",
+                    text = "Frame timing & navigation",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
                 )
-                Text("PTS ${MicroscopeUiFormatter.exactTimestamp(frame)}")
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    OutlinedButton(
-                        onClick = { onStep(-1) },
-                        enabled = enabled && session.canStepPrevious,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("Previous") }
-                    Button(
-                        onClick = { onStep(1) },
-                        enabled = enabled && session.canStepNext,
-                        modifier = Modifier.weight(1f),
-                    ) { Text("Next") }
+                val frame = session?.currentFrame
+                if (session == null || frame == null) {
+                    Text("No authoritative frame is available yet.")
+                } else {
+                    Text("Frame ${frame.frameId + 1} / ${session.frameCount}")
+                    Text(
+                        frame.timestampUs?.let { "Timestamp ${MicroscopePreviewMath.formatTimestampUs(it)} ($it µs)" }
+                            ?: "Timestamp unavailable",
+                    )
+                    Text("PTS ${MicroscopeUiFormatter.exactTimestamp(frame)}")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { onStep(-1) },
+                            enabled = enabled && session.canStepPrevious,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Previous") }
+                        Button(
+                            onClick = { onStep(1) },
+                            enabled = enabled && session.canStepNext,
+                            modifier = Modifier.weight(1f),
+                        ) { Text("Next") }
+                    }
+                    Text(
+                        text = "Exact frame and timestamp jumps remain available in the workspace controls.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                Text(
-                    text = "Exact frame and timestamp jumps remain available in the workspace controls.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
+        MicroscopeSimilarityInspectorPanel(
+            state = state,
+            onJumpFrame = onJumpFrame,
+        )
     }
 }
