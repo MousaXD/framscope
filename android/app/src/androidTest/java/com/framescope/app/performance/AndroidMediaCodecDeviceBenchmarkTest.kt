@@ -3,6 +3,7 @@ package com.framescope.app.performance
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -18,6 +19,32 @@ import java.io.File
  *   -e framescope.hwdecode.seekTargetUs 10000000
  */
 class AndroidMediaCodecDeviceBenchmarkTest {
+    @Test
+    fun logRuntimeCapabilityMatrix() {
+        val capabilities = AndroidHardwareDecodeCapabilities.discover()
+        val rows = JSONArray()
+        capabilities.forEach { capability ->
+            rows.put(
+                JSONObject()
+                    .put("codec", capability.codecName)
+                    .put("mime", capability.mimeType)
+                    .put("acceleration", capability.acceleration.name)
+                    .put("vendor", capability.vendor)
+                    .put("alias", capability.alias)
+                    .put("surface", capability.supportsSurfaceOutput)
+                    .put("byte_buffer", capability.supportsByteBufferOutput)
+                    .put("flexible_yuv420", capability.supportsFlexibleYuv420),
+            )
+        }
+        Log.i(
+            "FrameScopeHwDecode",
+            JSONObject()
+                .put("event", "codec_capability_matrix")
+                .put("codecs", rows)
+                .toString(),
+        )
+    }
+
     @Test
     fun benchmarkExplicitHardwareByteBufferDecoderWhenFixtureProvided() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -45,6 +72,7 @@ class AndroidMediaCodecDeviceBenchmarkTest {
             Log.i(
                 "FrameScopeHwDecode",
                 JSONObject()
+                    .put("event", "decode_benchmark")
                     .put("backend", "android-mediacodec")
                     .put("codec", result.codecName)
                     .put("mime", result.mimeType)
