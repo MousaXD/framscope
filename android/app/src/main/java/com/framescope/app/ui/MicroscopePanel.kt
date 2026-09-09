@@ -12,31 +12,23 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.framescope.app.data.DEFAULT_SCRUB_PREVIEW_MAX_EDGE
-import com.framescope.app.data.FrameDetails
 import com.framescope.app.data.MicroscopeFrame
 import com.framescope.app.data.MicroscopeScrubPreview
 import com.framescope.app.data.MicroscopeSessionSnapshot
@@ -84,44 +76,28 @@ internal fun MicroscopePanel(
     onClearRange: () -> Unit,
     onDismissError: () -> Unit,
 ) {
-    when (state) {
-        MicroscopeUiState.Idle -> Unit
-        MicroscopeUiState.Opening -> MicroscopeIndexingCard(indexingProgress)
-        is MicroscopeUiState.LoadingFrame -> MicroscopeBusyCard("Decoding source-quality frame…")
-        is MicroscopeUiState.Navigating -> {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                state.previousFrame?.let { frame ->
-                    MicroscopeFrameCard(
-                        session = state.session,
-                        frame = frame,
-                        timelineBounds = timelineBounds,
-                        rangeSelection = rangeSelection,
-                        scrubPreview = scrubPreview,
-                        controlsEnabled = false,
-                        onStep = onStep,
-                        onJumpFrame = onJumpFrame,
-                        onJumpTimestampUs = onJumpTimestampUs,
-                        onPreviewFrame = onPreviewFrame,
-                        onPreviewTimestampUs = onPreviewTimestampUs,
-                        onFinishScrubFrame = onFinishScrubFrame,
-                        onFinishScrubTimestampUs = onFinishScrubTimestampUs,
-                        onCommitRange = onCommitRange,
-                        onClearRange = onClearRange,
-                    )
-                }
-                MicroscopeBusyCard("Resolving the exact indexed frame…")
-            }
-        }
-        is MicroscopeUiState.Ready -> MicroscopeFrameCard(
-            session = state.session,
-            frame = state.frame,
+    // Ready and Navigating deliberately share one composition site. The timeline's local drag and
+    // release state therefore survives the brief authoritative navigation state transition.
+    val visibleSession = when (state) {
+        is MicroscopeUiState.Ready -> state.session
+        is MicroscopeUiState.Navigating -> state.session
+        else -> null
+    }
+    val visibleFrame = when (state) {
+        is MicroscopeUiState.Ready -> state.frame
+        is MicroscopeUiState.Navigating -> state.previousFrame
+        else -> null
+    }
+    if (visibleSession != null && visibleFrame != null) {
+        MicroscopeFrameCard(
+            session = visibleSession,
+            frame = visibleFrame,
             timelineBounds = timelineBounds,
             rangeSelection = rangeSelection,
             scrubPreview = scrubPreview,
-            controlsEnabled = true,
+            controlsEnabled = state is MicroscopeUiState.Ready,
+            exactSettleInProgress = state is MicroscopeUiState.Navigating,
             onStep = onStep,
-            onJumpFrame = onJumpFrame,
-            onJumpTimestampUs = onJumpTimestampUs,
             onPreviewFrame = onPreviewFrame,
             onPreviewTimestampUs = onPreviewTimestampUs,
             onFinishScrubFrame = onFinishScrubFrame,
@@ -129,6 +105,15 @@ internal fun MicroscopePanel(
             onCommitRange = onCommitRange,
             onClearRange = onClearRange,
         )
+        return
+    }
+
+    when (state) {
+        MicroscopeUiState.Idle -> Unit
+        MicroscopeUiState.Opening -> MicroscopeIndexingCard(indexingProgress)
+        is MicroscopeUiState.LoadingFrame -> MicroscopeBusyCard("Preparing frame…")
+        is MicroscopeUiState.Navigating -> MicroscopeBusyCard("Settling exact frame…")
+        is MicroscopeUiState.Ready -> Unit
         is MicroscopeUiState.Empty -> MicroscopeStatusCard(
             "The selected video has no indexed presentation frames.",
         )
@@ -148,9 +133,8 @@ private fun MicroscopeFrameCard(
     rangeSelection: TimelineRangeSelection?,
     scrubPreview: MicroscopeScrubPreview?,
     controlsEnabled: Boolean,
+    exactSettleInProgress: Boolean,
     onStep: (Int) -> Unit,
-    onJumpFrame: (Long) -> Unit,
-    onJumpTimestampUs: (Long) -> Unit,
     onPreviewFrame: (Long) -> Unit,
     onPreviewTimestampUs: (Long) -> Unit,
     onFinishScrubFrame: (Long) -> Unit,
@@ -181,22 +165,16 @@ private fun MicroscopeFrameCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(18.dp),
+        shape = RoundedCornerShape(14.dp),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text(
-                text = "Frame microscope",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.SemiBold,
-            )
-
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 180.dp, max = 520.dp)
+                    .heightIn(min = 200.dp, max = 560.dp)
                     .aspectRatio(descriptor.width.toFloat() / descriptor.height.toFloat()),
                 contentAlignment = Alignment.Center,
             ) {
@@ -247,32 +225,15 @@ private fun MicroscopeFrameCard(
                 }
             }
 
-            when (val current = displayedPreview) {
-                is MicroscopePreviewState.Ready -> {
-                    val plan = current.plan
-                    Text(
-                        text = when {
-                            current.liveScrub -> "Live preview · frame ${current.frameId + 1}"
-                            plan.isDownscaled ->
-                                "Display preview ${plan.targetWidth} × ${plan.targetHeight}. Pinch to zoom; swipe at 1× to step one frame."
-                            else -> "Pinch to zoom; swipe at 1× to step one frame."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                else -> Unit
-            }
-
-            FrameIdentity(frame = session.currentFrame, frameCount = session.frameCount)
-
+            // Timeline and frame navigation live directly under the visual content. Technical frame
+            // identity and exact-jump controls already belong to the Inspector destination.
             MicroscopeTimelineControls(
                 session = session,
                 timelineBounds = timelineBounds,
                 rangeSelection = rangeSelection,
                 enabled = controlsEnabled,
-                onJumpFrame = onJumpFrame,
-                onJumpTimestampUs = onJumpTimestampUs,
+                exactSettleInProgress = exactSettleInProgress,
+                onStep = onStep,
                 onPreviewFrame = onPreviewFrame,
                 onPreviewTimestampUs = onPreviewTimestampUs,
                 onFinishScrubFrame = onFinishScrubFrame,
@@ -281,32 +242,32 @@ private fun MicroscopeFrameCard(
                 onClearRange = onClearRange,
             )
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                OutlinedButton(
-                    onClick = { onStep(-1) },
-                    enabled = controlsEnabled && session.canStepPrevious,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Previous frame")
+            when (val current = displayedPreview) {
+                is MicroscopePreviewState.Ready -> {
+                    if (current.liveScrub) {
+                        Text(
+                            text = "Live preview",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    } else {
+                        Text(
+                            text = "Pinch to zoom · swipe to step",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
-                Button(
-                    onClick = { onStep(1) },
-                    enabled = controlsEnabled && session.canStepNext,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Next frame")
-                }
+                else -> Unit
             }
 
-            JumpControls(
-                session = session,
-                enabled = controlsEnabled,
-                onJumpFrame = onJumpFrame,
-                onJumpTimestampUs = onJumpTimestampUs,
-            )
+            if (session.currentFrame?.corrupt == true) {
+                Text(
+                    text = "This indexed frame is marked corrupt.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
     }
 }
@@ -320,103 +281,6 @@ private fun RecyclePreviewBitmap(state: MicroscopePreviewState) {
             if (!ready.bitmap.isRecycled) {
                 ready.bitmap.recycle()
             }
-        }
-    }
-}
-
-@Composable
-private fun FrameIdentity(frame: FrameDetails?, frameCount: Long) {
-    if (frame == null) return
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(
-            text = "Frame ${frame.frameId + 1} / $frameCount",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Medium,
-        )
-        Text(
-            text = frame.timestampUs?.let {
-                "Timestamp: ${MicroscopePreviewMath.formatTimestampUs(it)} ($it µs)"
-            } ?: "Timestamp: unavailable",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            text = "PTS: ${MicroscopeUiFormatter.exactTimestamp(frame)}",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        MicroscopeUiFormatter.exactDuration(frame)?.let {
-            Text(
-                text = "Duration: $it",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        if (frame.keyframe || frame.corrupt) {
-            Text(
-                text = buildList {
-                    if (frame.keyframe) add("keyframe")
-                    if (frame.corrupt) add("corrupt")
-                }.joinToString(" · "),
-                style = MaterialTheme.typography.labelMedium,
-                color = if (frame.corrupt) {
-                    MaterialTheme.colorScheme.error
-                } else {
-                    MaterialTheme.colorScheme.secondary
-                },
-            )
-        }
-    }
-}
-
-@Composable
-private fun JumpControls(
-    session: MicroscopeSessionSnapshot,
-    enabled: Boolean,
-    onJumpFrame: (Long) -> Unit,
-    onJumpTimestampUs: (Long) -> Unit,
-) {
-    var frameInput by rememberSaveable(session.sessionId) { mutableStateOf("") }
-    var timestampInput by rememberSaveable(session.sessionId) { mutableStateOf("") }
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        OutlinedTextField(
-            value = frameInput,
-            onValueChange = { value -> frameInput = value.filter(Char::isDigit).take(19) },
-            enabled = enabled,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Jump to frame (1…${session.frameCount})") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        )
-        Button(
-            onClick = {
-                frameInput.toLongOrNull()
-                    ?.takeIf { it in 1..session.frameCount }
-                    ?.let { onJumpFrame(it - 1L) }
-            },
-            enabled = enabled && frameInput.toLongOrNull()?.let { it in 1..session.frameCount } == true,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Jump to exact frame")
-        }
-
-        OutlinedTextField(
-            value = timestampInput,
-            onValueChange = { value ->
-                timestampInput = MicroscopePreviewMath.sanitizeSignedTimestampInput(value)
-            },
-            enabled = enabled,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Jump to timestamp (µs, signed)") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-        )
-        OutlinedButton(
-            onClick = { timestampInput.toLongOrNull()?.let(onJumpTimestampUs) },
-            enabled = enabled && timestampInput.toLongOrNull() != null,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Jump to nearest indexed timestamp")
         }
     }
 }
