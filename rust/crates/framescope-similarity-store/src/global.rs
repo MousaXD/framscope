@@ -378,6 +378,7 @@ fn nearby_color_buckets(bucket: u16) -> Vec<u16> {
     buckets
 }
 
+#[cfg(test)]
 fn color_buckets_are_neighbors(left: u16, right: u16) -> bool {
     color_bucket_components(left)
         .into_iter()
