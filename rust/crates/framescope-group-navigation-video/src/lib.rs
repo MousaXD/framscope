@@ -9,13 +9,13 @@ use framescope_cache::{
     FrameId, FrameIndex, FrameIndexEntry, FrameIndexStreamIdentity, OwnedRgbaFrame, SourceIdentity,
 };
 use framescope_core::{DecodedFrame, FrameScopeError};
-use framescope_group_navigation::{
-    GroupNavigationError, IndexedRgbaFrame, IndexedRgbaStream, SimilarityGroupAnalysis,
-    SimilaritySourceError, open_or_build_group_navigation,
-};
 use framescope_group_navigation::timeline_global::{
     TimelineGlobalSimilarityError, TimelineGlobalSimilarityResult,
     open_or_build_and_query_with_timeline,
+};
+use framescope_group_navigation::{
+    GroupNavigationError, IndexedRgbaFrame, IndexedRgbaStream, SimilarityGroupAnalysis,
+    SimilaritySourceError, open_or_build_group_navigation,
 };
 use framescope_perceptual::HybridSimilarityPolicy;
 use framescope_video::{CancellationToken, OpenOptions, VideoDecoder, VideoStreamSelection};
