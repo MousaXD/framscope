@@ -13,7 +13,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -156,7 +155,6 @@ internal fun MicroscopeTimelineControls(
     }
 }
 
-@Suppress("UNUSED_PARAMETER")
 @Composable
 private fun MicroscopeTimelineScrubber(
     session: MicroscopeSessionSnapshot,
@@ -197,15 +195,6 @@ private fun MicroscopeTimelineScrubber(
         onDispose {
             delayedPreviewAdmission.cancel()
             previewAdmissionPolicy.reset()
-            ScrubUxTelemetry.cancelExactSettle(session.sessionId)
-        }
-    }
-
-    // Exact-settle timing starts in the release callback. The navigating composition is disabled,
-    // so only the next enabled authoritative Ready composition can close that sample.
-    SideEffect {
-        if (enabled && !scrubbing) {
-            ScrubUxTelemetry.completeExactSettle(session.sessionId)
         }
     }
 
