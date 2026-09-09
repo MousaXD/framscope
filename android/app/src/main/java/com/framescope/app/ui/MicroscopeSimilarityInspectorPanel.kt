@@ -55,9 +55,10 @@ internal fun MicroscopeSimilarityInspectorPanel(
         is MicroscopeUiState.Error -> state.session?.sessionId
         MicroscopeUiState.Idle, MicroscopeUiState.Opening -> null
     }
+    val authoritativeTargetFrameId = ready?.session?.currentFrame?.frameId
 
-    LaunchedEffect(sessionId) {
-        viewModel.onSessionChanged(sessionId)
+    LaunchedEffect(sessionId, authoritativeTargetFrameId) {
+        viewModel.onAuthoritativeTargetChanged(sessionId, authoritativeTargetFrameId)
     }
     DisposableEffect(viewModel) {
         onDispose { viewModel.cancelSearch() }
