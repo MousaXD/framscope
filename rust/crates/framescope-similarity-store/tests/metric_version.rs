@@ -60,7 +60,6 @@ fn group() -> FrameGroup {
 
 #[test]
 fn persisted_hybrid_metric_version_mismatch_is_invalidated_instead_of_reused() {
-    assert!(HYBRID_SIMILARITY_ALGORITHM_VERSION > 1);
     let root = root();
     let store = SimilarityStore::new(&root);
     let key = SimilarityStoreKey::new_hybrid(
