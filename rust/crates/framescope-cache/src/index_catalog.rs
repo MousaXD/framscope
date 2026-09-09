@@ -1,4 +1,6 @@
-use crate::{FRAME_INDEX_NAMESPACE, FRAME_INDEX_SCHEMA_VERSION};
+use crate::{
+    FRAME_INDEX_NAMESPACE, FRAME_INDEX_SCHEMA_VERSION, FRAME_TIMELINE_CONTRACT_GENERATION,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -124,9 +126,7 @@ impl FrameIndexCatalog {
                                 },
                             );
                         }
-                        Some(existing)
-                            if version_is_current && !existing.version_is_current =>
-                        {
+                        Some(existing) if version_is_current && !existing.version_is_current => {
                             *existing = CatalogCandidate {
                                 descriptor,
                                 version_is_current,
@@ -199,20 +199,24 @@ fn read_descriptor(
     };
     let meta = connection
         .query_row(
-            "SELECT lifecycle, indexed_frames, frame_count FROM index_meta WHERE id = 1",
+            "SELECT lifecycle, source_key, indexed_frames, frame_count FROM index_meta WHERE id = 1",
             [],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
                 ))
             },
         )
         .optional();
-    let Ok(Some((lifecycle, indexed_frames, frame_count))) = meta else {
+    let Ok(Some((lifecycle, source_binding, indexed_frames, frame_count))) = meta else {
         return descriptor;
     };
+    if !source_binding_matches_current(&source_binding, &descriptor.source_key) {
+        return descriptor;
+    }
     let Ok(indexed_frames) = u64::try_from(indexed_frames) else {
         return descriptor;
     };
@@ -260,6 +264,22 @@ fn read_descriptor(
         _ => PersistentFrameIndexStatus::Stale,
     };
     descriptor
+}
+
+fn source_binding_matches_current(value: &str, expected_source_key: &str) -> bool {
+    let mut parts = value.splitn(3, ':');
+    let generation = parts
+        .next()
+        .and_then(|part| part.strip_prefix('t'))
+        .and_then(|part| part.parse::<u32>().ok());
+    let seek_safety = parts
+        .next()
+        .and_then(|part| part.strip_prefix('s'))
+        .and_then(|part| part.parse::<i64>().ok());
+    let stable_key = parts.next();
+    generation == Some(FRAME_TIMELINE_CONTRACT_GENERATION)
+        && matches!(seek_safety, Some(0) | Some(1))
+        && stable_key == Some(expected_source_key)
 }
 
 fn path_to_wire(path: &Path) -> String {
@@ -329,6 +349,13 @@ mod tests {
         root
     }
 
+    fn index_path(root: &Path, version: i64, source_key: &str, stream_index: u32) -> PathBuf {
+        root.join(FRAME_INDEX_NAMESPACE)
+            .join(format!("v{version}"))
+            .join(source_key)
+            .join(format!("stream-{stream_index}.sqlite3"))
+    }
+
     fn write_index(
         root: &Path,
         version: i64,
@@ -337,16 +364,12 @@ mod tests {
         lifecycle: i64,
         frames: u64,
     ) {
-        let directory = root
-            .join(FRAME_INDEX_NAMESPACE)
-            .join(format!("v{version}"))
-            .join(source_key);
-        fs::create_dir_all(&directory).unwrap();
-        let path = directory.join(format!("stream-{stream_index}.sqlite3"));
+        let path = index_path(root, version, source_key, stream_index);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let connection = Connection::open(path).unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE index_meta (id INTEGER PRIMARY KEY, lifecycle INTEGER NOT NULL, indexed_frames INTEGER NOT NULL, frame_count INTEGER);\n                 CREATE TABLE frame_index (frame_index INTEGER PRIMARY KEY);",
+                "CREATE TABLE index_meta (id INTEGER PRIMARY KEY, lifecycle INTEGER NOT NULL, source_key TEXT NOT NULL, indexed_frames INTEGER NOT NULL, frame_count INTEGER);\n                 CREATE TABLE frame_index (frame_index INTEGER PRIMARY KEY);",
             )
             .unwrap();
         let frames_i64 = i64::try_from(frames).unwrap();
@@ -359,10 +382,11 @@ mod tests {
                 .unwrap();
         }
         let complete_count = (lifecycle == 3).then_some(frames_i64);
+        let source_binding = format!("t{FRAME_TIMELINE_CONTRACT_GENERATION}:s1:{source_key}");
         connection
             .execute(
-                "INSERT INTO index_meta(id, lifecycle, indexed_frames, frame_count) VALUES (1, ?1, ?2, ?3)",
-                params![lifecycle, frames_i64, complete_count],
+                "INSERT INTO index_meta(id, lifecycle, source_key, indexed_frames, frame_count) VALUES (1, ?1, ?2, ?3, ?4)",
+                params![lifecycle, source_binding, frames_i64, complete_count],
             )
             .unwrap();
     }
@@ -420,18 +444,34 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_timeline_contract_is_visible_as_stale() {
+        let root = test_root("old-contract");
+        write_index(&root, FRAME_INDEX_SCHEMA_VERSION, "contract-old", 0, 3, 12);
+        let path = index_path(&root, FRAME_INDEX_SCHEMA_VERSION, "contract-old", 0);
+        let connection = Connection::open(path).unwrap();
+        let old_generation = FRAME_TIMELINE_CONTRACT_GENERATION.saturating_sub(1);
+        connection
+            .execute(
+                "UPDATE index_meta SET source_key = ?1 WHERE id = 1",
+                params![format!("t{old_generation}:s1:contract-old")],
+            )
+            .unwrap();
+        drop(connection);
+
+        let entry = FrameIndexCatalog::new(&root).entries().unwrap().remove(0);
+
+        assert_eq!(entry.status, PersistentFrameIndexStatus::Stale);
+        assert_eq!(entry.indexed_frames, 0);
+        assert_eq!(entry.frame_count, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn current_schema_wins_over_legacy_duplicate_identity() {
         let root = test_root("schema-dedup");
         let old_version = FRAME_INDEX_SCHEMA_VERSION.saturating_sub(1);
         write_index(&root, old_version, "same-source", 0, 3, 12);
-        write_index(
-            &root,
-            FRAME_INDEX_SCHEMA_VERSION,
-            "same-source",
-            0,
-            3,
-            20,
-        );
+        write_index(&root, FRAME_INDEX_SCHEMA_VERSION, "same-source", 0, 3, 20);
 
         let entries = FrameIndexCatalog::new(&root).entries().unwrap();
 
