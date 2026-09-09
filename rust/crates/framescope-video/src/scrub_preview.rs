@@ -239,7 +239,7 @@ pub fn downscale_scrub_preview(
         .map_err(ScrubPreviewError::from)
 }
 
-fn preview_dimensions(
+pub(crate) fn preview_dimensions(
     width: u32,
     height: u32,
     max_edge: u32,

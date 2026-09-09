@@ -2,8 +2,9 @@ use framescope_cache::{FrameCacheHierarchy, FrameId};
 use framescope_core::FrameScopeError;
 use framescope_video::{
     CachedFrameSource, CachedNavigationError, CancellationToken, MicroscopeTimestampSelection,
-    OpenOptions, ScrubPreviewCache, TargetRgbaNavigationCursor, VideoDecoder,
-    downscale_scrub_preview, microscope_target, microscope_timestamp_us,
+    OpenOptions, ScrubPreviewCache, TargetPreviewNavigationError, TargetRgbaNavigationCursor,
+    VideoDecoder, downscale_scrub_preview, microscope_target, microscope_timestamp_us,
+    navigate_to_frame_bounded_preview_with_cursor,
     navigate_to_frame_cached_target_only_with_cursor,
 };
 use jni::JNIEnv;
@@ -830,15 +831,16 @@ fn render_preview(
             decoder_cursor,
             ..
         } = &mut *state;
-        navigate_to_frame_cached_target_only_with_cursor(
+        navigate_to_frame_bounded_preview_with_cursor(
             index,
             source_cache,
             decoder_cursor,
             || open_decoder(source_fd, decoder_cancellation.clone()),
             frame_id,
             MAX_FORWARD_CURSOR_REUSE_FRAMES,
+            max_edge,
         )
-        .map_err(from_navigation)
+        .map_err(from_preview_navigation)
     })
     .map_err(from_microscope_failure)??;
     ensure_not_cancelled(&cancellation)?;
@@ -848,8 +850,7 @@ fn render_preview(
         CachedFrameSource::Decoded => "decoded",
     };
     let decoded_frames = navigated.decoded_frames;
-    let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
-        .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
+    let preview = navigated.pixels;
     ensure_not_cancelled(&cancellation)?;
     {
         let mut state = state.lock().map_err(|_| {
@@ -1162,6 +1163,15 @@ fn from_navigation(error: CachedNavigationError) -> PreviewFailure {
         CachedNavigationError::Decoder(_) => "decoder_error",
     };
     PreviewFailure::new(code, error.to_string())
+}
+
+fn from_preview_navigation(error: TargetPreviewNavigationError) -> PreviewFailure {
+    match error {
+        TargetPreviewNavigationError::Navigation(error) => from_navigation(error),
+        TargetPreviewNavigationError::Preview(error) => {
+            PreviewFailure::new("preview_scale_error", error.to_string())
+        }
+    }
 }
 
 fn serialize_result(result: Result<PreviewDetails, PreviewFailure>) -> String {

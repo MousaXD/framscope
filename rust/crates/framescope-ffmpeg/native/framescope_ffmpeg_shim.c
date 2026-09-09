@@ -895,14 +895,16 @@ int32_t framescope_ffmpeg_next_frame(void *opaque, FsFrameInfo *out, FsError *er
     }
 }
 
-int32_t framescope_ffmpeg_copy_current_frame_rgba(
-    void *opaque,
+static int32_t fs_copy_current_frame_rgba_to(
+    FsSession *session,
+    int32_t target_width,
+    int32_t target_height,
+    int flags,
     uint8_t *output,
     size_t output_capacity,
     int32_t *out_stride,
     FsError *error
 ) {
-    FsSession *session = (FsSession *)opaque;
     uint8_t *destination_data[4] = {NULL, NULL, NULL, NULL};
     int destination_linesize[4] = {0, 0, 0, 0};
     size_t stride;
@@ -918,19 +920,24 @@ int32_t framescope_ffmpeg_copy_current_frame_rgba(
         fs_set_error(error, FS_ERR_DECODER, 0, "no valid decoded frame is available for RGBA copy");
         return -1;
     }
-    if (session->frame->width > INT_MAX / 4) {
-        fs_set_error(error, FS_ERR_DECODER, AVERROR(EOVERFLOW), "decoded frame width overflows RGBA stride");
+    if (target_width <= 0 || target_height <= 0 ||
+        target_width > session->frame->width || target_height > session->frame->height) {
+        fs_set_error(error, FS_ERR_BACKEND, AVERROR(EINVAL), "RGBA target dimensions must be positive and must not upscale the decoded frame");
+        return -1;
+    }
+    if (target_width > INT_MAX / 4) {
+        fs_set_error(error, FS_ERR_DECODER, AVERROR(EOVERFLOW), "RGBA target width overflows stride");
         return -1;
     }
 
-    stride = (size_t)session->frame->width * 4U;
-    if ((size_t)session->frame->height > SIZE_MAX / stride) {
-        fs_set_error(error, FS_ERR_DECODER, AVERROR(EOVERFLOW), "decoded frame dimensions overflow RGBA buffer size");
+    stride = (size_t)target_width * 4U;
+    if ((size_t)target_height > SIZE_MAX / stride) {
+        fs_set_error(error, FS_ERR_DECODER, AVERROR(EOVERFLOW), "RGBA target dimensions overflow buffer size");
         return -1;
     }
-    required = stride * (size_t)session->frame->height;
+    required = stride * (size_t)target_height;
     if (output_capacity < required) {
-        fs_set_error(error, FS_ERR_BACKEND, AVERROR(ENOSPC), "RGBA output buffer is smaller than the decoded frame");
+        fs_set_error(error, FS_ERR_BACKEND, AVERROR(ENOSPC), "RGBA output buffer is smaller than the requested target frame");
         return -1;
     }
 
@@ -939,10 +946,10 @@ int32_t framescope_ffmpeg_copy_current_frame_rgba(
         session->frame->width,
         session->frame->height,
         (enum AVPixelFormat)session->frame->format,
-        session->frame->width,
-        session->frame->height,
+        target_width,
+        target_height,
         AV_PIX_FMT_RGBA,
-        SWS_BILINEAR,
+        flags,
         NULL,
         NULL,
         NULL
@@ -964,13 +971,59 @@ int32_t framescope_ffmpeg_copy_current_frame_rgba(
         destination_linesize
     );
 
-    if (scaled_rows != session->frame->height) {
-        fs_set_error(error, FS_ERR_DECODER, 0, "FFmpeg did not convert the complete decoded frame to RGBA");
+    if (scaled_rows != target_height) {
+        fs_set_error(error, FS_ERR_DECODER, 0, "FFmpeg did not convert the complete decoded frame to the requested RGBA size");
         return -1;
     }
 
     *out_stride = (int32_t)stride;
     return 0;
+}
+
+int32_t framescope_ffmpeg_copy_current_frame_rgba(
+    void *opaque,
+    uint8_t *output,
+    size_t output_capacity,
+    int32_t *out_stride,
+    FsError *error
+) {
+    FsSession *session = (FsSession *)opaque;
+    if (session == NULL || session->frame == NULL) {
+        return fs_copy_current_frame_rgba_to(
+            session, 0, 0, SWS_BILINEAR, output, output_capacity, out_stride, error
+        );
+    }
+    return fs_copy_current_frame_rgba_to(
+        session,
+        session->frame->width,
+        session->frame->height,
+        SWS_BILINEAR,
+        output,
+        output_capacity,
+        out_stride,
+        error
+    );
+}
+
+int32_t framescope_ffmpeg_copy_current_frame_rgba_scaled(
+    void *opaque,
+    int32_t target_width,
+    int32_t target_height,
+    uint8_t *output,
+    size_t output_capacity,
+    int32_t *out_stride,
+    FsError *error
+) {
+    return fs_copy_current_frame_rgba_to(
+        (FsSession *)opaque,
+        target_width,
+        target_height,
+        SWS_POINT,
+        output,
+        output_capacity,
+        out_stride,
+        error
+    );
 }
 
 int32_t framescope_ffmpeg_seek_us(void *opaque, int64_t timestamp_us, FsError *error) {

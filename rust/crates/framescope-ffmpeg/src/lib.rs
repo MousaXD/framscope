@@ -324,6 +324,15 @@ mod native {
             out_stride: *mut i32,
             error: *mut FsError,
         ) -> i32;
+        fn framescope_ffmpeg_copy_current_frame_rgba_scaled(
+            session: *mut FsSession,
+            target_width: i32,
+            target_height: i32,
+            output: *mut u8,
+            output_capacity: usize,
+            out_stride: *mut i32,
+            error: *mut FsError,
+        ) -> i32;
         fn framescope_ffmpeg_seek_us(
             session: *mut FsSession,
             timestamp_us: i64,
@@ -580,6 +589,36 @@ mod native {
             let (width, height) = self.last_frame_dimensions.ok_or_else(|| {
                 NativeError::backend("no decoded frame is available for RGBA copy")
             })?;
+            self.copy_current_frame_rgba_to_dimensions(width, height, false)
+        }
+
+        /// Convert the current frame directly to a caller-selected bounded RGBA size.
+        ///
+        /// Target dimensions must be positive and may not exceed the decoded frame. This is used
+        /// only for disposable previews; authoritative/source-quality callers use
+        /// [`Self::copy_current_frame_rgba`].
+        pub fn copy_current_frame_rgba_resized(
+            &mut self,
+            width: u32,
+            height: u32,
+        ) -> Result<NativeRgbaFrame, NativeError> {
+            let (source_width, source_height) = self.last_frame_dimensions.ok_or_else(|| {
+                NativeError::backend("no decoded frame is available for RGBA resize")
+            })?;
+            if width == 0 || height == 0 || width > source_width || height > source_height {
+                return Err(NativeError::backend(
+                    "RGBA resize dimensions must be positive and must not upscale the decoded frame",
+                ));
+            }
+            self.copy_current_frame_rgba_to_dimensions(width, height, true)
+        }
+
+        fn copy_current_frame_rgba_to_dimensions(
+            &mut self,
+            width: u32,
+            height: u32,
+            scaled: bool,
+        ) -> Result<NativeRgbaFrame, NativeError> {
             let stride = usize::try_from(width)
                 .ok()
                 .and_then(|value| value.checked_mul(4))
@@ -598,17 +637,33 @@ mod native {
 
             let mut out_stride = 0_i32;
             let mut error = FsError::default();
-            // SAFETY: pixels has exactly `required` initialized writable bytes and remains alive for
-            // the call. The native shim validates current-frame state and output capacity before
-            // conversion. &mut self prevents the reusable AVFrame from being advanced concurrently.
+            // SAFETY: pixels has exactly `required` initialized writable bytes and remains alive
+            // for the call. The C shim validates target dimensions and capacity. &mut self keeps
+            // the reusable AVFrame and cached scaler exclusively owned for the conversion.
             let result = unsafe {
-                framescope_ffmpeg_copy_current_frame_rgba(
-                    self.raw.as_ptr(),
-                    pixels.as_mut_ptr(),
-                    pixels.len(),
-                    &mut out_stride,
-                    &mut error,
-                )
+                if scaled {
+                    framescope_ffmpeg_copy_current_frame_rgba_scaled(
+                        self.raw.as_ptr(),
+                        i32::try_from(width).map_err(|_| {
+                            NativeError::backend("RGBA resize width exceeds FFmpeg range")
+                        })?,
+                        i32::try_from(height).map_err(|_| {
+                            NativeError::backend("RGBA resize height exceeds FFmpeg range")
+                        })?,
+                        pixels.as_mut_ptr(),
+                        pixels.len(),
+                        &mut out_stride,
+                        &mut error,
+                    )
+                } else {
+                    framescope_ffmpeg_copy_current_frame_rgba(
+                        self.raw.as_ptr(),
+                        pixels.as_mut_ptr(),
+                        pixels.len(),
+                        &mut out_stride,
+                        &mut error,
+                    )
+                }
             };
             if result < 0 {
                 return Err(error_from_ffi(&error));
@@ -700,6 +755,14 @@ impl Session {
     }
 
     pub fn copy_current_frame_rgba(&mut self) -> Result<NativeRgbaFrame, NativeError> {
+        Err(NativeError::backend("FFmpeg backend is not linked"))
+    }
+
+    pub fn copy_current_frame_rgba_resized(
+        &mut self,
+        _width: u32,
+        _height: u32,
+    ) -> Result<NativeRgbaFrame, NativeError> {
         Err(NativeError::backend("FFmpeg backend is not linked"))
     }
 
