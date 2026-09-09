@@ -46,11 +46,14 @@ internal class MicroscopeSimilarityViewModel(
     fun findSimilarFrames(sessionId: Long, targetFrameId: Long) {
         if (sessionId <= 0L || targetFrameId < 0L) return
         val revision = generation.incrementAndGet()
-        cancelSearchJobOnly()
+        val previous = searchJob
         repository.cancelActiveSearch()
+        previous?.cancel()
         _state.value = MicroscopeSimilarityUiState.Searching(sessionId, targetFrameId)
         searchJob = viewModelScope.launch {
             try {
+                previous?.join()
+                if (revision != generation.get()) return@launch
                 repository.findSimilarFrames(sessionId, targetFrameId)
                     .onSuccess { result ->
                         if (revision != generation.get()) return@onSuccess
