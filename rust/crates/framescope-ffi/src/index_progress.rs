@@ -148,7 +148,9 @@ pub(crate) fn update(operation_id: OperationId, progress: IndexingProgress) {
     let indexed_advance = progress
         .indexed_frames
         .saturating_sub(previous_indexed_frames);
-    let reused_advance = progress.reused_frames.saturating_sub(previous_reused_frames);
+    let reused_advance = progress
+        .reused_frames
+        .saturating_sub(previous_reused_frames);
     let sample_frame_advance = match progress.stage {
         IndexingProgressStage::ValidatingExistingIndex => reused_advance,
         IndexingProgressStage::Indexing => indexed_advance,
@@ -314,7 +316,10 @@ mod tests {
         assert_eq!(first["sequence"], repeated["sequence"]);
         assert_eq!(first["sample_elapsed_ms"], repeated["sample_elapsed_ms"]);
         assert_eq!(first["sample_interval_us"], repeated["sample_interval_us"]);
-        assert_eq!(first["sample_frame_advance"], repeated["sample_frame_advance"]);
+        assert_eq!(
+            first["sample_frame_advance"],
+            repeated["sample_frame_advance"]
+        );
         assert_eq!(
             first["sample_frames_per_second_milli"],
             repeated["sample_frames_per_second_milli"]
@@ -379,7 +384,12 @@ mod tests {
         );
         let validating = payload(operation_id);
         assert_eq!(validating["sample_frame_advance"], 64);
-        assert!(validating["sample_frames_per_second_milli"].as_u64().unwrap() > 0);
+        assert!(
+            validating["sample_frames_per_second_milli"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         drop(guard);
     }
 
