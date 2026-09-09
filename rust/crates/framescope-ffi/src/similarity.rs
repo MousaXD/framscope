@@ -12,7 +12,7 @@ use jni::sys::{jboolean, jlong, jstring};
 use serde::Serialize;
 use std::collections::HashMap;
 #[cfg(unix)]
-use std::os::fd::AsFd;
+use std::os::fd::{BorrowedFd, BorrowedFd as _, RawFd};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -216,59 +216,76 @@ fn find_similar_frames(
         ));
     }
 
-    let context = microscope::similarity_session_context(session_id)
-        .map_err(|error| SimilarityFailure::new(error.code(), error.message()))?;
     let store_root = Path::new(cache_root).join("global-similarity");
-    let result = open_or_build_global_similarity_from_fd_with_timeline(
-        &context.source_identity,
-        &context.stream_identity,
-        context.frame_count,
-        |frame_id| {
-            microscope::similarity_index_entry(session_id, frame_id).map_err(|error| {
-                TimelineGlobalSimilarityError::TimelineProvider(format!(
-                    "{}: {}",
-                    error.code(),
-                    error.message()
-                ))
-            })
-        },
-        &store_root,
-        FrameId(target_frame_id),
-        context.source_fd.as_fd(),
-        cancellation.clone(),
-    )
-    .map_err(map_similarity_error)?;
+    microscope::with_extraction_context(session_id, |source_fd: RawFd, index| {
+        let frame_count = index
+            .frame_count()
+            .map_err(|error| SimilarityFailure::new("index_error", error.to_string()))?
+            .ok_or_else(|| {
+                SimilarityFailure::new(
+                    "index_incomplete",
+                    "similarity requires a completed authoritative frame index",
+                )
+            })?;
+        if target_frame_id >= frame_count {
+            return Err(SimilarityFailure::new(
+                "frame_out_of_range",
+                "target frame is outside the completed authoritative index",
+            ));
+        }
 
-    if cancellation.is_cancelled() {
-        return Err(SimilarityFailure::new(
-            "cancelled",
-            "similarity analysis was cancelled",
-        ));
-    }
+        // SAFETY: with_extraction_context keeps the microscope session and its source descriptor
+        // alive for the duration of this synchronous analysis. The video adapter duplicates the
+        // descriptor immediately and never assumes ownership of this borrowed handle.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(source_fd) };
+        let result = open_or_build_global_similarity_from_fd_with_timeline(
+            index.source_identity(),
+            index.stream_identity(),
+            frame_count,
+            |frame_id| {
+                index.entry(frame_id).map_err(|error| {
+                    TimelineGlobalSimilarityError::TimelineProvider(error.to_string())
+                })
+            },
+            &store_root,
+            FrameId(target_frame_id),
+            borrowed,
+            cancellation.clone(),
+        )
+        .map_err(map_similarity_error)?;
 
-    let policy = GlobalSimilarityPolicy::default();
-    Ok(SimilarityDetails {
-        session_id,
-        target_frame_id,
-        descriptor_count: result.descriptor_count,
-        candidate_count: result.query.candidate_count,
-        matched_count: result.query.matched_count,
-        truncated: result.query.truncated,
-        minimum_similarity: policy.minimum_similarity,
-        disposition: match result.disposition {
-            TimelineGlobalSimilarityDisposition::Reused => "reused",
-            TimelineGlobalSimilarityDisposition::Built => "built",
-        },
-        matches: result
-            .query
-            .matches
-            .into_iter()
-            .map(|value| SimilarityMatch {
-                frame_id: value.frame_id.0,
-                similarity: value.similarity,
-            })
-            .collect(),
+        if cancellation.is_cancelled() {
+            return Err(SimilarityFailure::new(
+                "cancelled",
+                "similarity analysis was cancelled",
+            ));
+        }
+
+        let policy = GlobalSimilarityPolicy::default();
+        Ok(SimilarityDetails {
+            session_id,
+            target_frame_id,
+            descriptor_count: result.descriptor_count,
+            candidate_count: result.query.candidate_count,
+            matched_count: result.query.matched_count,
+            truncated: result.query.truncated,
+            minimum_similarity: policy.minimum_similarity,
+            disposition: match result.disposition {
+                TimelineGlobalSimilarityDisposition::Reused => "reused",
+                TimelineGlobalSimilarityDisposition::Built => "built",
+            },
+            matches: result
+                .query
+                .matches
+                .into_iter()
+                .map(|value| SimilarityMatch {
+                    frame_id: value.frame_id.0,
+                    similarity: value.similarity,
+                })
+                .collect(),
+        })
     })
+    .map_err(|error| SimilarityFailure::new(error.code(), error.message()))?
 }
 
 #[cfg(not(unix))]
