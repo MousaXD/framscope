@@ -61,8 +61,6 @@ internal fun MicroscopeTimelineControls(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        // Keep high-frequency gesture state below this composition boundary. Range controls do not
-        // need to recompose for every pointer sample.
         MicroscopeTimelineScrubber(
             session = session,
             bounds = bounds,
@@ -163,8 +161,6 @@ private fun MicroscopeTimelineScrubber(
                     !exactSettleInProgress &&
                     (settleObservedNavigation || authoritativeFrameChanged)
                 ) {
-                    // Only the completed authoritative navigation is allowed to correct the local
-                    // release position. Until then the thumb stays where the finger left it.
                     scrubFraction = authoritativeFraction
                     interactionState = TimelineInteractionState.Idle
                     settleObservedNavigation = false
@@ -232,7 +228,7 @@ private fun MicroscopeTimelineScrubber(
         Text(
             text = previewTimestampUs?.let(MicroscopePreviewMath::formatTimestampUs)
                 ?: previewFrameId?.let { frameId ->
-                    MicroscopeTimelineMath.framePositionLabel(frameId, session.frameCount)
+                    "Frame ${frameId + 1L} / ${session.frameCount}"
                 }
                 ?: "Position unavailable",
             style = MaterialTheme.typography.labelLarge,
@@ -254,8 +250,6 @@ private fun MicroscopeTimelineScrubber(
             settleObservedNavigation = false
             settleAnchorFrameId = null
             val nextFraction = fraction.coerceIn(0f, 1f)
-            // Gesture state is committed before any preview scheduling. Decoder work therefore
-            // cannot own the thumb position or decide whether it moves.
             scrubFraction = nextFraction
             val indexedBounds = bounds
             if (indexedBounds != null) {
@@ -361,10 +355,7 @@ private fun MicroscopeTimelineScrubber(
             )
         } else {
             Text(
-                text = MicroscopeTimelineMath.framePositionLabel(
-                    currentFrameId,
-                    session.frameCount,
-                ),
+                text = "Frame ${currentFrameId + 1L} / ${session.frameCount}",
                 style = MaterialTheme.typography.labelLarge,
             )
         }
