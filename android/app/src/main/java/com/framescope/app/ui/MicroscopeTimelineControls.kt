@@ -44,6 +44,7 @@ internal fun MicroscopeTimelineControls(
     rangeSelection: TimelineRangeSelection?,
     enabled: Boolean,
     exactSettleInProgress: Boolean = false,
+    authoritativePresentationToken: Any? = null,
     onStep: (Int) -> Unit,
     onPreviewFrame: (Long) -> Unit,
     onPreviewTimestampUs: (Long) -> Unit,
@@ -68,6 +69,7 @@ internal fun MicroscopeTimelineControls(
             currentFrameId = currentFrame.frameId,
             enabled = enabled,
             exactSettleInProgress = exactSettleInProgress,
+            authoritativePresentationToken = authoritativePresentationToken,
             onStep = onStep,
             onPreviewFrame = onPreviewFrame,
             onPreviewTimestampUs = onPreviewTimestampUs,
@@ -96,6 +98,7 @@ private fun MicroscopeTimelineScrubber(
     currentFrameId: Long,
     enabled: Boolean,
     exactSettleInProgress: Boolean,
+    authoritativePresentationToken: Any?,
     onStep: (Int) -> Unit,
     onPreviewFrame: (Long) -> Unit,
     onPreviewTimestampUs: (Long) -> Unit,
@@ -123,6 +126,7 @@ private fun MicroscopeTimelineScrubber(
     }
     var settleObservedNavigation by remember(session.sessionId) { mutableStateOf(false) }
     var settleAnchorFrameId by remember(session.sessionId) { mutableStateOf<Long?>(null) }
+    var settleAnchorPresentationToken by remember(session.sessionId) { mutableStateOf<Any?>(null) }
     val previewAdmissionPolicy = remember(session.sessionId) { LiveScrubAdmissionPolicy() }
     val delayedPreviewAdmission = remember(session.sessionId) { DelayedScrubPreviewAdmission() }
     val thumbDrawTracker = remember(session.sessionId) { ScrubThumbDrawTracker() }
@@ -138,6 +142,7 @@ private fun MicroscopeTimelineScrubber(
     LaunchedEffect(
         authoritativeFraction,
         currentFrameId,
+        authoritativePresentationToken,
         exactSettleInProgress,
         interactionState,
     ) {
@@ -148,6 +153,7 @@ private fun MicroscopeTimelineScrubber(
                 previewAdmissionPolicy.reset()
                 settleObservedNavigation = false
                 settleAnchorFrameId = null
+                settleAnchorPresentationToken = null
             }
             TimelineInteractionState.Dragging -> Unit
             TimelineInteractionState.AwaitingExactSettle -> {
@@ -157,14 +163,18 @@ private fun MicroscopeTimelineScrubber(
                 val authoritativeFrameChanged = settleAnchorFrameId?.let { anchor ->
                     currentFrameId != anchor
                 } == true
+                val authoritativePresentationChanged = settleAnchorPresentationToken?.let { anchor ->
+                    authoritativePresentationToken != null && authoritativePresentationToken !== anchor
+                } == true
                 if (
                     !exactSettleInProgress &&
-                    (settleObservedNavigation || authoritativeFrameChanged)
+                    (settleObservedNavigation || authoritativeFrameChanged || authoritativePresentationChanged)
                 ) {
                     scrubFraction = authoritativeFraction
                     interactionState = TimelineInteractionState.Idle
                     settleObservedNavigation = false
                     settleAnchorFrameId = null
+                    settleAnchorPresentationToken = null
                     delayedPreviewAdmission.cancel()
                     previewAdmissionPolicy.reset()
                 }
@@ -249,6 +259,7 @@ private fun MicroscopeTimelineScrubber(
             interactionState = TimelineInteractionState.Dragging
             settleObservedNavigation = false
             settleAnchorFrameId = null
+            settleAnchorPresentationToken = null
             val nextFraction = fraction.coerceIn(0f, 1f)
             scrubFraction = nextFraction
             val indexedBounds = bounds
@@ -303,6 +314,7 @@ private fun MicroscopeTimelineScrubber(
             when {
                 targetTimestampUs != null -> {
                     settleAnchorFrameId = currentFrameId
+                    settleAnchorPresentationToken = authoritativePresentationToken
                     settleObservedNavigation = false
                     interactionState = TimelineInteractionState.AwaitingExactSettle
                     ScrubUxTelemetry.beginExactSettle(session.sessionId)
@@ -310,6 +322,7 @@ private fun MicroscopeTimelineScrubber(
                 }
                 targetFrameId != null -> {
                     settleAnchorFrameId = currentFrameId
+                    settleAnchorPresentationToken = authoritativePresentationToken
                     settleObservedNavigation = false
                     interactionState = TimelineInteractionState.AwaitingExactSettle
                     ScrubUxTelemetry.beginExactSettle(session.sessionId)
