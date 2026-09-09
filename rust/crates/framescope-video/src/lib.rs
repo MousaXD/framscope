@@ -223,7 +223,7 @@ fn parse_mdia<R: Read + Seek>(
         }
         pos = header.end;
     }
-    Ok(facts)
+    Ok(())
 }
 
 mod cached_navigation;
