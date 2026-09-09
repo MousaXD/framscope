@@ -410,8 +410,10 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopeSimilarityBridge_n
     _class: JClass,
     operation_id: jlong,
 ) -> jboolean {
-    let cancelled = catch_unwind(AssertUnwindSafe(|| cancel_similarity_operation(operation_id)))
-        .unwrap_or(false);
+    let cancelled = catch_unwind(AssertUnwindSafe(|| {
+        cancel_similarity_operation(operation_id)
+    }))
+    .unwrap_or(false);
     if cancelled { 1 } else { 0 }
 }
 
@@ -444,6 +446,11 @@ mod tests {
         let (token, operation) = operation_token(operation_id).unwrap();
         assert!(token.is_cancelled());
         drop(operation);
-        assert!(!similarity_tokens().lock().unwrap().contains_key(&operation_id));
+        assert!(
+            !similarity_tokens()
+                .lock()
+                .unwrap()
+                .contains_key(&operation_id)
+        );
     }
 }
