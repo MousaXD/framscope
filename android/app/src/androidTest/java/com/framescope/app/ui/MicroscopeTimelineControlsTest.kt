@@ -64,11 +64,11 @@ class MicroscopeTimelineControlsTest {
 
         composeRule.runOnIdle {
             assertTrue("real pointer drag should dispatch a live preview", previewTimestamps.isNotEmpty())
-            assertTrue(
-                "drag should move well beyond the stale authoritative start",
-                sliderProgress() > 0.60f,
-            )
         }
+        assertTrue(
+            "drag should move well beyond the stale authoritative start",
+            sliderProgress() > 0.60f,
+        )
     }
 
     @Test
