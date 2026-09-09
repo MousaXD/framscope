@@ -1,6 +1,7 @@
 package com.framescope.app.ui
 
 import android.graphics.Bitmap
+import android.os.Trace
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,12 +39,15 @@ import com.framescope.app.data.FrameDetails
 import com.framescope.app.data.MicroscopeFrame
 import com.framescope.app.data.MicroscopeScrubPreview
 import com.framescope.app.data.MicroscopeSessionSnapshot
+import com.framescope.app.data.PixelTransportTelemetry
 import java.nio.ByteBuffer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+
+private const val TRACE_AUTHORITATIVE_BITMAP = "FrameScope.pixels.frame_bitmap"
 
 private sealed interface MicroscopePreviewState {
     data object Loading : MicroscopePreviewState
@@ -451,6 +455,11 @@ private suspend fun rgbaToBoundedPreview(
         ?: return MicroscopePreviewState.Error("Could not plan a bounded frame preview.")
 
     var bitmap: Bitmap? = null
+    val conversionStarted = System.nanoTime()
+    val traceStarted = runCatching {
+        Trace.beginSection(TRACE_AUTHORITATIVE_BITMAP)
+        true
+    }.getOrDefault(false)
     try {
         bitmap = Bitmap.createBitmap(plan.targetWidth, plan.targetHeight, Bitmap.Config.ARGB_8888)
         val source = rgba.duplicate()
@@ -484,6 +493,15 @@ private suspend fun rgbaToBoundedPreview(
                 bitmap.setPixels(row, 0, plan.targetWidth, 0, outputY, plan.targetWidth, 1)
             }
         }
+        val copiedBytes = Math.multiplyExact(
+            Math.multiplyExact(plan.targetWidth.toLong(), plan.targetHeight.toLong()),
+            4L,
+        )
+        PixelTransportTelemetry.recordAuthoritativeBitmap(
+            allocationBytes = bitmap.allocationByteCount.toLong(),
+            copiedBytes = copiedBytes,
+            conversionUs = elapsedUs(conversionStarted),
+        )
         return MicroscopePreviewState.Ready(
             bitmap = bitmap,
             plan = plan,
@@ -501,8 +519,13 @@ private suspend fun rgbaToBoundedPreview(
     } catch (_: RuntimeException) {
         bitmap?.recycle()
         return MicroscopePreviewState.Error(errorMessage)
+    } finally {
+        if (traceStarted) runCatching { Trace.endSection() }
     }
 }
+
+private fun elapsedUs(startedNanos: Long): Long =
+    ((System.nanoTime() - startedNanos).coerceAtLeast(0L)) / 1_000L
 
 @Composable
 private fun MicroscopeBusyCard(message: String) {
