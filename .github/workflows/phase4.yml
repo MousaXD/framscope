@@ -37,20 +37,22 @@ jobs:
           cargo fmt --all --check
           cargo clippy -p framescope-similarity --all-targets -- -D warnings
           cargo clippy -p framescope-perceptual --all-targets -- -D warnings
-          cargo clippy -p framescope-global-similarity --all-targets -- -D warnings
           cargo clippy -p framescope-grouping --all-targets -- -D warnings
           cargo clippy -p framescope-grouping-session --all-targets -- -D warnings
           cargo clippy -p framescope-similarity-store --all-targets -- -D warnings
+          cargo clippy -p framescope-group-navigation --all-targets -- -D warnings
+          cargo clippy -p framescope-group-navigation-video --all-targets -- -D warnings
 
       - name: Verify Phase 4 correctness contracts
         working-directory: rust
         run: |
           cargo test -p framescope-similarity
           cargo test -p framescope-perceptual
-          cargo test -p framescope-global-similarity
           cargo test -p framescope-grouping
           cargo test -p framescope-grouping-session
           cargo test -p framescope-similarity-store
+          cargo test -p framescope-group-navigation
+          cargo test -p framescope-group-navigation-video
 
       - name: Exercise bounded long-stream grouping contract
         working-directory: rust
