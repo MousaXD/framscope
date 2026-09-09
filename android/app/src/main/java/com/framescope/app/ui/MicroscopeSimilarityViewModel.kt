@@ -34,6 +34,11 @@ sealed interface MicroscopeSimilarityUiState {
     ) : MicroscopeSimilarityUiState
 }
 
+private data class SimilarityTargetIdentity(
+    val sessionId: Long,
+    val targetFrameId: Long,
+)
+
 internal class MicroscopeSimilarityViewModel(
     private val repository: MicroscopeSimilarityRepository,
 ) : ViewModel() {
@@ -97,14 +102,36 @@ internal class MicroscopeSimilarityViewModel(
         _state.value = MicroscopeSimilarityUiState.Idle
     }
 
-    fun onSessionChanged(sessionId: Long?) {
-        val stateSession = when (val current = _state.value) {
-            is MicroscopeSimilarityUiState.Searching -> current.sessionId
-            is MicroscopeSimilarityUiState.Ready -> current.result.sessionId
-            is MicroscopeSimilarityUiState.Error -> current.sessionId
+    /**
+     * Keep similarity results tied to the exact authoritative frame that produced them.
+     *
+     * During `Navigating` the inspector deliberately retains the previous authoritative pixels and
+     * therefore has no new authoritative target yet. A null [targetFrameId] for the same session is
+     * ignored until the next source-quality `Ready` frame arrives. Once it does, stale searches,
+     * results, and errors from a different FrameId are cancelled and removed rather than remaining
+     * actionable beside another frame.
+     */
+    fun onAuthoritativeTargetChanged(sessionId: Long?, targetFrameId: Long?) {
+        val stateTarget = when (val current = _state.value) {
+            is MicroscopeSimilarityUiState.Searching -> SimilarityTargetIdentity(
+                current.sessionId,
+                current.targetFrameId,
+            )
+            is MicroscopeSimilarityUiState.Ready -> SimilarityTargetIdentity(
+                current.result.sessionId,
+                current.result.targetFrameId,
+            )
+            is MicroscopeSimilarityUiState.Error -> SimilarityTargetIdentity(
+                current.sessionId,
+                current.targetFrameId,
+            )
             MicroscopeSimilarityUiState.Idle -> null
-        }
-        if (stateSession != null && stateSession != sessionId) {
+        } ?: return
+
+        val sessionChanged = stateTarget.sessionId != sessionId
+        val authoritativeFrameChanged = targetFrameId != null &&
+            stateTarget.targetFrameId != targetFrameId
+        if (sessionChanged || authoritativeFrameChanged) {
             cancelSearch()
         }
     }
