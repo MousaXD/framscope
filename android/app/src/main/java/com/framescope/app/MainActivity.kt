@@ -170,8 +170,8 @@ class MainActivity : ComponentActivity() {
                         val ready = state.microscopeState as? MicroscopeUiState.Ready
                         batchExportViewModel.onDestinationSelected(
                             treeUri = uri.toString(),
-                            currentSessionId = ready?.session.sessionId,
-                            currentFrameId = ready?.session.currentFrame?.frameId,
+                            currentSessionId = ready?.session?.sessionId,
+                            currentFrameId = ready?.session?.currentFrame?.frameId,
                         )
                     }
                 }
