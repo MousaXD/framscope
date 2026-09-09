@@ -12,7 +12,8 @@ pub use cached_navigation::{
     navigate_to_frame_cached,
 };
 pub use engine::{
-    CancellationToken, ObservedFrameRateMode, OpenOptions, VideoDecoder, VideoStreamSelection,
+    CancellationToken, DecodedPreviewRgbaFrame, ObservedFrameRateMode, OpenOptions, VideoDecoder,
+    VideoStreamSelection,
 };
 pub use framescope_core::{
     CodecInfo, ContainerInfo, DecodedFrame, FrameScopeError, MediaDuration, MediaKind,
@@ -42,8 +43,9 @@ pub use scrub_preview::{
     ScrubPreviewCache, ScrubPreviewCacheStats, ScrubPreviewError, downscale_scrub_preview,
 };
 pub use target_rgba_navigation::{
-    TargetRgbaNavigationCursor, TargetRgbaNavigationDecoder, navigate_to_frame_cached_target_only,
-    navigate_to_frame_cached_target_only_with_cursor,
+    TargetPreviewNavigationError, TargetPreviewNavigationResult, TargetRgbaNavigationCursor,
+    TargetRgbaNavigationDecoder, navigate_to_frame_bounded_preview_with_cursor,
+    navigate_to_frame_cached_target_only, navigate_to_frame_cached_target_only_with_cursor,
 };
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;

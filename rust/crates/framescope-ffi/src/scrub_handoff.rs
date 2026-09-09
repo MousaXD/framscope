@@ -1,9 +1,10 @@
-use framescope_cache::{FrameCacheHierarchy, FrameId};
+use framescope_cache::{FrameCacheError, FrameCacheHierarchy, FrameCacheKey, FrameId};
 use framescope_core::FrameScopeError;
 use framescope_video::{
-    CachedFrameSource, CachedNavigationError, CancellationToken, MicroscopeTimestampSelection,
-    OpenOptions, ScrubPreviewCache, TargetRgbaNavigationCursor, VideoDecoder,
+    CachedNavigationError, CancellationToken, MicroscopeTimestampSelection, OpenOptions,
+    ScrubPreviewCache, TargetPreviewNavigationError, TargetRgbaNavigationCursor, VideoDecoder,
     downscale_scrub_preview, microscope_target, microscope_timestamp_us,
+    navigate_to_frame_bounded_preview_with_cursor,
     navigate_to_frame_cached_target_only_with_cursor,
 };
 use jni::JNIEnv;
@@ -753,6 +754,33 @@ fn render_frame_response(
 }
 
 #[cfg(unix)]
+fn source_quality_ram_hit(
+    session_id: i64,
+    frame_id: FrameId,
+    state: &Arc<Mutex<ScrubSessionState>>,
+) -> Result<Option<framescope_cache::OwnedRgbaFrame>, PreviewFailure> {
+    microscope::with_extraction_context(session_id, |_source_fd, index| {
+        let key = match FrameCacheKey::new(
+            index.source_identity(),
+            index.stream_identity().stream_index,
+            frame_id,
+        ) {
+            Ok(key) => key,
+            Err(FrameCacheError::UnsafeSourceIdentity) => return Ok(None),
+            Err(error) => return Err(PreviewFailure::new("cache_error", error.to_string())),
+        };
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        Ok(state
+            .source_cache
+            .lookup_full(&key)
+            .map(|cached| cached.pixels))
+    })
+    .map_err(from_microscope_failure)?
+}
+
+#[cfg(unix)]
 fn render_preview(
     session_id: i64,
     max_edge: i32,
@@ -816,40 +844,56 @@ fn render_preview(
         );
     }
 
-    // Only source-cache lookup/decode needs the authoritative source/index borrow. The shared RAM
-    // hierarchy means exact navigation and scrub can hit the same immutable RGBA allocation. The
-    // session lock is released before downscaling, preview-cache insertion, and JNI buffer copy.
+    ensure_not_cancelled(&cancellation)?;
+    if let Some(source_pixels) = source_quality_ram_hit(session_id, frame_id, &state)? {
+        ensure_not_cancelled(&cancellation)?;
+        let preview = downscale_scrub_preview(&source_pixels, max_edge)
+            .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
+        ensure_not_cancelled(&cancellation)?;
+        {
+            let mut state = state.lock().map_err(|_| {
+                PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+            })?;
+            state
+                .preview_cache
+                .insert(frame_id, max_edge, preview.clone());
+        }
+        return finish_preview(
+            session_id,
+            frame_id,
+            timestamp_us,
+            preview,
+            "source_ram",
+            0,
+            destination,
+        );
+    }
+
+    // A source-quality RAM hit was already handled above and scaled outside the authoritative
+    // microscope lock. Only an actual preview miss re-enters the source/index borrow for exact
+    // metadata reconciliation plus direct bounded native conversion.
     let navigated = microscope::with_extraction_context(session_id, |source_fd, index| {
         ensure_not_cancelled(&cancellation)?;
         let mut state = state.lock().map_err(|_| {
             PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
         })?;
         let decoder_cancellation = cancellation.clone();
-        let ScrubSessionState {
-            source_cache,
-            decoder_cursor,
-            ..
-        } = &mut *state;
-        navigate_to_frame_cached_target_only_with_cursor(
+        let ScrubSessionState { decoder_cursor, .. } = &mut *state;
+        navigate_to_frame_bounded_preview_with_cursor(
             index,
-            source_cache,
             decoder_cursor,
             || open_decoder(source_fd, decoder_cancellation.clone()),
             frame_id,
             MAX_FORWARD_CURSOR_REUSE_FRAMES,
+            max_edge,
         )
-        .map_err(from_navigation)
+        .map_err(from_preview_navigation)
     })
     .map_err(from_microscope_failure)??;
     ensure_not_cancelled(&cancellation)?;
 
-    let source = match navigated.source {
-        CachedFrameSource::Ram => "source_ram",
-        CachedFrameSource::Decoded => "decoded",
-    };
     let decoded_frames = navigated.decoded_frames;
-    let preview = downscale_scrub_preview(&navigated.pixels, max_edge)
-        .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
+    let preview = navigated.pixels;
     ensure_not_cancelled(&cancellation)?;
     {
         let mut state = state.lock().map_err(|_| {
@@ -864,7 +908,7 @@ fn render_preview(
         frame_id,
         timestamp_us,
         preview,
-        source,
+        "decoded",
         decoded_frames,
         destination,
     )
@@ -1162,6 +1206,15 @@ fn from_navigation(error: CachedNavigationError) -> PreviewFailure {
         CachedNavigationError::Decoder(_) => "decoder_error",
     };
     PreviewFailure::new(code, error.to_string())
+}
+
+fn from_preview_navigation(error: TargetPreviewNavigationError) -> PreviewFailure {
+    match error {
+        TargetPreviewNavigationError::Navigation(error) => from_navigation(error),
+        TargetPreviewNavigationError::Preview(error) => {
+            PreviewFailure::new("preview_scale_error", error.to_string())
+        }
+    }
 }
 
 fn serialize_result(result: Result<PreviewDetails, PreviewFailure>) -> String {

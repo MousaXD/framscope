@@ -55,6 +55,20 @@ pub struct DecodedRgbaFrame {
     pub pixels: Vec<u8>,
 }
 
+/// Disposable bounded RGBA pixels for an already-verified decoded presentation frame.
+///
+/// `frame` retains source-quality metadata and identity. `width`/`height` describe only the
+/// disposable preview pixel buffer and must never be used as authoritative frame dimensions or
+/// inserted under a source-quality cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedPreviewRgbaFrame {
+    pub frame: DecodedFrame,
+    pub width: u32,
+    pub height: u32,
+    pub stride_bytes: usize,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Default)]
 struct TimestampCadence {
     last: Option<MediaTimestamp>,
@@ -315,6 +329,71 @@ impl VideoDecoder {
 
         Ok(DecodedRgbaFrame {
             frame: frame.clone(),
+            stride_bytes: rgba.stride,
+            pixels: rgba.pixels,
+        })
+    }
+
+    /// Materialize a bounded disposable preview for the exact current presentation frame.
+    ///
+    /// Exact frame identity is checked before pixel conversion. The native scaler converts the
+    /// verified AVFrame directly to the requested bounded size, so large sources do not first
+    /// allocate a full-resolution RGBA intermediate. Small frames are never upscaled.
+    pub fn snapshot_current_frame_preview_rgba(
+        &mut self,
+        frame: &DecodedFrame,
+        max_edge: u32,
+    ) -> Result<DecodedPreviewRgbaFrame, FrameScopeError> {
+        if self.cancellation.is_cancelled() {
+            return Err(FrameScopeError::Cancelled);
+        }
+        if self.current_frame.as_ref() != Some(frame) {
+            return Err(FrameScopeError::DecoderFailure(
+                "preview RGBA snapshot request does not match the decoder's current frame".into(),
+            ));
+        }
+        let (target_width, target_height) = crate::scrub_preview::preview_dimensions(
+            frame.width,
+            frame.height,
+            max_edge,
+        )
+        .map_err(|error| {
+            FrameScopeError::DecoderFailure(format!("invalid bounded preview dimensions: {error}"))
+        })?;
+        let rgba = if target_width == frame.width && target_height == frame.height {
+            self.session.copy_current_frame_rgba()
+        } else {
+            self.session
+                .copy_current_frame_rgba_resized(target_width, target_height)
+        }
+        .map_err(map_native_error)?;
+        if rgba.width != target_width || rgba.height != target_height {
+            return Err(FrameScopeError::DecoderFailure(format!(
+                "bounded RGBA snapshot dimensions {}x{} do not match requested {}x{}",
+                rgba.width, rgba.height, target_width, target_height
+            )));
+        }
+        let expected = rgba
+            .stride
+            .checked_mul(usize::try_from(target_height).map_err(|_| {
+                FrameScopeError::DecoderFailure("bounded preview height exceeds memory size".into())
+            })?)
+            .ok_or_else(|| {
+                FrameScopeError::DecoderFailure(
+                    "bounded preview RGBA byte size overflows memory".into(),
+                )
+            })?;
+        if rgba.pixels.len() != expected {
+            return Err(FrameScopeError::DecoderFailure(format!(
+                "bounded RGBA snapshot has {} bytes, expected {expected}",
+                rgba.pixels.len()
+            )));
+        }
+
+        Ok(DecodedPreviewRgbaFrame {
+            frame: frame.clone(),
+            width: rgba.width,
+            height: rgba.height,
             stride_bytes: rgba.stride,
             pixels: rgba.pixels,
         })

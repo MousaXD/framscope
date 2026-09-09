@@ -48,6 +48,24 @@ fn current_decoded_frame_copies_to_owned_tightly_packed_rgba() {
 }
 
 #[test]
+fn native_resized_copy_is_bounded_and_rejects_upscale() {
+    let mut session = Session::open_path(&fixture("h264-cfr.mp4"), None, CancellationToken::new())
+        .expect("fixture should open");
+    session
+        .next_frame()
+        .expect("decode should succeed")
+        .expect("fixture should contain a frame");
+
+    let preview = session
+        .copy_current_frame_rgba_resized(32, 24)
+        .expect("native bounded conversion should succeed");
+    assert_eq!((preview.width, preview.height), (32, 24));
+    assert_eq!(preview.stride, 32 * 4);
+    assert_eq!(preview.pixels.len(), 32 * 24 * 4);
+    assert!(session.copy_current_frame_rgba_resized(65, 48).is_err());
+}
+
+#[test]
 fn repeated_rgba_copy_of_same_frame_is_pixel_identical() {
     let mut session = Session::open_path(&fixture("h264-cfr.mp4"), None, CancellationToken::new())
         .expect("fixture should open");
@@ -70,6 +88,32 @@ fn repeated_rgba_copy_of_same_frame_is_pixel_identical() {
         first.pixels, second.pixels,
         "reusing conversion state must not change RGBA output"
     );
+}
+
+#[test]
+fn bounded_rgba_snapshot_avoids_source_sized_output_and_preserves_full_copy() {
+    let mut decoder =
+        VideoDecoder::open_path(fixture("h264-cfr.mp4")).expect("fixture should open");
+    let frame = decoder
+        .next_frame()
+        .expect("decode should succeed")
+        .expect("fixture should contain a frame");
+    assert_eq!((frame.width, frame.height), (64, 48));
+
+    let preview = decoder
+        .snapshot_current_frame_preview_rgba(&frame, 32)
+        .expect("bounded preview conversion should succeed");
+    assert_eq!((preview.frame.width, preview.frame.height), (64, 48));
+    assert_eq!((preview.width, preview.height), (32, 24));
+    assert_eq!(preview.stride_bytes, 32 * 4);
+    assert_eq!(preview.pixels.len(), 32 * 24 * 4);
+
+    let full = decoder
+        .snapshot_current_frame_rgba(&frame)
+        .expect("full RGBA conversion must still work after bounded conversion");
+    assert_eq!((full.frame.width, full.frame.height), (64, 48));
+    assert_eq!(full.stride_bytes, 64 * 4);
+    assert_eq!(full.pixels.len(), 64 * 48 * 4);
 }
 
 #[test]

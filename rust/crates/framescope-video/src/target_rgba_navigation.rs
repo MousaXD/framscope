@@ -1,12 +1,15 @@
 use crate::{
     CachedFrameSource, CachedNavigationError, CachedNavigationResult, CancellationToken,
-    VideoDecoder, ffmpeg::DecodedRgbaFrame,
+    DecodedPreviewRgbaFrame, ScrubPreviewError, VideoDecoder, downscale_scrub_preview,
+    ffmpeg::DecodedRgbaFrame,
 };
 use framescope_cache::{
     CachedFrame, FrameCacheError, FrameCacheHierarchy, FrameCacheKey, FrameId, FrameIndex,
     FrameIndexEntry, FrameIndexLifecycle, FrameIndexStreamIdentity, KeyframeAnchor, OwnedRgbaFrame,
 };
 use framescope_core::{DecodedFrame, FrameScopeError, StreamInfo};
+
+use thiserror::Error;
 
 /// Decoder contract for indexed navigation that keeps intermediate frames metadata-only.
 ///
@@ -21,6 +24,34 @@ pub trait TargetRgbaNavigationDecoder {
         &mut self,
         frame: &DecodedFrame,
     ) -> Result<DecodedRgbaFrame, FrameScopeError>;
+    fn snapshot_current_preview_rgba_for_target_navigation(
+        &mut self,
+        frame: &DecodedFrame,
+        max_edge: u32,
+    ) -> Result<DecodedPreviewRgbaFrame, FrameScopeError> {
+        let DecodedRgbaFrame {
+            frame,
+            stride_bytes,
+            pixels,
+        } = self.snapshot_current_rgba_for_target_navigation(frame)?;
+        let source = OwnedRgbaFrame::new(frame.width, frame.height, stride_bytes, pixels).map_err(
+            |error| {
+                FrameScopeError::DecoderFailure(format!(
+                    "fallback preview RGBA validation failed: {error}"
+                ))
+            },
+        )?;
+        let preview = downscale_scrub_preview(&source, max_edge).map_err(|error| {
+            FrameScopeError::DecoderFailure(format!("fallback preview scaling failed: {error}"))
+        })?;
+        Ok(DecodedPreviewRgbaFrame {
+            frame,
+            width: preview.width,
+            height: preview.height,
+            stride_bytes: preview.stride_bytes,
+            pixels: preview.pixels().to_vec(),
+        })
+    }
     fn cancellation_token_for_target_navigation(&self) -> Option<CancellationToken> {
         None
     }
@@ -43,6 +74,14 @@ impl TargetRgbaNavigationDecoder for VideoDecoder {
         frame: &DecodedFrame,
     ) -> Result<DecodedRgbaFrame, FrameScopeError> {
         self.snapshot_current_frame_rgba(frame)
+    }
+
+    fn snapshot_current_preview_rgba_for_target_navigation(
+        &mut self,
+        frame: &DecodedFrame,
+        max_edge: u32,
+    ) -> Result<DecodedPreviewRgbaFrame, FrameScopeError> {
+        self.snapshot_current_frame_preview_rgba(frame, max_edge)
     }
 
     fn cancellation_token_for_target_navigation(&self) -> Option<CancellationToken> {
@@ -88,6 +127,33 @@ impl<D: TargetRgbaNavigationDecoder> TargetRgbaNavigationCursor<D> {
 #[derive(Debug)]
 struct TargetNavigationResult {
     frame: DecodedRgbaFrame,
+    decoded_frames: u64,
+    used_keyframe_seek: bool,
+    fell_back_to_stream_start: bool,
+}
+
+#[derive(Debug, Error)]
+pub enum TargetPreviewNavigationError {
+    #[error("bounded target navigation failed: {0}")]
+    Navigation(#[from] CachedNavigationError),
+    #[error("bounded target preview scaling failed: {0}")]
+    Preview(#[from] ScrubPreviewError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetPreviewNavigationResult {
+    pub frame_id: FrameId,
+    pub index_entry: FrameIndexEntry,
+    pub pixels: OwnedRgbaFrame,
+    pub source: CachedFrameSource,
+    pub decoded_frames: u64,
+    pub used_keyframe_seek: bool,
+    pub fell_back_to_stream_start: bool,
+}
+
+#[derive(Debug)]
+struct TargetPreviewDecodedResult {
+    frame: DecodedPreviewRgbaFrame,
     decoded_frames: u64,
     used_keyframe_seek: bool,
     fell_back_to_stream_start: bool,
@@ -239,6 +305,256 @@ where
         fell_back_to_stream_start: decoded.fell_back_to_stream_start,
         cache_insert_result,
     })
+}
+
+/// Decode an exact indexed target directly into bounded disposable preview pixels.
+///
+/// A source-quality RAM hit may be downscaled because those pixels are already resident. On a miss,
+/// only metadata is decoded until the exact indexed target is reconciled; the verified AVFrame is
+/// then converted directly to the requested bounded size. Bounded pixels are never inserted into
+/// the source-quality cache.
+pub fn navigate_to_frame_bounded_preview_with_cursor<D, F>(
+    index: &FrameIndex,
+    cursor: &mut Option<TargetRgbaNavigationCursor<D>>,
+    mut open_fresh_decoder: F,
+    frame_id: FrameId,
+    max_forward_frames: u64,
+    max_edge: u32,
+) -> Result<TargetPreviewNavigationResult, TargetPreviewNavigationError>
+where
+    D: TargetRgbaNavigationDecoder,
+    F: FnMut() -> Result<D, FrameScopeError>,
+{
+    ensure_complete(index)?;
+    let index_entry = index
+        .entry(frame_id)
+        .map_err(CachedNavigationError::from)?
+        .ok_or(CachedNavigationError::FrameNotIndexed)?;
+    let can_continue = cursor
+        .as_ref()
+        .is_some_and(|active| active.can_continue_to(frame_id, max_forward_frames));
+    if cursor.is_some() && !can_continue {
+        *cursor = None;
+    }
+
+    let decoded = if can_continue {
+        let continuation = {
+            let active = cursor
+                .as_mut()
+                .expect("cursor availability was checked before continuation");
+            decode_preview_forward_from_cursor(
+                index,
+                &mut active.decoder,
+                active.frame_id,
+                frame_id,
+                max_edge,
+            )
+        };
+        match continuation {
+            Ok((frame, decoded_frames)) => {
+                cursor
+                    .as_mut()
+                    .expect("successful continuation keeps the cursor")
+                    .frame_id = frame_id;
+                TargetPreviewDecodedResult {
+                    frame,
+                    decoded_frames,
+                    used_keyframe_seek: false,
+                    fell_back_to_stream_start: false,
+                }
+            }
+            Err(CachedNavigationError::TimelineMismatch | CachedNavigationError::UnexpectedEof) => {
+                *cursor = None;
+                let (decoded, decoder) = navigate_target_preview_retained(
+                    index,
+                    &mut open_fresh_decoder,
+                    frame_id,
+                    max_edge,
+                )?;
+                *cursor = Some(TargetRgbaNavigationCursor { decoder, frame_id });
+                decoded
+            }
+            Err(error) => {
+                *cursor = None;
+                return Err(error.into());
+            }
+        }
+    } else {
+        let (decoded, decoder) =
+            navigate_target_preview_retained(index, &mut open_fresh_decoder, frame_id, max_edge)?;
+        *cursor = Some(TargetRgbaNavigationCursor { decoder, frame_id });
+        decoded
+    };
+
+    let pixels = OwnedRgbaFrame::new(
+        decoded.frame.width,
+        decoded.frame.height,
+        decoded.frame.stride_bytes,
+        decoded.frame.pixels,
+    )
+    .map_err(CachedNavigationError::from)?;
+
+    Ok(TargetPreviewNavigationResult {
+        frame_id,
+        index_entry,
+        pixels,
+        source: CachedFrameSource::Decoded,
+        decoded_frames: decoded.decoded_frames,
+        used_keyframe_seek: decoded.used_keyframe_seek,
+        fell_back_to_stream_start: decoded.fell_back_to_stream_start,
+    })
+}
+
+fn navigate_target_preview_retained<D, F>(
+    index: &FrameIndex,
+    open_fresh_decoder: &mut F,
+    frame_id: FrameId,
+    max_edge: u32,
+) -> Result<(TargetPreviewDecodedResult, D), CachedNavigationError>
+where
+    D: TargetRgbaNavigationDecoder,
+    F: FnMut() -> Result<D, FrameScopeError>,
+{
+    ensure_complete(index)?;
+    let target = index
+        .entry(frame_id)?
+        .ok_or(CachedNavigationError::FrameNotIndexed)?;
+    let timestamp_seek_safe = index.timestamp_seek_safety()?.permits_timestamp_seek();
+    let mut decoder = open_checked_decoder(index, open_fresh_decoder)?;
+
+    if timestamp_seek_safe {
+        if let KeyframeAnchor::Keyframe {
+            frame_id: anchor_id,
+            presentation_timestamp: Some(anchor_timestamp),
+        } = target.anchor
+        {
+            if let Some(timestamp_us) = anchor_timestamp
+                .to_microseconds()
+                .filter(|value| *value >= 0)
+            {
+                decoder.seek_for_target_navigation(timestamp_us)?;
+                match decode_preview_from_seek(index, &mut decoder, anchor_id, frame_id, max_edge) {
+                    Ok((frame, decoded_frames)) => {
+                        return Ok((
+                            TargetPreviewDecodedResult {
+                                frame,
+                                decoded_frames,
+                                used_keyframe_seek: true,
+                                fell_back_to_stream_start: false,
+                            },
+                            decoder,
+                        ));
+                    }
+                    Err(
+                        CachedNavigationError::TimelineMismatch
+                        | CachedNavigationError::UnexpectedEof,
+                    ) => {}
+                    Err(error) => return Err(error),
+                }
+
+                let mut fallback = open_checked_decoder(index, open_fresh_decoder)?;
+                let (frame, decoded_frames) =
+                    decode_preview_from_start(index, &mut fallback, frame_id, max_edge)?;
+                return Ok((
+                    TargetPreviewDecodedResult {
+                        frame,
+                        decoded_frames,
+                        used_keyframe_seek: true,
+                        fell_back_to_stream_start: true,
+                    },
+                    fallback,
+                ));
+            }
+        }
+    }
+
+    let (frame, decoded_frames) =
+        decode_preview_from_start(index, &mut decoder, frame_id, max_edge)?;
+    Ok((
+        TargetPreviewDecodedResult {
+            frame,
+            decoded_frames,
+            used_keyframe_seek: false,
+            fell_back_to_stream_start: !timestamp_seek_safe,
+        },
+        decoder,
+    ))
+}
+
+fn decode_preview_from_start<D: TargetRgbaNavigationDecoder>(
+    index: &FrameIndex,
+    decoder: &mut D,
+    target: FrameId,
+    max_edge: u32,
+) -> Result<(DecodedPreviewRgbaFrame, u64), CachedNavigationError> {
+    let mut current = FrameId::ZERO;
+    let mut decoded_frames = 0_u64;
+    loop {
+        let decoded = next_metadata(decoder, &mut decoded_frames)?;
+        verify_decoded(index, current, &decoded)?;
+        if current == target {
+            let rgba =
+                decoder.snapshot_current_preview_rgba_for_target_navigation(&decoded, max_edge)?;
+            return Ok((rgba, decoded_frames));
+        }
+        current = next_frame_id(current)?;
+    }
+}
+
+fn decode_preview_from_seek<D: TargetRgbaNavigationDecoder>(
+    index: &FrameIndex,
+    decoder: &mut D,
+    anchor: FrameId,
+    target: FrameId,
+    max_edge: u32,
+) -> Result<(DecodedPreviewRgbaFrame, u64), CachedNavigationError> {
+    let anchor_entry = index
+        .entry(anchor)?
+        .ok_or(CachedNavigationError::TimelineMismatch)?;
+    let mut decoded_frames = 0_u64;
+
+    let mut decoded = loop {
+        let candidate = next_metadata(decoder, &mut decoded_frames)?;
+        if matches_index_entry(&candidate, &anchor_entry) {
+            break candidate;
+        }
+    };
+    let mut current = anchor;
+
+    loop {
+        verify_decoded(index, current, &decoded)?;
+        if current == target {
+            let rgba =
+                decoder.snapshot_current_preview_rgba_for_target_navigation(&decoded, max_edge)?;
+            return Ok((rgba, decoded_frames));
+        }
+        current = next_frame_id(current)?;
+        decoded = next_metadata(decoder, &mut decoded_frames)?;
+    }
+}
+
+fn decode_preview_forward_from_cursor<D: TargetRgbaNavigationDecoder>(
+    index: &FrameIndex,
+    decoder: &mut D,
+    current: FrameId,
+    target: FrameId,
+    max_edge: u32,
+) -> Result<(DecodedPreviewRgbaFrame, u64), CachedNavigationError> {
+    if target.0 <= current.0 {
+        return Err(CachedNavigationError::TimelineMismatch);
+    }
+    let mut expected = next_frame_id(current)?;
+    let mut decoded_frames = 0_u64;
+    loop {
+        let decoded = next_metadata(decoder, &mut decoded_frames)?;
+        verify_decoded(index, expected, &decoded)?;
+        if expected == target {
+            let rgba =
+                decoder.snapshot_current_preview_rgba_for_target_navigation(&decoded, max_edge)?;
+            return Ok((rgba, decoded_frames));
+        }
+        expected = next_frame_id(expected)?;
+    }
 }
 
 fn navigate_target_rgba_retained<D, F>(
@@ -810,6 +1126,48 @@ mod tests {
         assert_eq!(large_jump_to_cached.source, CachedFrameSource::Ram);
         assert!(cursor.is_none());
         assert_eq!(opens.load(Ordering::Relaxed), opens_after_reversal);
+
+        drop(index);
+        let _ = std::fs::remove_file(index_path);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+
+    #[test]
+    fn bounded_preview_miss_never_populates_full_quality_cache() {
+        let (index_path, index) = complete_index();
+        let cache_root = temp_path("bounded-preview-cache");
+        let mut cache = FrameCacheHierarchy::open(&cache_root, 1024, 0).unwrap();
+        let decoded = Arc::new(AtomicU64::new(0));
+        let materialized = Arc::new(AtomicU64::new(0));
+        let mut cursor = None;
+
+        let preview = navigate_to_frame_bounded_preview_with_cursor(
+            &index,
+            &mut cursor,
+            || Ok(fake_decoder(decoded.clone(), materialized.clone())),
+            FrameId(4),
+            2,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(preview.source, CachedFrameSource::Decoded);
+        assert_eq!((preview.pixels.width, preview.pixels.height), (1, 1));
+        assert_eq!(preview.pixels.pixels(), &[4; 4]);
+
+        let full = navigate_to_frame_cached_target_only(
+            &index,
+            &mut cache,
+            || Ok(fake_decoder(decoded.clone(), materialized.clone())),
+            FrameId(4),
+        )
+        .unwrap();
+        assert_eq!(
+            full.source,
+            CachedFrameSource::Decoded,
+            "bounded preview bytes must never satisfy the source-quality cache key"
+        );
+        assert_eq!(full.pixels.pixels(), &[4; 16]);
 
         drop(index);
         let _ = std::fs::remove_file(index_path);
