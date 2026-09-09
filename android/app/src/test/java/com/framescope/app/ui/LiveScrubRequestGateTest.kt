@@ -3,6 +3,7 @@ package com.framescope.app.ui
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -41,6 +42,67 @@ class LiveScrubRequestGateTest {
         assertEquals(1, gate.inFlightCount())
         assertEquals(0, gate.pendingCount())
         assertTrue(gate.finish(newest))
+    }
+
+    @Test
+    fun repeatedPendingTargetReusesRequestWithoutAddingWork() {
+        val gate = LiveScrubRequestGate()
+        val first = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+        val duplicate = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+
+        assertSame(first, duplicate)
+        assertEquals(1, gate.pendingCount())
+        assertEquals(first, gate.beginNext())
+        assertTrue(gate.finish(first))
+    }
+
+    @Test
+    fun returningToInFlightTargetDropsObsoletePendingDecode() {
+        val gate = LiveScrubRequestGate()
+        val inFlight = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Timestamp(100_000L),
+        )
+        assertEquals(inFlight, gate.beginNext())
+        gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Timestamp(200_000L),
+        )
+
+        val duplicate = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Timestamp(100_000L),
+        )
+
+        assertSame(inFlight, duplicate)
+        assertEquals(0, gate.pendingCount())
+        assertFalse(gate.hasPendingWork())
+        assertTrue(gate.finish(inFlight))
+        assertNull(gate.beginNext())
+    }
+
+    @Test
+    fun sameTargetInDifferentSessionIsNeverDeduplicated() {
+        val gate = LiveScrubRequestGate()
+        val first = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+        val replacement = gate.submit(
+            sessionId = 42L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+
+        assertFalse(first.requestId == replacement.requestId)
+        assertEquals(1, gate.pendingCount())
+        assertEquals(replacement, gate.beginNext())
+        assertTrue(gate.finish(replacement))
     }
 
     @Test
