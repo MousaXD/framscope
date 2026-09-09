@@ -2,8 +2,9 @@ use framescope_cache::{FrameCacheHierarchy, FrameId};
 use framescope_core::FrameScopeError;
 use framescope_video::{
     CachedFrameSource, CachedNavigationError, CancellationToken, MicroscopeTimestampSelection,
-    OpenOptions, ScrubPreviewCache, VideoDecoder, downscale_scrub_preview, microscope_target,
-    microscope_timestamp_us, navigate_to_frame_cached_target_only,
+    OpenOptions, ScrubPreviewCache, TargetRgbaNavigationCursor, VideoDecoder,
+    downscale_scrub_preview, microscope_target, microscope_timestamp_us,
+    navigate_to_frame_cached_target_only_with_cursor,
 };
 use jni::JNIEnv;
 use jni::objects::{JByteBuffer, JClass, JString};
@@ -28,6 +29,7 @@ const PREVIEW_CACHE_MAX_FRAMES: usize = 12;
 const MAX_RETAINED_PREVIEW_SESSIONS: usize = 2;
 const SOURCE_CACHE_DISK_BUDGET_BYTES: u64 = 0;
 const MAX_CONFIGURED_RAM_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+const MAX_FORWARD_CURSOR_REUSE_FRAMES: u64 = 48;
 
 static SOURCE_CACHE_RAM_BUDGET_BYTES: AtomicUsize =
     AtomicUsize::new(DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES);
@@ -81,6 +83,7 @@ struct ScrubSessionState {
     cache_root: PathBuf,
     source_cache: FrameCacheHierarchy,
     preview_cache: ScrubPreviewCache,
+    decoder_cursor: Option<TargetRgbaNavigationCursor<VideoDecoder>>,
 }
 
 #[derive(Debug)]
@@ -173,9 +176,41 @@ fn preview_cache_budget_bytes() -> usize {
     PREVIEW_CACHE_BUDGET_BYTES.load(Ordering::Acquire)
 }
 
+fn cancellation_for_scrub_target(
+    state: &mut ScrubSessionState,
+    frame_id: FrameId,
+) -> CancellationToken {
+    let reusable = state.decoder_cursor.as_ref().and_then(|cursor| {
+        cursor
+            .can_continue_to(frame_id, MAX_FORWARD_CURSOR_REUSE_FRAMES)
+            .then(|| cursor.cancellation_token())
+            .flatten()
+            .filter(|token| !token.is_cancelled())
+    });
+    if let Some(cancellation) = reusable {
+        cancellation
+    } else {
+        state.decoder_cursor = None;
+        CancellationToken::new()
+    }
+}
+
 fn begin_preview_operation(
     session_id: i64,
 ) -> Result<(CancellationToken, PreviewOperationGuard), PreviewFailure> {
+    begin_preview_operation_with_token(session_id, CancellationToken::new())
+}
+
+fn begin_preview_operation_with_token(
+    session_id: i64,
+    cancellation: CancellationToken,
+) -> Result<(CancellationToken, PreviewOperationGuard), PreviewFailure> {
+    if cancellation.is_cancelled() {
+        return Err(PreviewFailure::new(
+            "cancelled",
+            "Live preview decoder cursor was already cancelled.",
+        ));
+    }
     let mut registry = preview_cancellation_registry().lock().map_err(|_| {
         PreviewFailure::new(
             "bridge_error",
@@ -199,7 +234,6 @@ fn begin_preview_operation(
         PreviewFailure::new("bridge_error", "Preview generation space exhausted.")
     })?;
     let generation = registry.next_generation;
-    let cancellation = CancellationToken::new();
     registry.active.insert(
         session_id,
         ActivePreviewOperation {
@@ -432,6 +466,9 @@ fn configure_ram_budgets(
         let mut state = lock_scrub_state(&handle.state);
         if state.cache_root == cache_root {
             state.source_cache.set_ram_budget_bytes(source_cache_bytes);
+            if source_cache_bytes == 0 {
+                state.decoder_cursor = None;
+            }
         }
     }
     rebalance_preview_cache_budgets(&mut registry);
@@ -473,9 +510,9 @@ fn lock_scrub_state(
 }
 
 fn trim_removed_preview_state(handle: ScrubSessionHandle) {
-    lock_scrub_state(&handle.state)
-        .preview_cache
-        .set_budget_bytes(0);
+    let mut state = lock_scrub_state(&handle.state);
+    state.preview_cache.set_budget_bytes(0);
+    state.decoder_cursor = None;
 }
 
 fn with_direct_buffer(
@@ -585,8 +622,6 @@ fn render_preview(
             )
         })?;
     let cache_root = validate_cache_root(cache_root)?;
-    let (cancellation, _operation) = begin_preview_operation(session_id)?;
-    ensure_not_cancelled(&cancellation)?;
 
     // Resolve the persistent target under the authoritative session lock, then release it before
     // touching disposable preview state. This keeps preview-cache hits entirely out of the exact
@@ -597,6 +632,14 @@ fn render_preview(
     let frame_id = target.frame_id();
     let timestamp_us = target.entry.timestamp_us();
     let state = session_state(session_id, &cache_root)?;
+    let cancellation = {
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        cancellation_for_scrub_target(&mut state, frame_id)
+    };
+    let (cancellation, _operation) = begin_preview_operation_with_token(session_id, cancellation)?;
+    ensure_not_cancelled(&cancellation)?;
 
     let cached_preview = {
         let mut state = state.lock().map_err(|_| {
@@ -626,11 +669,18 @@ fn render_preview(
             PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
         })?;
         let decoder_cancellation = cancellation.clone();
-        navigate_to_frame_cached_target_only(
+        let ScrubSessionState {
+            source_cache,
+            decoder_cursor,
+            ..
+        } = &mut *state;
+        navigate_to_frame_cached_target_only_with_cursor(
             index,
-            &mut state.source_cache,
+            source_cache,
+            decoder_cursor,
             || open_decoder(source_fd, decoder_cancellation.clone()),
             frame_id,
+            MAX_FORWARD_CURSOR_REUSE_FRAMES,
         )
         .map_err(from_navigation)
     })
@@ -810,6 +860,7 @@ fn session_state(
         source_cache,
         // Start at zero so adding a session can never transiently oversubscribe the process budget.
         preview_cache: ScrubPreviewCache::new(0, PREVIEW_CACHE_MAX_FRAMES),
+        decoder_cursor: None,
     }));
     registry.sessions.insert(
         session_id,

@@ -1,6 +1,6 @@
 use crate::{
-    CachedFrameSource, CachedNavigationError, CachedNavigationResult, VideoDecoder,
-    ffmpeg::DecodedRgbaFrame,
+    CachedFrameSource, CachedNavigationError, CachedNavigationResult, CancellationToken,
+    VideoDecoder, ffmpeg::DecodedRgbaFrame,
 };
 use framescope_cache::{
     CachedFrame, FrameCacheError, FrameCacheHierarchy, FrameCacheKey, FrameId, FrameIndex,
@@ -21,6 +21,9 @@ pub trait TargetRgbaNavigationDecoder {
         &mut self,
         frame: &DecodedFrame,
     ) -> Result<DecodedRgbaFrame, FrameScopeError>;
+    fn cancellation_token_for_target_navigation(&self) -> Option<CancellationToken> {
+        None
+    }
     fn seek_for_target_navigation(&mut self, timestamp_us: i64) -> Result<(), FrameScopeError>;
 }
 
@@ -42,8 +45,43 @@ impl TargetRgbaNavigationDecoder for VideoDecoder {
         self.snapshot_current_frame_rgba(frame)
     }
 
+    fn cancellation_token_for_target_navigation(&self) -> Option<CancellationToken> {
+        Some(self.cancellation_token())
+    }
+
     fn seek_for_target_navigation(&mut self, timestamp_us: i64) -> Result<(), FrameScopeError> {
         self.seek_to_timestamp_us(timestamp_us)
+    }
+}
+
+pub struct TargetRgbaNavigationCursor<D> {
+    decoder: D,
+    frame_id: FrameId,
+}
+
+impl<D> std::fmt::Debug for TargetRgbaNavigationCursor<D> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TargetRgbaNavigationCursor")
+            .field("frame_id", &self.frame_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<D: TargetRgbaNavigationDecoder> TargetRgbaNavigationCursor<D> {
+    pub fn frame_id(&self) -> FrameId {
+        self.frame_id
+    }
+
+    pub fn can_continue_to(&self, target: FrameId, max_forward_frames: u64) -> bool {
+        target
+            .0
+            .checked_sub(self.frame_id.0)
+            .is_some_and(|delta| delta > 0 && delta <= max_forward_frames)
+    }
+
+    pub fn cancellation_token(&self) -> Option<CancellationToken> {
+        self.decoder.cancellation_token_for_target_navigation()
     }
 }
 
@@ -72,6 +110,37 @@ where
     D: TargetRgbaNavigationDecoder,
     F: FnMut() -> Result<D, FrameScopeError>,
 {
+    let mut cursor = None;
+    navigate_to_frame_cached_target_only_with_cursor(
+        index,
+        cache,
+        &mut cursor,
+        &mut open_fresh_decoder,
+        frame_id,
+        0,
+    )
+}
+
+/// Target-only RGBA navigation with deterministic nearby-forward decoder locality.
+///
+/// A verified cursor may only continue to a strictly later FrameId within `max_forward_frames`.
+/// Reversal, same-frame requests, and larger jumps discard the decoder before any source work. A
+/// cursor failure also discards it; timeline/EOF failures retry through the normal fresh-decoder
+/// path, while decoder/cancellation failures are returned to the caller. Every frame crossed by a
+/// reused cursor is reconciled against the authoritative persistent index before the target pixels
+/// are materialized.
+pub fn navigate_to_frame_cached_target_only_with_cursor<D, F>(
+    index: &FrameIndex,
+    cache: &mut FrameCacheHierarchy,
+    cursor: &mut Option<TargetRgbaNavigationCursor<D>>,
+    mut open_fresh_decoder: F,
+    frame_id: FrameId,
+    max_forward_frames: u64,
+) -> Result<CachedNavigationResult, CachedNavigationError>
+where
+    D: TargetRgbaNavigationDecoder,
+    F: FnMut() -> Result<D, FrameScopeError>,
+{
     ensure_complete(index)?;
     let index_entry = index
         .entry(frame_id)?
@@ -85,6 +154,13 @@ where
         Err(FrameCacheError::UnsafeSourceIdentity) => None,
         Err(error) => return Err(error.into()),
     };
+
+    let can_continue = cursor
+        .as_ref()
+        .is_some_and(|active| active.can_continue_to(frame_id, max_forward_frames));
+    if cursor.is_some() && !can_continue {
+        *cursor = None;
+    }
 
     if let Some(key) = key.as_ref() {
         if let Some(cached) = cache.lookup_full(key) {
@@ -101,7 +177,45 @@ where
         }
     }
 
-    let decoded = navigate_target_rgba(index, &mut open_fresh_decoder, frame_id)?;
+    let decoded = if can_continue {
+        let continuation = {
+            let active = cursor
+                .as_mut()
+                .expect("cursor availability was checked before continuation");
+            decode_forward_from_cursor(index, &mut active.decoder, active.frame_id, frame_id)
+        };
+        match continuation {
+            Ok((frame, decoded_frames)) => {
+                cursor
+                    .as_mut()
+                    .expect("successful continuation keeps the cursor")
+                    .frame_id = frame_id;
+                TargetNavigationResult {
+                    frame,
+                    decoded_frames,
+                    used_keyframe_seek: false,
+                    fell_back_to_stream_start: false,
+                }
+            }
+            Err(CachedNavigationError::TimelineMismatch | CachedNavigationError::UnexpectedEof) => {
+                *cursor = None;
+                let (decoded, decoder) =
+                    navigate_target_rgba_retained(index, &mut open_fresh_decoder, frame_id)?;
+                *cursor = Some(TargetRgbaNavigationCursor { decoder, frame_id });
+                decoded
+            }
+            Err(error) => {
+                *cursor = None;
+                return Err(error);
+            }
+        }
+    } else {
+        let (decoded, decoder) =
+            navigate_target_rgba_retained(index, &mut open_fresh_decoder, frame_id)?;
+        *cursor = Some(TargetRgbaNavigationCursor { decoder, frame_id });
+        decoded
+    };
+
     let pixels = OwnedRgbaFrame::new(
         decoded.frame.frame.width,
         decoded.frame.frame.height,
@@ -127,11 +241,11 @@ where
     })
 }
 
-fn navigate_target_rgba<D, F>(
+fn navigate_target_rgba_retained<D, F>(
     index: &FrameIndex,
     open_fresh_decoder: &mut F,
     frame_id: FrameId,
-) -> Result<TargetNavigationResult, CachedNavigationError>
+) -> Result<(TargetNavigationResult, D), CachedNavigationError>
 where
     D: TargetRgbaNavigationDecoder,
     F: FnMut() -> Result<D, FrameScopeError>,
@@ -154,12 +268,15 @@ where
             decoder.seek_for_target_navigation(timestamp_us)?;
             match decode_from_seek(index, &mut decoder, anchor_id, frame_id) {
                 Ok((frame, decoded_frames)) => {
-                    return Ok(TargetNavigationResult {
-                        frame,
-                        decoded_frames,
-                        used_keyframe_seek: true,
-                        fell_back_to_stream_start: false,
-                    });
+                    return Ok((
+                        TargetNavigationResult {
+                            frame,
+                            decoded_frames,
+                            used_keyframe_seek: true,
+                            fell_back_to_stream_start: false,
+                        },
+                        decoder,
+                    ));
                 }
                 Err(
                     CachedNavigationError::TimelineMismatch | CachedNavigationError::UnexpectedEof,
@@ -169,22 +286,28 @@ where
 
             let mut fallback = open_checked_decoder(index, open_fresh_decoder)?;
             let (frame, decoded_frames) = decode_from_start(index, &mut fallback, frame_id)?;
-            return Ok(TargetNavigationResult {
-                frame,
-                decoded_frames,
-                used_keyframe_seek: true,
-                fell_back_to_stream_start: true,
-            });
+            return Ok((
+                TargetNavigationResult {
+                    frame,
+                    decoded_frames,
+                    used_keyframe_seek: true,
+                    fell_back_to_stream_start: true,
+                },
+                fallback,
+            ));
         }
     }
 
     let (frame, decoded_frames) = decode_from_start(index, &mut decoder, frame_id)?;
-    Ok(TargetNavigationResult {
-        frame,
-        decoded_frames,
-        used_keyframe_seek: false,
-        fell_back_to_stream_start: false,
-    })
+    Ok((
+        TargetNavigationResult {
+            frame,
+            decoded_frames,
+            used_keyframe_seek: false,
+            fell_back_to_stream_start: false,
+        },
+        decoder,
+    ))
 }
 
 fn ensure_complete(index: &FrameIndex) -> Result<(), CachedNavigationError> {
@@ -254,6 +377,28 @@ fn decode_from_seek<D: TargetRgbaNavigationDecoder>(
         }
         current = next_frame_id(current)?;
         decoded = next_metadata(decoder, &mut decoded_frames)?;
+    }
+}
+
+fn decode_forward_from_cursor<D: TargetRgbaNavigationDecoder>(
+    index: &FrameIndex,
+    decoder: &mut D,
+    current: FrameId,
+    target: FrameId,
+) -> Result<(DecodedRgbaFrame, u64), CachedNavigationError> {
+    if target.0 <= current.0 {
+        return Err(CachedNavigationError::TimelineMismatch);
+    }
+    let mut expected = next_frame_id(current)?;
+    let mut decoded_frames = 0_u64;
+    loop {
+        let decoded = next_metadata(decoder, &mut decoded_frames)?;
+        verify_decoded(index, expected, &decoded)?;
+        if expected == target {
+            let rgba = decoder.snapshot_current_rgba_for_target_navigation(&decoded)?;
+            return Ok((rgba, decoded_frames));
+        }
+        expected = next_frame_id(expected)?;
     }
 }
 
@@ -518,6 +663,96 @@ mod tests {
         assert_eq!(second.source, CachedFrameSource::Ram);
         assert_eq!(decoded.load(Ordering::Relaxed), decoded_after_first);
         assert_eq!(materialized.load(Ordering::Relaxed), 1);
+
+        drop(index);
+        let _ = std::fs::remove_file(index_path);
+        let _ = std::fs::remove_dir_all(cache_root);
+    }
+    #[test]
+    fn cursor_reuses_nearby_forward_decoder_and_resets_on_reversal_or_large_jump() {
+        let (index_path, index) = complete_index();
+        let cache_root = temp_path("cursor-cache");
+        let mut cache = FrameCacheHierarchy::open(&cache_root, 1024, 0).unwrap();
+        let decoded = Arc::new(AtomicU64::new(0));
+        let materialized = Arc::new(AtomicU64::new(0));
+        let opens = Arc::new(AtomicU64::new(0));
+        let mut cursor = None;
+
+        let first = navigate_to_frame_cached_target_only_with_cursor(
+            &index,
+            &mut cache,
+            &mut cursor,
+            || {
+                opens.fetch_add(1, Ordering::Relaxed);
+                Ok(fake_decoder(decoded.clone(), materialized.clone()))
+            },
+            FrameId(3),
+            2,
+        )
+        .unwrap();
+        assert_eq!(first.source, CachedFrameSource::Decoded);
+        assert_eq!(
+            cursor.as_ref().map(TargetRgbaNavigationCursor::frame_id),
+            Some(FrameId(3)),
+        );
+        let opens_after_first = opens.load(Ordering::Relaxed);
+        assert!(opens_after_first >= 1);
+
+        let second = navigate_to_frame_cached_target_only_with_cursor(
+            &index,
+            &mut cache,
+            &mut cursor,
+            || {
+                opens.fetch_add(1, Ordering::Relaxed);
+                Ok(fake_decoder(decoded.clone(), materialized.clone()))
+            },
+            FrameId(4),
+            2,
+        )
+        .unwrap();
+        assert_eq!(second.source, CachedFrameSource::Decoded);
+        assert_eq!(second.decoded_frames, 1);
+        assert_eq!(opens.load(Ordering::Relaxed), opens_after_first);
+        assert_eq!(
+            cursor.as_ref().map(TargetRgbaNavigationCursor::frame_id),
+            Some(FrameId(4)),
+        );
+
+        let reversal = navigate_to_frame_cached_target_only_with_cursor(
+            &index,
+            &mut cache,
+            &mut cursor,
+            || {
+                opens.fetch_add(1, Ordering::Relaxed);
+                Ok(fake_decoder(decoded.clone(), materialized.clone()))
+            },
+            FrameId(1),
+            2,
+        )
+        .unwrap();
+        assert_eq!(reversal.source, CachedFrameSource::Decoded);
+        assert!(opens.load(Ordering::Relaxed) > opens_after_first);
+        assert_eq!(
+            cursor.as_ref().map(TargetRgbaNavigationCursor::frame_id),
+            Some(FrameId(1)),
+        );
+
+        let opens_after_reversal = opens.load(Ordering::Relaxed);
+        let large_jump_to_cached = navigate_to_frame_cached_target_only_with_cursor(
+            &index,
+            &mut cache,
+            &mut cursor,
+            || {
+                opens.fetch_add(1, Ordering::Relaxed);
+                Ok(fake_decoder(decoded.clone(), materialized.clone()))
+            },
+            FrameId(4),
+            1,
+        )
+        .unwrap();
+        assert_eq!(large_jump_to_cached.source, CachedFrameSource::Ram);
+        assert!(cursor.is_none());
+        assert_eq!(opens.load(Ordering::Relaxed), opens_after_reversal);
 
         drop(index);
         let _ = std::fs::remove_file(index_path);

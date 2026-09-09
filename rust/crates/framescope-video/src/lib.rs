@@ -41,7 +41,8 @@ pub use scrub_preview::{
     ScrubPreviewCache, ScrubPreviewCacheStats, ScrubPreviewError, downscale_scrub_preview,
 };
 pub use target_rgba_navigation::{
-    TargetRgbaNavigationDecoder, navigate_to_frame_cached_target_only,
+    TargetRgbaNavigationCursor, TargetRgbaNavigationDecoder, navigate_to_frame_cached_target_only,
+    navigate_to_frame_cached_target_only_with_cursor,
 };
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;
