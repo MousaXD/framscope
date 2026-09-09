@@ -9,7 +9,7 @@ PREFIX="${FRAMESCOPE_FFMPEG_HWDECODE_ROOT:-$ROOT/.native/ffmpeg-hwdecode-probe/$
 OUTPUT_DIR="${FRAMESCOPE_HWDECODE_BENCH_OUT:-$ROOT/.native/hwdecode-bench/$ABI}"
 SOURCE="$ROOT/tools/android-hwdecode/framescope_decode_bench.c"
 
-"$ROOT/scripts/build-ffmpeg-android-hwdecode-probe.sh"
+bash "$ROOT/scripts/build-ffmpeg-android-hwdecode-probe.sh"
 
 NDK_ROOT="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 if [[ -z "$NDK_ROOT" && -n "${ANDROID_HOME:-}" ]]; then
