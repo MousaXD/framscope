@@ -18,6 +18,7 @@ framescope-extraction-output = { path = "../framescope-extraction-output" }
 framescope-group-navigation = { path = "../framescope-group-navigation" }
 framescope-group-navigation-video = { path = "../framescope-group-navigation-video" }
 framescope-perceptual = { path = "../framescope-perceptual" }
+framescope-similarity-store = { path = "../framescope-similarity-store" }
 framescope-video = { path = "../framescope-video" }
 jni.workspace = true
 libc.workspace = true
