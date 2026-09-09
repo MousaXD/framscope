@@ -14,7 +14,7 @@ import com.framescope.app.data.ScrubPerformanceTelemetry
  * unsupported.
  */
 internal class LiveScrubRequestGate(
-    private val nanoTime: () -> Long = System::nanoTime,
+    private val nanoTime: () -> Long = { System.nanoTime() },
 ) {
     private var nextRequestId = 1L
     private var epoch = 1L
@@ -85,6 +85,7 @@ internal class LiveScrubRequestGate(
         inFlight = request
         ScrubUxTelemetry.recordRequestStarted(
             requestId = request.requestId,
+            sessionId = request.sessionId,
             submittedAtNanos = request.submittedAtNanos,
             startedAtNanos = nanoTime().coerceAtLeast(0L),
         )
@@ -101,6 +102,7 @@ internal class LiveScrubRequestGate(
             ScrubPerformanceTelemetry.recordGateCompletion(publishable = false)
             ScrubUxTelemetry.recordRequestFinished(
                 requestId = request.requestId,
+                sessionId = request.sessionId,
                 submittedAtNanos = request.submittedAtNanos,
                 finishedAtNanos = finishedAtNanos,
                 publishable = false,
@@ -112,6 +114,7 @@ internal class LiveScrubRequestGate(
         ScrubPerformanceTelemetry.recordGateCompletion(publishable)
         ScrubUxTelemetry.recordRequestFinished(
             requestId = request.requestId,
+            sessionId = request.sessionId,
             submittedAtNanos = request.submittedAtNanos,
             finishedAtNanos = finishedAtNanos,
             publishable = publishable,
