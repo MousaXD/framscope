@@ -196,6 +196,7 @@ fn cancellation_for_scrub_target(
     }
 }
 
+#[cfg(test)]
 fn begin_preview_operation(
     session_id: i64,
 ) -> Result<(CancellationToken, PreviewOperationGuard), PreviewFailure> {
