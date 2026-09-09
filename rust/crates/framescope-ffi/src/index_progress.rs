@@ -2,7 +2,7 @@ use framescope_video::{IndexingProgress, IndexingProgressStage};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::OperationId;
 
@@ -13,12 +13,16 @@ static MICROSCOPE_INDEX_PROGRESS: OnceLock<Mutex<HashMap<OperationId, ProgressSt
 #[derive(Debug)]
 struct ProgressState {
     started_at: Instant,
+    sequence: u64,
+    sample_elapsed_ms: u64,
+    last_work_advance_elapsed_ms: u64,
     stage: &'static str,
     indexed_frames: u64,
     reused_frames: u64,
     expected_reuse_frames: u64,
     first_timestamp_us: Option<i64>,
     current_timestamp_us: Option<i64>,
+    max_presentation_timestamp_us: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -37,12 +41,19 @@ impl Drop for ProgressOperation {
 #[derive(Debug, Serialize)]
 struct ProgressPayload {
     operation_id: OperationId,
+    sequence: u64,
     stage: &'static str,
     indexed_frames: u64,
     reused_frames: u64,
     expected_reuse_frames: u64,
     first_timestamp_us: Option<i64>,
     current_timestamp_us: Option<i64>,
+    max_presentation_timestamp_us: Option<i64>,
+    sample_elapsed_ms: u64,
+    last_work_advance_elapsed_ms: u64,
+    operation_elapsed_ms: u64,
+    // Kept as an additive compatibility alias for older diagnostics. New estimators must use
+    // sample_elapsed_ms for throughput and operation_elapsed_ms only for operation age/stalls.
     elapsed_ms: u64,
 }
 
@@ -57,6 +68,10 @@ fn progress_states() -> &'static Mutex<HashMap<OperationId, ProgressState>> {
     MICROSCOPE_INDEX_PROGRESS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn elapsed_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 pub(crate) fn begin(operation_id: OperationId) -> Option<ProgressOperation> {
     if operation_id <= 0 {
         return None;
@@ -69,12 +84,16 @@ pub(crate) fn begin(operation_id: OperationId) -> Option<ProgressOperation> {
         operation_id,
         ProgressState {
             started_at: Instant::now(),
+            sequence: 0,
+            sample_elapsed_ms: 0,
+            last_work_advance_elapsed_ms: 0,
             stage: "probing_media",
             indexed_frames: 0,
             reused_frames: 0,
             expected_reuse_frames: 0,
             first_timestamp_us: None,
             current_timestamp_us: None,
+            max_presentation_timestamp_us: None,
         },
     );
     Some(ProgressOperation { id: operation_id })
@@ -87,17 +106,54 @@ pub(crate) fn update(operation_id: OperationId, progress: IndexingProgress) {
     let Some(state) = states.get_mut(&operation_id) else {
         return;
     };
+
+    let sample_elapsed_ms = elapsed_ms(state.started_at.elapsed());
+    let previous_indexed_frames = state.indexed_frames;
+    let previous_reused_frames = state.reused_frames;
+    let previous_max_timestamp_us = state.max_presentation_timestamp_us;
+
+    // A rebuild starts a new authoritative coverage attempt. Do not let a rejected persisted tail
+    // make fresh indexing appear to have already covered that old presentation range.
+    if progress.stage == IndexingProgressStage::RebuildingIndex {
+        state.first_timestamp_us = None;
+        state.current_timestamp_us = None;
+        state.max_presentation_timestamp_us = None;
+    }
+
+    state.sequence = state.sequence.saturating_add(1);
+    state.sample_elapsed_ms = sample_elapsed_ms;
     state.stage = stage_name(progress.stage);
     state.indexed_frames = progress.indexed_frames;
     state.reused_frames = progress.reused_frames;
     state.expected_reuse_frames = progress.expected_reuse_frames;
+    state.current_timestamp_us = progress.current_timestamp_us;
+
     if let Some(timestamp_us) = progress.current_timestamp_us {
         state.first_timestamp_us = Some(
             state
                 .first_timestamp_us
                 .map_or(timestamp_us, |first| first.min(timestamp_us)),
         );
-        state.current_timestamp_us = Some(timestamp_us);
+        state.max_presentation_timestamp_us = Some(
+            state
+                .max_presentation_timestamp_us
+                .map_or(timestamp_us, |maximum| maximum.max(timestamp_us)),
+        );
+    }
+
+    let coverage_advanced = match (
+        previous_max_timestamp_us,
+        state.max_presentation_timestamp_us,
+    ) {
+        (Some(previous), Some(current)) => current > previous,
+        (None, Some(_)) => true,
+        _ => false,
+    };
+    let work_advanced = state.indexed_frames > previous_indexed_frames
+        || state.reused_frames > previous_reused_frames
+        || coverage_advanced;
+    if work_advanced {
+        state.last_work_advance_elapsed_ms = sample_elapsed_ms;
     }
 }
 
@@ -106,18 +162,25 @@ pub(crate) fn response_json(operation_id: OperationId) -> String {
         .lock()
         .ok()
         .and_then(|states| {
-            states.get(&operation_id).map(|state| ProgressResponse::Ok {
-                progress: ProgressPayload {
-                    operation_id,
-                    stage: state.stage,
-                    indexed_frames: state.indexed_frames,
-                    reused_frames: state.reused_frames,
-                    expected_reuse_frames: state.expected_reuse_frames,
-                    first_timestamp_us: state.first_timestamp_us,
-                    current_timestamp_us: state.current_timestamp_us,
-                    elapsed_ms: u64::try_from(state.started_at.elapsed().as_millis())
-                        .unwrap_or(u64::MAX),
-                },
+            states.get(&operation_id).map(|state| {
+                let operation_elapsed_ms = elapsed_ms(state.started_at.elapsed());
+                ProgressResponse::Ok {
+                    progress: ProgressPayload {
+                        operation_id,
+                        sequence: state.sequence,
+                        stage: state.stage,
+                        indexed_frames: state.indexed_frames,
+                        reused_frames: state.reused_frames,
+                        expected_reuse_frames: state.expected_reuse_frames,
+                        first_timestamp_us: state.first_timestamp_us,
+                        current_timestamp_us: state.current_timestamp_us,
+                        max_presentation_timestamp_us: state.max_presentation_timestamp_us,
+                        sample_elapsed_ms: state.sample_elapsed_ms,
+                        last_work_advance_elapsed_ms: state.last_work_advance_elapsed_ms,
+                        operation_elapsed_ms,
+                        elapsed_ms: operation_elapsed_ms,
+                    },
+                }
             })
         })
         .unwrap_or(ProgressResponse::Idle);
@@ -138,6 +201,29 @@ fn stage_name(stage: IndexingProgressStage) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::thread;
+
+    fn payload(operation_id: OperationId) -> Value {
+        let root: Value = serde_json::from_str(&response_json(operation_id)).expect("valid JSON");
+        root.get("progress").cloned().expect("progress payload")
+    }
+
+    fn indexing_progress(
+        stage: IndexingProgressStage,
+        indexed_frames: u64,
+        reused_frames: u64,
+        expected_reuse_frames: u64,
+        current_timestamp_us: Option<i64>,
+    ) -> IndexingProgress {
+        IndexingProgress {
+            stage,
+            indexed_frames,
+            reused_frames,
+            expected_reuse_frames,
+            current_timestamp_us,
+        }
+    }
 
     #[test]
     fn progress_is_operation_scoped_and_removed_on_drop() {
@@ -145,13 +231,13 @@ mod tests {
         let guard = begin(operation_id).expect("progress slot");
         update(
             operation_id,
-            IndexingProgress {
-                stage: IndexingProgressStage::Indexing,
-                indexed_frames: 128,
-                reused_frames: 32,
-                expected_reuse_frames: 32,
-                current_timestamp_us: Some(4_200_000),
-            },
+            indexing_progress(
+                IndexingProgressStage::Indexing,
+                128,
+                32,
+                32,
+                Some(4_200_000),
+            ),
         );
         let json = response_json(operation_id);
         assert!(json.contains("\"stage\":\"indexing\""));
@@ -162,54 +248,129 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_origin_tracks_earliest_observed_vfr_pts() {
+    fn repeated_reads_do_not_create_new_native_samples() {
         let operation_id = 73_002;
         let guard = begin(operation_id).expect("progress slot");
-        for timestamp_us in [205_000, 100_000, 141_000] {
+        update(
+            operation_id,
+            indexing_progress(IndexingProgressStage::Indexing, 64, 0, 0, Some(1_000_000)),
+        );
+        let first = payload(operation_id);
+        thread::sleep(Duration::from_millis(3));
+        let repeated = payload(operation_id);
+
+        assert_eq!(first["sequence"], repeated["sequence"]);
+        assert_eq!(first["sample_elapsed_ms"], repeated["sample_elapsed_ms"]);
+        assert_eq!(
+            first["last_work_advance_elapsed_ms"],
+            repeated["last_work_advance_elapsed_ms"]
+        );
+        assert!(
+            repeated["operation_elapsed_ms"].as_u64().unwrap()
+                >= first["operation_elapsed_ms"].as_u64().unwrap()
+        );
+
+        thread::sleep(Duration::from_millis(3));
+        update(
+            operation_id,
+            indexing_progress(IndexingProgressStage::Indexing, 128, 0, 0, Some(2_000_000)),
+        );
+        let advanced = payload(operation_id);
+        assert_eq!(
+            advanced["sequence"].as_u64().unwrap(),
+            first["sequence"].as_u64().unwrap() + 1
+        );
+        assert!(
+            advanced["sample_elapsed_ms"].as_u64().unwrap()
+                > first["sample_elapsed_ms"].as_u64().unwrap()
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn current_timestamp_can_regress_while_media_coverage_remains_monotonic() {
+        let operation_id = 73_003;
+        let guard = begin(operation_id).expect("progress slot");
+        for (frames, timestamp_us) in [(64, 4_000_000), (128, 4_200_000), (192, 4_100_000)] {
             update(
                 operation_id,
-                IndexingProgress {
-                    stage: IndexingProgressStage::Indexing,
-                    indexed_frames: 1,
-                    reused_frames: 0,
-                    expected_reuse_frames: 0,
-                    current_timestamp_us: Some(timestamp_us),
-                },
+                indexing_progress(
+                    IndexingProgressStage::Indexing,
+                    frames,
+                    0,
+                    0,
+                    Some(timestamp_us),
+                ),
             );
         }
-        let json = response_json(operation_id);
-        assert!(json.contains("\"first_timestamp_us\":100000"));
-        assert!(json.contains("\"current_timestamp_us\":141000"));
+        let progress = payload(operation_id);
+        assert_eq!(progress["current_timestamp_us"], 4_100_000);
+        assert_eq!(progress["max_presentation_timestamp_us"], 4_200_000);
+        assert_eq!(progress["first_timestamp_us"], 4_000_000);
+        drop(guard);
+    }
+
+    #[test]
+    fn rebuild_clears_rejected_persisted_media_coverage() {
+        let operation_id = 73_004;
+        let guard = begin(operation_id).expect("progress slot");
+        update(
+            operation_id,
+            indexing_progress(
+                IndexingProgressStage::CheckingExistingIndex,
+                8_000,
+                0,
+                8_000,
+                Some(20_000_000),
+            ),
+        );
+        update(
+            operation_id,
+            indexing_progress(IndexingProgressStage::RebuildingIndex, 0, 0, 0, None),
+        );
+        let rebuilding = payload(operation_id);
+        assert!(rebuilding["first_timestamp_us"].is_null());
+        assert!(rebuilding["current_timestamp_us"].is_null());
+        assert!(rebuilding["max_presentation_timestamp_us"].is_null());
+
+        update(
+            operation_id,
+            indexing_progress(IndexingProgressStage::Indexing, 1, 0, 0, Some(100_000)),
+        );
+        let restarted = payload(operation_id);
+        assert_eq!(restarted["first_timestamp_us"], 100_000);
+        assert_eq!(restarted["max_presentation_timestamp_us"], 100_000);
         drop(guard);
     }
 
     #[test]
     fn partial_resume_can_validate_before_persisted_tail_without_becoming_invalid() {
-        let operation_id = 73_003;
+        let operation_id = 73_005;
         let guard = begin(operation_id).expect("progress slot");
         update(
             operation_id,
-            IndexingProgress {
-                stage: IndexingProgressStage::CheckingExistingIndex,
-                indexed_frames: 64,
-                reused_frames: 0,
-                expected_reuse_frames: 64,
-                current_timestamp_us: Some(2_800_000),
-            },
+            indexing_progress(
+                IndexingProgressStage::CheckingExistingIndex,
+                64,
+                0,
+                64,
+                Some(2_800_000),
+            ),
         );
         update(
             operation_id,
-            IndexingProgress {
-                stage: IndexingProgressStage::ValidatingExistingIndex,
-                indexed_frames: 64,
-                reused_frames: 1,
-                expected_reuse_frames: 64,
-                current_timestamp_us: Some(0),
-            },
+            indexing_progress(
+                IndexingProgressStage::ValidatingExistingIndex,
+                64,
+                1,
+                64,
+                Some(0),
+            ),
         );
-        let json = response_json(operation_id);
-        assert!(json.contains("\"first_timestamp_us\":0"));
-        assert!(json.contains("\"current_timestamp_us\":0"));
+        let progress = payload(operation_id);
+        assert_eq!(progress["first_timestamp_us"], 0);
+        assert_eq!(progress["current_timestamp_us"], 0);
+        assert_eq!(progress["max_presentation_timestamp_us"], 2_800_000);
         drop(guard);
     }
 }
