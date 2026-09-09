@@ -414,7 +414,7 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeStepMicrosc
     delta: jint,
 ) -> jstring {
     let json = catch_unwind(AssertUnwindSafe(|| {
-        scrub_handoff::cancel_session_preview(session_id);
+        let _exact_navigation = scrub_handoff::begin_exact_navigation(session_id);
         microscope::step_response(session_id, delta)
     }))
     .unwrap_or_else(|_| microscope::panic_response());
@@ -429,7 +429,7 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeJumpMicrosc
     frame_id: jlong,
 ) -> jstring {
     let json = catch_unwind(AssertUnwindSafe(|| {
-        scrub_handoff::cancel_session_preview(session_id);
+        let _exact_navigation = scrub_handoff::begin_exact_navigation(session_id);
         microscope::jump_frame_response(session_id, frame_id)
     }))
     .unwrap_or_else(|_| microscope::panic_response());
@@ -445,7 +445,7 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeJumpMicrosc
     selection: jint,
 ) -> jstring {
     let json = catch_unwind(AssertUnwindSafe(|| {
-        scrub_handoff::cancel_session_preview(session_id);
+        let _exact_navigation = scrub_handoff::begin_exact_navigation(session_id);
         microscope::jump_timestamp_response(session_id, timestamp_us, selection)
     }))
     .unwrap_or_else(|_| microscope::panic_response());
@@ -459,7 +459,7 @@ pub extern "system" fn Java_com_framescope_app_data_RustBridge_nativeCloseMicros
     session_id: jlong,
 ) -> jboolean {
     let closed = catch_unwind(AssertUnwindSafe(|| {
-        scrub_handoff::cancel_session_preview(session_id);
+        let _exact_navigation = scrub_handoff::begin_exact_navigation(session_id);
         let _lifecycle = match storage_session_lifecycle_lock() {
             Ok(guard) => guard,
             Err(()) => return false,
