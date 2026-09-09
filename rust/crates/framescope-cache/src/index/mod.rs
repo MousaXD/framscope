@@ -1,4 +1,5 @@
 mod model;
+#[allow(clippy::type_complexity)]
 mod progressive;
 mod store;
 
