@@ -484,15 +484,17 @@ internal fun recentVideoRecord(
     lastOpenedEpochMs = openedAtEpochMs,
     lastViewedFrameId = previous?.lastViewedFrameId,
     lastViewedTimestampUs = previous?.lastViewedTimestampUs,
-    indexStatus = previous?.indexStatus ?: RecentVideoIndexStatus.Unknown,
+    // URI text, display name, and old history state are not source-identity proof. A fresh open must
+    // remain unbound until the native microscope session exposes its verified persistent index.
+    indexStatus = RecentVideoIndexStatus.Unknown,
     thumbnailUri = previous?.thumbnailUri,
     extractionCount = previous?.extractionCount,
-    sourceIdentityKey = previous?.sourceIdentityKey,
-    indexStreamIndex = previous?.indexStreamIndex,
-    indexId = previous?.indexId,
-    indexRelativePath = previous?.indexRelativePath,
-    indexedFrameCount = previous?.indexedFrameCount,
-    indexLastModifiedEpochMs = previous?.indexLastModifiedEpochMs,
+    sourceIdentityKey = null,
+    indexStreamIndex = null,
+    indexId = null,
+    indexRelativePath = null,
+    indexedFrameCount = null,
+    indexLastModifiedEpochMs = null,
 )
 
 internal object RecentVideoJsonCodec {
