@@ -1,4 +1,4 @@
-use crate::FRAME_INDEX_NAMESPACE;
+use crate::{FRAME_INDEX_NAMESPACE, FRAME_INDEX_SCHEMA_VERSION};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::fs;
@@ -63,6 +63,7 @@ impl FrameIndexCatalog {
             return Ok(Vec::new());
         }
 
+        let current_version = format!("v{FRAME_INDEX_SCHEMA_VERSION}");
         let mut entries = Vec::new();
         for version in read_dir(&index_root)? {
             let version = version.map_err(|source| io_error(&index_root, source))?;
@@ -72,6 +73,7 @@ impl FrameIndexCatalog {
             if !version_type.is_dir() || version_type.is_symlink() {
                 continue;
             }
+            let version_is_current = version.file_name().to_string_lossy() == current_version;
             for source in read_dir(&version.path())? {
                 let source = source.map_err(|error| io_error(version.path(), error))?;
                 let source_type = source
@@ -92,7 +94,9 @@ impl FrameIndexCatalog {
                     if !database_type.is_file() || database_type.is_symlink() {
                         continue;
                     }
-                    let Some(stream_index) = stream_index_from_name(&database.file_name().to_string_lossy()) else {
+                    let Some(stream_index) =
+                        stream_index_from_name(&database.file_name().to_string_lossy())
+                    else {
                         continue;
                     };
                     entries.push(read_descriptor(
@@ -100,6 +104,7 @@ impl FrameIndexCatalog {
                         database.path(),
                         source_key.clone(),
                         stream_index,
+                        version_is_current,
                     ));
                 }
             }
@@ -108,6 +113,7 @@ impl FrameIndexCatalog {
             left.source_key
                 .cmp(&right.source_key)
                 .then(left.stream_index.cmp(&right.stream_index))
+                .then(left.relative_path.cmp(&right.relative_path))
         });
         Ok(entries)
     }
@@ -118,6 +124,7 @@ fn read_descriptor(
     path: PathBuf,
     source_key: String,
     stream_index: u32,
+    version_is_current: bool,
 ) -> PersistentFrameIndexDescriptor {
     let relative_path = path
         .strip_prefix(root)
@@ -139,6 +146,12 @@ fn read_descriptor(
         frame_count: None,
         last_modified_epoch_ms,
     };
+
+    // An old index schema can still contain superficially familiar tables. Never advertise it as
+    // reusable/current. The normal index opener owns compatibility decisions and rebuilds.
+    if !version_is_current {
+        return descriptor;
+    }
 
     let connection = match Connection::open_with_flags(
         &path,
@@ -279,10 +292,17 @@ mod tests {
         root
     }
 
-    fn write_index(root: &Path, source_key: &str, stream_index: u32, lifecycle: i64, frames: u64) {
+    fn write_index(
+        root: &Path,
+        version: i64,
+        source_key: &str,
+        stream_index: u32,
+        lifecycle: i64,
+        frames: u64,
+    ) {
         let directory = root
             .join(FRAME_INDEX_NAMESPACE)
-            .join("v1")
+            .join(format!("v{version}"))
             .join(source_key);
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("stream-{stream_index}.sqlite3"));
@@ -292,16 +312,17 @@ mod tests {
                 "CREATE TABLE index_meta (id INTEGER PRIMARY KEY, lifecycle INTEGER NOT NULL, indexed_frames INTEGER NOT NULL, frame_count INTEGER);\n                 CREATE TABLE frame_index (frame_index INTEGER PRIMARY KEY);",
             )
             .unwrap();
-        for frame in 0..frames {
+        let frames_i64 = i64::try_from(frames).unwrap();
+        for frame in 0..frames_i64 {
             connection
                 .execute("INSERT INTO frame_index(frame_index) VALUES (?1)", params![frame])
                 .unwrap();
         }
-        let complete_count = (lifecycle == 3).then_some(frames);
+        let complete_count = (lifecycle == 3).then_some(frames_i64);
         connection
             .execute(
                 "INSERT INTO index_meta(id, lifecycle, indexed_frames, frame_count) VALUES (1, ?1, ?2, ?3)",
-                params![lifecycle, frames, complete_count],
+                params![lifecycle, frames_i64, complete_count],
             )
             .unwrap();
     }
@@ -309,28 +330,52 @@ mod tests {
     #[test]
     fn discovers_three_persistent_indexes_without_source_history() {
         let root = test_root("three-indexes");
-        write_index(&root, "aaaaaaaa", 0, 3, 10);
-        write_index(&root, "bbbbbbbb", 0, 3, 20);
-        write_index(&root, "cccccccc", 0, 3, 30);
+        write_index(&root, FRAME_INDEX_SCHEMA_VERSION, "aaaaaaaa", 0, 3, 10);
+        write_index(&root, FRAME_INDEX_SCHEMA_VERSION, "bbbbbbbb", 0, 3, 20);
+        write_index(&root, FRAME_INDEX_SCHEMA_VERSION, "cccccccc", 0, 3, 30);
 
         let entries = FrameIndexCatalog::new(&root).entries().unwrap();
 
         assert_eq!(entries.len(), 3);
-        assert!(entries.iter().all(|entry| entry.status == PersistentFrameIndexStatus::Indexed));
-        assert_eq!(entries.iter().map(|entry| entry.frame_count.unwrap()).sum::<u64>(), 60);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.status == PersistentFrameIndexStatus::Indexed)
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.frame_count.unwrap())
+                .sum::<u64>(),
+            60
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn incomplete_and_corrupt_metadata_do_not_masquerade_as_complete() {
+    fn incomplete_and_failed_metadata_do_not_masquerade_as_complete() {
         let root = test_root("status");
-        write_index(&root, "building", 0, 2, 4);
-        write_index(&root, "stale", 0, 4, 2);
+        write_index(&root, FRAME_INDEX_SCHEMA_VERSION, "building", 0, 2, 4);
+        write_index(&root, FRAME_INDEX_SCHEMA_VERSION, "stale", 0, 4, 2);
 
         let entries = FrameIndexCatalog::new(&root).entries().unwrap();
 
         assert_eq!(entries[0].status, PersistentFrameIndexStatus::InProgress);
         assert_eq!(entries[1].status, PersistentFrameIndexStatus::Stale);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_schema_is_visible_only_as_stale() {
+        let root = test_root("old-schema");
+        let old_version = FRAME_INDEX_SCHEMA_VERSION.saturating_sub(1);
+        write_index(&root, old_version, "legacy", 0, 3, 12);
+
+        let entry = FrameIndexCatalog::new(&root).entries().unwrap().remove(0);
+
+        assert_eq!(entry.status, PersistentFrameIndexStatus::Stale);
+        assert_eq!(entry.indexed_frames, 0);
+        assert_eq!(entry.frame_count, None);
         fs::remove_dir_all(root).unwrap();
     }
 }
