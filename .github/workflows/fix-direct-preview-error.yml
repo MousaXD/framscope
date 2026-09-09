@@ -27,23 +27,20 @@ jobs:
           from pathlib import Path
           path = Path('rust/crates/framescope-video/src/target_rgba_navigation.rs')
           text = path.read_text()
-          old = '''    let index_entry = index
-              .entry(frame_id)?
-              .ok_or(CachedNavigationError::FrameNotIndexed)?;
-          '''
-          # The source-quality function intentionally keeps its direct `?`; patch only the
-          # bounded function by locating it after the bounded function signature.
-          marker = 'pub fn navigate_to_frame_bounded_preview_with_cursor<D, F>('
-          start = text.index(marker)
-          tail = text[start:]
-          if tail.count(old) != 1:
-              raise SystemExit(f'expected one bounded index-entry site, found {tail.count(old)}')
-          new = '''    let index_entry = index
-              .entry(frame_id)
-              .map_err(CachedNavigationError::from)?
-              .ok_or(CachedNavigationError::FrameNotIndexed)?;
-          '''
-          path.write_text(text[:start] + tail.replace(old, new, 1))
+          start_marker = 'pub fn navigate_to_frame_bounded_preview_with_cursor<D, F>('
+          end_marker = 'fn navigate_target_preview_retained<D, F>('
+          start = text.index(start_marker)
+          end = text.index(end_marker, start)
+          body = text[start:end]
+          old = '.entry(frame_id)?'
+          if body.count(old) != 1:
+              raise SystemExit(f'expected one bounded direct index error site, found {body.count(old)}')
+          body = body.replace(
+              old,
+              '.entry(frame_id)\n        .map_err(CachedNavigationError::from)?',
+              1,
+          )
+          path.write_text(text[:start] + body + text[end:])
           PY
 
       - name: Validate Rust
