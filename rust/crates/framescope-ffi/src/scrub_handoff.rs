@@ -30,6 +30,7 @@ const MAX_RETAINED_PREVIEW_SESSIONS: usize = 2;
 const SOURCE_CACHE_DISK_BUDGET_BYTES: u64 = 0;
 const MAX_CONFIGURED_RAM_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 const MAX_FORWARD_CURSOR_REUSE_FRAMES: u64 = 48;
+const DEFAULT_PREFETCH_EDGE: u32 = 640;
 
 static SOURCE_CACHE_RAM_BUDGET_BYTES: AtomicUsize =
     AtomicUsize::new(DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES);
@@ -381,6 +382,25 @@ pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nati
 }
 
 #[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nativePrefetchMicroscopePreviewFrame(
+    mut env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+    frame_id: jlong,
+    cache_root: JString,
+) -> jboolean {
+    let cache_root: String = match env.get_string(&cache_root) {
+        Ok(value) => value.into(),
+        Err(_) => return 0,
+    };
+    let prefetched = catch_unwind(AssertUnwindSafe(|| {
+        prefetch_frame_response(session_id, frame_id, &cache_root)
+    }))
+    .is_ok_and(|result| result.is_ok());
+    if prefetched { 1 } else { 0 }
+}
+
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_framescope_app_data_MicroscopePreviewBridge_nativeCancelMicroscopePreviewSession(
     _env: JNIEnv,
     _class: JClass,
@@ -727,6 +747,106 @@ fn render_preview(
     Err(PreviewFailure::new(
         "bridge_error",
         "Live microscope preview is only available on Android/Unix targets.",
+    ))
+}
+
+#[cfg(unix)]
+fn prefetch_frame_response(
+    session_id: i64,
+    frame_id: i64,
+    cache_root: &str,
+) -> Result<(), PreviewFailure> {
+    if session_id <= 0 {
+        return Err(PreviewFailure::new(
+            "invalid_request",
+            "Live preview prefetch requires a positive microscope session id.",
+        ));
+    }
+    let frame_id = u64::try_from(frame_id).map(FrameId).map_err(|_| {
+        PreviewFailure::new("invalid_request", "Prefetch frame id must be non-negative.")
+    })?;
+    if source_cache_budget_bytes() == 0 && preview_cache_budget_bytes() == 0 {
+        return Ok(());
+    }
+    let cache_root = validate_cache_root(cache_root)?;
+    microscope::with_extraction_context(session_id, |_source_fd, index| {
+        microscope_target(index, frame_id)
+            .map(|_| ())
+            .map_err(|error| PreviewFailure::new("frame_out_of_range", error.to_string()))
+    })
+    .map_err(from_microscope_failure)??;
+    let state = session_state(session_id, &cache_root)?;
+
+    if preview_cache_budget_bytes() > 0 {
+        let cached = state
+            .lock()
+            .map_err(|_| {
+                PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+            })?
+            .preview_cache
+            .get(frame_id, DEFAULT_PREFETCH_EDGE)
+            .is_some();
+        if cached {
+            return Ok(());
+        }
+    }
+
+    let cancellation = {
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        cancellation_for_scrub_target(&mut state, frame_id)
+    };
+    let (cancellation, _operation) = begin_preview_operation_with_token(session_id, cancellation)?;
+    ensure_not_cancelled(&cancellation)?;
+
+    let navigated = microscope::with_extraction_context(session_id, |source_fd, index| {
+        ensure_not_cancelled(&cancellation)?;
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        let decoder_cancellation = cancellation.clone();
+        let ScrubSessionState {
+            source_cache,
+            decoder_cursor,
+            ..
+        } = &mut *state;
+        navigate_to_frame_cached_target_only_with_cursor(
+            index,
+            source_cache,
+            decoder_cursor,
+            || open_decoder(source_fd, decoder_cancellation.clone()),
+            frame_id,
+            MAX_FORWARD_CURSOR_REUSE_FRAMES,
+        )
+        .map_err(from_navigation)
+    })
+    .map_err(from_microscope_failure)??;
+    ensure_not_cancelled(&cancellation)?;
+
+    if preview_cache_budget_bytes() > 0 {
+        let preview = downscale_scrub_preview(&navigated.pixels, DEFAULT_PREFETCH_EDGE)
+            .map_err(|error| PreviewFailure::new("preview_scale_error", error.to_string()))?;
+        ensure_not_cancelled(&cancellation)?;
+        let mut state = state.lock().map_err(|_| {
+            PreviewFailure::new("bridge_error", "Live preview cache state is poisoned.")
+        })?;
+        state
+            .preview_cache
+            .insert(frame_id, DEFAULT_PREFETCH_EDGE, preview);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prefetch_frame_response(
+    _session_id: i64,
+    _frame_id: i64,
+    _cache_root: &str,
+) -> Result<(), PreviewFailure> {
+    Err(PreviewFailure::new(
+        "bridge_error",
+        "Live microscope prefetch is only available on Android/Unix targets.",
     ))
 }
 
