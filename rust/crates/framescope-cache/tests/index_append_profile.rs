@@ -30,7 +30,13 @@ fn stream() -> FrameIndexStreamIdentity {
     }
 }
 
-fn entry(frame: u64, ticks: i64, keyframe: bool, anchor: u64, anchor_ticks: i64) -> FrameIndexEntry {
+fn entry(
+    frame: u64,
+    ticks: i64,
+    keyframe: bool,
+    anchor: u64,
+    anchor_ticks: i64,
+) -> FrameIndexEntry {
     let time_base = TimeBase::new(1, 1_000).unwrap();
     FrameIndexEntry {
         frame_id: FrameId(frame),
@@ -73,14 +79,12 @@ fn profiled_append_preserves_authoritative_rows_and_status() {
         entry(4, 260, false, 3, 180),
     ];
 
-    let (mut ordinary, _) =
-        FrameIndex::open_or_create(&ordinary_path, source(), stream()).unwrap();
+    let (mut ordinary, _) = FrameIndex::open_or_create(&ordinary_path, source(), stream()).unwrap();
     ordinary.mark_building().unwrap();
     ordinary.append_batch(&entries).unwrap();
     ordinary.mark_complete().unwrap();
 
-    let (mut profiled, _) =
-        FrameIndex::open_or_create(&profiled_path, source(), stream()).unwrap();
+    let (mut profiled, _) = FrameIndex::open_or_create(&profiled_path, source(), stream()).unwrap();
     profiled.mark_building().unwrap();
     let (transaction_begin_elapsed_us, commit_elapsed_us) =
         profiled.append_batch_profiled(&entries).unwrap();
