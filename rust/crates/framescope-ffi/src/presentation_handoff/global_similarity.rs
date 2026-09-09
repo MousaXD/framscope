@@ -191,7 +191,7 @@ fn validate_request(
 
 #[cfg(unix)]
 fn snapshot_session(session_id: i64) -> Result<SimilaritySessionSnapshot, SimilarityBridgeFailure> {
-    let nested = microscope::with_extraction_context(session_id, |fd, index| {
+    microscope::with_extraction_context(session_id, |fd, index| {
         let frame_count = index
             .frame_count()
             .map_err(|error| SimilarityBridgeFailure::new("index_error", error.to_string()))?
@@ -218,8 +218,7 @@ fn snapshot_session(session_id: i64) -> Result<SimilaritySessionSnapshot, Simila
             frame_count,
         })
     })
-    .map_err(|error| SimilarityBridgeFailure::new(error.code(), error.message()))?;
-    nested
+    .map_err(|error| SimilarityBridgeFailure::new(error.code(), error.message()))?
 }
 
 #[cfg(not(unix))]
@@ -264,7 +263,7 @@ fn query_similarity(
         &snapshot.stream_identity,
         snapshot.frame_count,
         |frame_id| {
-            let nested = microscope::with_extraction_context(session_id, |_fd, index| {
+            microscope::with_extraction_context(session_id, |_fd, index| {
                 index.entry(frame_id).map_err(|error| {
                     TimelineGlobalSimilarityError::TimelineProvider(error.to_string())
                 })
@@ -275,8 +274,7 @@ fn query_similarity(
                     error.code(),
                     error.message()
                 ))
-            })?;
-            nested
+            })?
         },
         store_root,
         target_frame,
