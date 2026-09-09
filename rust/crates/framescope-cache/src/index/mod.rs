@@ -8,10 +8,10 @@ pub use model::{
     FrameIndexStreamIdentity, KeyframeAnchor, TimestampSeekSafety,
 };
 pub use progressive::{
-    PROGRESSIVE_INDEX_SCHEMA_VERSION, STRUCTURAL_INDEX_GENERATION, VISUAL_INDEX_GENERATION,
-    ProgressiveFrameIndex, ProgressiveIndexError, ProgressiveIndexLayer,
-    ProgressiveIndexOpenDisposition, ProgressiveLayerLifecycle, ProgressiveLayerStatus,
-    SimilarityFingerprintStatus, StructuralAnchor, StructuralAnchorKind, VisualArtifactKind,
+    PROGRESSIVE_INDEX_SCHEMA_VERSION, ProgressiveFrameIndex, ProgressiveIndexError,
+    ProgressiveIndexLayer, ProgressiveIndexOpenDisposition, ProgressiveLayerLifecycle,
+    ProgressiveLayerStatus, STRUCTURAL_INDEX_GENERATION, SimilarityFingerprintStatus,
+    StructuralAnchor, StructuralAnchorKind, VISUAL_INDEX_GENERATION, VisualArtifactKind,
     VisualArtifactMetadata,
 };
 pub use store::FrameIndex;
