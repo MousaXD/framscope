@@ -328,7 +328,8 @@ where
 {
     ensure_complete(index)?;
     let index_entry = index
-        .entry(frame_id)?
+        .entry(frame_id)
+        .map_err(CachedNavigationError::from)?
         .ok_or(CachedNavigationError::FrameNotIndexed)?;
     let key = match FrameCacheKey::new(
         index.source_identity(),
