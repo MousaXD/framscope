@@ -124,9 +124,7 @@ object RamAccelerationPolicy {
 
         val headroomCap = when (mode) {
             RamAccelerationMode.Off -> 0L
-            RamAccelerationMode.Automatic,
-            RamAccelerationMode.Aggressive,
-            -> Long.MAX_VALUE // already headroom-limited above
+            RamAccelerationMode.Automatic, RamAccelerationMode.Aggressive -> Long.MAX_VALUE
             RamAccelerationMode.Custom -> availableHeadroomBudget(profile, divisor = 2L)
         }
         val headroomAdjusted = min(requested, headroomCap).coerceAtLeast(0L)
