@@ -6,7 +6,6 @@ members = [
     "crates/framescope-similarity",
     "crates/framescope-similarity-store",
     "crates/framescope-perceptual",
-    "crates/framescope-global-similarity",
     "crates/framescope-grouping",
     "crates/framescope-grouping-session",
     "crates/framescope-group-navigation",
