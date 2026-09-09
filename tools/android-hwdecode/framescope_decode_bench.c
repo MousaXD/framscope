@@ -22,8 +22,10 @@ typedef enum DecoderBackend {
 typedef struct FrameRow {
     int64_t timestamp_ticks;
     int64_t duration_ticks;
+    int64_t dts_ticks;
     uint8_t has_timestamp;
     uint8_t has_duration;
+    uint8_t has_dts;
     uint8_t keyframe;
     uint8_t corrupt;
 } FrameRow;
@@ -111,6 +113,10 @@ static FrameRow frame_row(const AVFrame *frame) {
     if (frame->duration > 0) {
         row.has_duration = 1;
         row.duration_ticks = frame->duration;
+    }
+    if (frame->pkt_dts != AV_NOPTS_VALUE) {
+        row.has_dts = 1;
+        row.dts_ticks = frame->pkt_dts;
     }
     row.keyframe = (frame->flags & AV_FRAME_FLAG_KEY) != 0;
     row.corrupt = ((frame->flags & AV_FRAME_FLAG_CORRUPT) != 0) || frame->decode_error_flags != 0;
@@ -406,10 +412,13 @@ static int compare_rows(const DecodeResult *software, const DecodeResult *hardwa
         if (memcmp(a, b, sizeof(FrameRow)) != 0) {
             printf(
                 "{\"equivalent\":false,\"reason\":\"frame_metadata_mismatch\",\"first_mismatch_frame\":%zu,"
-                "\"software_pts\":%" PRId64 ",\"hardware_pts\":%" PRId64 "}\n",
+                "\"software_pts\":%" PRId64 ",\"hardware_pts\":%" PRId64 ","
+                "\"software_dts\":%" PRId64 ",\"hardware_dts\":%" PRId64 "}\n",
                 i,
                 a->has_timestamp ? a->timestamp_ticks : INT64_MIN,
-                b->has_timestamp ? b->timestamp_ticks : INT64_MIN
+                b->has_timestamp ? b->timestamp_ticks : INT64_MIN,
+                a->has_dts ? a->dts_ticks : INT64_MIN,
+                b->has_dts ? b->dts_ticks : INT64_MIN
             );
             return 2;
         }
