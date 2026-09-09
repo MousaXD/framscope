@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -261,7 +262,7 @@ fn count_indexed_sources(index_root: &Path) -> Result<u64, StorageAdminError> {
         return Ok(0);
     }
 
-    let mut count = 0_u64;
+    let mut source_keys = BTreeSet::new();
     for version in read_dir(index_root)? {
         let version = version.map_err(|source| io_error(index_root, source))?;
         let version_type = version
@@ -276,13 +277,11 @@ fn count_indexed_sources(index_root: &Path) -> Result<u64, StorageAdminError> {
                 .file_type()
                 .map_err(|error| io_error(source.path(), error))?;
             if source_type.is_dir() && !source_type.is_symlink() {
-                count = count
-                    .checked_add(1)
-                    .ok_or(StorageAdminError::NumericOverflow)?;
+                source_keys.insert(source.file_name());
             }
         }
     }
-    Ok(count)
+    u64::try_from(source_keys.len()).map_err(|_| StorageAdminError::NumericOverflow)
 }
 
 fn is_safe_source_key(source_key: &str) -> bool {
@@ -422,6 +421,30 @@ mod tests {
         assert_eq!(stats.indexed_sources, 1);
         assert!(!stats.preview_proxy_enabled);
         assert_eq!(stats.total_bytes, 22);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn indexed_source_count_is_deduplicated_across_persistent_index_kinds() {
+        let root = test_root("deduplicated-sources");
+        for namespace in ["v3", "global-v3"] {
+            let source = root
+                .join(FRAME_INDEX_NAMESPACE)
+                .join(namespace)
+                .join("source_A");
+            fs::create_dir_all(&source).unwrap();
+            fs::write(source.join("stream-0.sqlite3"), namespace).unwrap();
+        }
+        let second_source = root
+            .join(FRAME_INDEX_NAMESPACE)
+            .join("global-v3")
+            .join("source_B");
+        fs::create_dir_all(&second_source).unwrap();
+        fs::write(second_source.join("stream-0.sqlite3"), b"global").unwrap();
+
+        let stats = StorageAdmin::new(&root, false).stats().unwrap();
+        assert_eq!(stats.indexed_sources, 2);
 
         fs::remove_dir_all(root).unwrap();
     }
