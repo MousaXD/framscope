@@ -142,16 +142,37 @@ fn warm_forward_navigation_preserves_exact_vfr_identity_without_reopen_or_seek()
     // Deliberately non-uniform PTS deltas and durations. No nominal-FPS inference can satisfy this
     // contract: every crossed frame has to match the persisted presentation timeline exactly.
     let timeline = [
-        VfrFrame { pts: 0, duration: 33, keyframe: true },
-        VfrFrame { pts: 33, duration: 51, keyframe: false },
-        VfrFrame { pts: 84, duration: 17, keyframe: true },
-        VfrFrame { pts: 101, duration: 76, keyframe: false },
-        VfrFrame { pts: 177, duration: 29, keyframe: false },
+        VfrFrame {
+            pts: 0,
+            duration: 33,
+            keyframe: true,
+        },
+        VfrFrame {
+            pts: 33,
+            duration: 51,
+            keyframe: false,
+        },
+        VfrFrame {
+            pts: 84,
+            duration: 17,
+            keyframe: true,
+        },
+        VfrFrame {
+            pts: 101,
+            duration: 76,
+            keyframe: false,
+        },
+        VfrFrame {
+            pts: 177,
+            duration: 29,
+            keyframe: false,
+        },
     ];
     let index_path = temp_path("index.sqlite3");
     let source = SourceIdentity::new(1_024, None, Some("exact-navigation-vfr".into()));
     let identity = FrameIndexStreamIdentity::from_stream(&stream()).unwrap();
-    let (mut index, disposition) = FrameIndex::open_or_create(&index_path, source, identity).unwrap();
+    let (mut index, disposition) =
+        FrameIndex::open_or_create(&index_path, source, identity).unwrap();
     assert_eq!(disposition, FrameIndexOpenDisposition::Created);
     index.mark_building().unwrap();
 
@@ -208,7 +229,10 @@ fn warm_forward_navigation_preserves_exact_vfr_identity_without_reopen_or_seek()
     )
     .unwrap();
     assert_eq!(first.frame_id, FrameId(3));
-    assert_eq!(first.index_entry.presentation_timestamp, Some(timestamp(101)));
+    assert_eq!(
+        first.index_entry.presentation_timestamp,
+        Some(timestamp(101))
+    );
     assert_eq!(first.index_entry.duration, Some(duration(76)));
     let opens_after_first = opens.load(Ordering::Relaxed);
     assert!(opens_after_first >= 1);
@@ -236,7 +260,10 @@ fn warm_forward_navigation_preserves_exact_vfr_identity_without_reopen_or_seek()
 
     assert_eq!(second.source, CachedFrameSource::Decoded);
     assert_eq!(second.frame_id, FrameId(4));
-    assert_eq!(second.index_entry.presentation_timestamp, Some(timestamp(177)));
+    assert_eq!(
+        second.index_entry.presentation_timestamp,
+        Some(timestamp(177))
+    );
     assert_eq!(second.index_entry.duration, Some(duration(29)));
     assert_eq!(second.decoded_frames, 1);
     assert!(!second.used_keyframe_seek);
