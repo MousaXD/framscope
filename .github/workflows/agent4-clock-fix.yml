@@ -1,0 +1,44 @@
+name: Agent 4 clock fix
+
+on:
+  push:
+    branches:
+      - perf/scrub-ram-acceleration
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: perf/scrub-ram-acceleration
+      - name: Replace Android-only cadence clock
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('android/app/src/main/java/com/framescope/app/ui/MainViewModel.kt')
+          text = path.read_text()
+          if text.count('import android.os.SystemClock\n') != 1:
+              raise SystemExit('unexpected SystemClock import shape')
+          if text.count('completedAtMs = SystemClock.uptimeMillis(),') != 1:
+              raise SystemExit('unexpected scrub cadence clock shape')
+          text = text.replace('import android.os.SystemClock\n', '', 1)
+          text = text.replace(
+              'completedAtMs = SystemClock.uptimeMillis(),',
+              'completedAtMs = System.nanoTime() / 1_000_000L,',
+              1,
+          )
+          path.write_text(text)
+          PY
+          rm .github/workflows/agent4-clock-fix.yml
+      - name: Commit JVM-safe cadence clock and remove helper
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add android/app/src/main/java/com/framescope/app/ui/MainViewModel.kt .github/workflows/agent4-clock-fix.yml
+          git commit -m 'fix(agent4): use JVM-safe monotonic scrub clock'
+          git push origin HEAD:perf/scrub-ram-acceleration
