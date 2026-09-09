@@ -30,7 +30,7 @@ This report covers Rust ↔ JNI ↔ Kotlin pixel transport only. It does not cha
 | Rust `Vec<u8>` → cache `Arc<[u8]>` | 1 Arc backing allocation | full-frame relocation | Cache ownership dependency for Agent 3. |
 | Cached frame clone | none for pixels | none | Arc refcount ownership only. |
 | Prepared Rust RGBA → Android direct buffer | 1 direct buffer per authoritative frame | full-frame copy | Not pooled until Inspector lifetime has an explicit retirement contract. |
-| Direct buffer → display Bitmap | 1 Bitmap | full display-payload copy | UI may additionally downsample very large authoritative frames for ordinary display; Inspector owns full-resolution rendering behavior. |
+| Direct buffer → display Bitmap | 1 Bitmap | full display-payload copy | UI may additionally downsample very large authoritative frames for ordinary display; this stage now has independent byte/allocation/time telemetry. Inspector owns full-resolution rendering behavior. |
 
 ### Live scrub preview, cache miss
 
@@ -81,8 +81,9 @@ Perfetto-compatible Android trace sections:
 - `FrameScope.pixels.preview_jni`
 - `FrameScope.pixels.preview_bitmap`
 - `FrameScope.pixels.frame_jni`
+- `FrameScope.pixels.frame_bitmap`
 
-Native swscale time is not currently split out from total JNI service time. No zero-valued placeholder is reported as though it were measured.
+The authoritative frame Bitmap stage records its actual allocated bytes, output bytes written, and conversion time separately from JNI copy time. Native swscale time is not currently split out from total JNI service time. No zero-valued placeholder is reported as though it were measured.
 
 ## Tests
 
@@ -95,7 +96,8 @@ Focused JVM tests cover:
 - retaining more useful larger capacity when the bounded pool is full;
 - zero-retention behavior;
 - preview descriptor/session/layout safety;
-- deterministic byte/allocation/timing counter accounting.
+- deterministic live-preview byte/allocation/timing counter accounting;
+- deterministic authoritative JNI-vs-Bitmap transport accounting.
 
 Repository CI also exercises Rust format/clippy/tests, real FFmpeg fixtures, native Android arm64 build verification, Android unit tests, Android lint, Compose Android-test compilation, APK build/packaging, cache/index contracts, similarity contracts, and release/device-report contracts.
 
@@ -106,6 +108,8 @@ Do not claim a speedup from this branch until a physical Android device captures
 - cold vs warm direct-buffer allocation counts;
 - `FrameScope.pixels.preview_jni` P50/P95;
 - `FrameScope.pixels.preview_bitmap` P50/P95;
+- `FrameScope.pixels.frame_jni` P50/P95;
+- `FrameScope.pixels.frame_bitmap` P50/P95;
 - end-to-end scrub preview P50/P95;
 - allocation/GC behavior during sustained scrub direction changes;
 - process PSS/native heap before and after a long scrub session;
