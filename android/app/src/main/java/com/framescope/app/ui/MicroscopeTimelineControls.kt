@@ -54,202 +54,19 @@ internal fun MicroscopeTimelineControls(
         bounds?.let(selection::isSaneFor) == true
     }
 
-    val authoritativeFraction = bounds?.let { indexedBounds ->
-        currentFrame.timestampUs?.let { timestamp ->
-            MicroscopeTimelineMath.fractionForTimestamp(
-                timestampUs = timestamp,
-                startUs = indexedBounds.startUs,
-                endUs = indexedBounds.endUs,
-            )
-        }
-    } ?: MicroscopeTimelineMath.fractionForFrame(
-        frameId = currentFrame.frameId,
-        frameCount = session.frameCount,
-    )
-
-    var scrubFraction by rememberSaveable(session.sessionId) {
-        mutableStateOf(authoritativeFraction)
-    }
-    // A drag gesture cannot survive disposal/recreation. Persisting this flag could suppress
-    // authoritative synchronization even though no gesture is active anymore.
-    var scrubbing by remember(session.sessionId) { mutableStateOf(false) }
-    val previewAdmissionPolicy = remember(session.sessionId) { LiveScrubAdmissionPolicy() }
-    val delayedPreviewAdmission = remember(session.sessionId) { DelayedScrubPreviewAdmission() }
-    val thumbDrawTracker = remember(session.sessionId) { ScrubThumbDrawTracker() }
-    val previewScope = rememberCoroutineScope()
-
-    DisposableEffect(session.sessionId) {
-        onDispose {
-            delayedPreviewAdmission.cancel()
-            previewAdmissionPolicy.reset()
-            ScrubUxTelemetry.cancelExactSettle(session.sessionId)
-        }
-    }
-
-    // Exact-settle timing starts in the release callback. The navigating composition is disabled,
-    // so only the next enabled authoritative Ready composition can close that sample.
-    SideEffect {
-        if (enabled && !scrubbing) {
-            ScrubUxTelemetry.completeExactSettle(session.sessionId)
-        }
-    }
-
-    LaunchedEffect(authoritativeFraction, scrubbing) {
-        if (!scrubbing) {
-            scrubFraction = authoritativeFraction
-            delayedPreviewAdmission.cancel()
-            previewAdmissionPolicy.reset()
-        }
-    }
-
-    fun admitPreview(
-        fraction: Float,
-        targetKey: Long,
-        observedAtNanos: Long,
-        action: () -> Unit,
-    ) {
-        when (
-            val plan = previewAdmissionPolicy.plan(
-                sessionId = session.sessionId,
-                fraction = fraction,
-                targetKey = targetKey,
-                observedAtNanos = observedAtNanos,
-            )
-        ) {
-            LiveScrubAdmissionPlan.Immediate -> {
-                delayedPreviewAdmission.cancel()
-                val admittedAtNanos = System.nanoTime()
-                previewAdmissionPolicy.markAdmitted(fraction, targetKey, admittedAtNanos)
-                ScrubUxTelemetry.recordAdmissionDelay(observedAtNanos, admittedAtNanos)
-                action()
-            }
-            is LiveScrubAdmissionPlan.After -> {
-                delayedPreviewAdmission.replace(previewScope, plan.delayMs) {
-                    val admittedAtNanos = System.nanoTime()
-                    previewAdmissionPolicy.markAdmitted(fraction, targetKey, admittedAtNanos)
-                    ScrubUxTelemetry.recordAdmissionDelay(observedAtNanos, admittedAtNanos)
-                    action()
-                }
-            }
-            LiveScrubAdmissionPlan.NoPreview -> delayedPreviewAdmission.cancel()
-        }
-    }
-
-    val previewFrameId = if (bounds == null) {
-        MicroscopeTimelineMath.frameForFraction(
-            fraction = scrubFraction,
-            frameCount = session.frameCount,
-        )
-    } else {
-        null
-    }
-    val previewTimestampUs = bounds?.let { indexedBounds ->
-        MicroscopeTimelineMath.timestampForFraction(
-            fraction = scrubFraction,
-            startUs = indexedBounds.startUs,
-            endUs = indexedBounds.endUs,
-        )
-    }
-
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(
-            text = if (bounds == null) {
-                "Presentation-order scrub"
-            } else {
-                "Indexed presentation timeline"
-            },
-            style = MaterialTheme.typography.titleSmall,
-        )
-        Text(
-            text = previewTimestampUs?.let { timestamp ->
-                "Preview ${MicroscopePreviewMath.formatTimestampUs(timestamp)}"
-            } ?: previewFrameId?.let { frameId ->
-                MicroscopeTimelineMath.framePositionLabel(frameId, session.frameCount)
-            } ?: "Indexed position unavailable",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Slider(
-            value = scrubFraction,
-            onValueChange = { fraction ->
-                val observedAtNanos = System.nanoTime()
-                thumbDrawTracker.onPointerInput(observedAtNanos)
-                scrubbing = true
-                val nextFraction = fraction.coerceIn(0f, 1f)
-                // Gesture state is committed before any preview scheduling. Decoder work therefore
-                // cannot own the thumb position or decide whether it moves.
-                scrubFraction = nextFraction
-                val indexedBounds = bounds
-                if (indexedBounds != null) {
-                    MicroscopeTimelineMath.timestampForFraction(
-                        fraction = nextFraction,
-                        startUs = indexedBounds.startUs,
-                        endUs = indexedBounds.endUs,
-                    )?.let { targetTimestampUs ->
-                        admitPreview(
-                            fraction = nextFraction,
-                            targetKey = targetTimestampUs,
-                            observedAtNanos = observedAtNanos,
-                        ) {
-                            onPreviewTimestampUs(targetTimestampUs)
-                        }
-                    }
-                } else {
-                    MicroscopeTimelineMath.frameForFraction(
-                        fraction = nextFraction,
-                        frameCount = session.frameCount,
-                    )?.let { targetFrameId ->
-                        admitPreview(
-                            fraction = nextFraction,
-                            targetKey = targetFrameId,
-                            observedAtNanos = observedAtNanos,
-                        ) {
-                            onPreviewFrame(targetFrameId)
-                        }
-                    }
-                }
-            },
-            onValueChangeFinished = {
-                delayedPreviewAdmission.cancel()
-                previewAdmissionPolicy.reset()
-                val indexedBounds = bounds
-                val targetTimestampUs = indexedBounds?.let {
-                    MicroscopeTimelineMath.timestampForFraction(
-                        fraction = scrubFraction,
-                        startUs = it.startUs,
-                        endUs = it.endUs,
-                    )
-                }
-                val targetFrameId = if (indexedBounds == null) {
-                    MicroscopeTimelineMath.frameForFraction(
-                        fraction = scrubFraction,
-                        frameCount = session.frameCount,
-                    )
-                } else {
-                    null
-                }
-                scrubbing = false
-                when {
-                    targetTimestampUs != null -> {
-                        ScrubUxTelemetry.beginExactSettle(session.sessionId)
-                        onFinishScrubTimestampUs(targetTimestampUs)
-                    }
-                    targetFrameId != null -> {
-                        ScrubUxTelemetry.beginExactSettle(session.sessionId)
-                        onFinishScrubFrame(targetFrameId)
-                    }
-                }
-            },
-            enabled = enabled && session.frameCount > 1L,
-            valueRange = 0f..1f,
-            modifier = Modifier
-                .fillMaxWidth()
-                .drawWithContent {
-                    drawContent()
-                    thumbDrawTracker.onDrawn(System.nanoTime())
-                }
-                .testTag(TIMELINE_SLIDER_TAG)
-                .semantics { contentDescription = "Video timeline scrubber" },
+        // Keep high-frequency gesture state below this composition boundary. Range controls and
+        // rapid-step actions do not need to recompose for every pointer sample.
+        MicroscopeTimelineScrubber(
+            session = session,
+            bounds = bounds,
+            currentFrameTimestampUs = currentFrame.timestampUs,
+            currentFrameId = currentFrame.frameId,
+            enabled = enabled,
+            onPreviewFrame = onPreviewFrame,
+            onPreviewTimestampUs = onPreviewTimestampUs,
+            onFinishScrubFrame = onFinishScrubFrame,
+            onFinishScrubTimestampUs = onFinishScrubTimestampUs,
         )
 
         if (bounds != null) {
@@ -337,6 +154,217 @@ internal fun MicroscopeTimelineControls(
             )
         }
     }
+}
+
+@Suppress("UNUSED_PARAMETER")
+@Composable
+private fun MicroscopeTimelineScrubber(
+    session: MicroscopeSessionSnapshot,
+    bounds: IndexedTimelineBounds?,
+    currentFrameTimestampUs: Long?,
+    currentFrameId: Long,
+    enabled: Boolean,
+    onPreviewFrame: (Long) -> Unit,
+    onPreviewTimestampUs: (Long) -> Unit,
+    onFinishScrubFrame: (Long) -> Unit,
+    onFinishScrubTimestampUs: (Long) -> Unit,
+) {
+    val authoritativeFraction = bounds?.let { indexedBounds ->
+        currentFrameTimestampUs?.let { timestamp ->
+            MicroscopeTimelineMath.fractionForTimestamp(
+                timestampUs = timestamp,
+                startUs = indexedBounds.startUs,
+                endUs = indexedBounds.endUs,
+            )
+        }
+    } ?: MicroscopeTimelineMath.fractionForFrame(
+        frameId = currentFrameId,
+        frameCount = session.frameCount,
+    )
+
+    var scrubFraction by rememberSaveable(session.sessionId) {
+        mutableStateOf(authoritativeFraction)
+    }
+    // A drag gesture cannot survive disposal/recreation. Persisting this flag could suppress
+    // authoritative synchronization even though no gesture is active anymore.
+    var scrubbing by remember(session.sessionId) { mutableStateOf(false) }
+    val previewAdmissionPolicy = remember(session.sessionId) { LiveScrubAdmissionPolicy() }
+    val delayedPreviewAdmission = remember(session.sessionId) { DelayedScrubPreviewAdmission() }
+    val thumbDrawTracker = remember(session.sessionId) { ScrubThumbDrawTracker() }
+    val previewScope = rememberCoroutineScope()
+
+    DisposableEffect(session.sessionId) {
+        onDispose {
+            delayedPreviewAdmission.cancel()
+            previewAdmissionPolicy.reset()
+            ScrubUxTelemetry.cancelExactSettle(session.sessionId)
+        }
+    }
+
+    // Exact-settle timing starts in the release callback. The navigating composition is disabled,
+    // so only the next enabled authoritative Ready composition can close that sample.
+    SideEffect {
+        if (enabled && !scrubbing) {
+            ScrubUxTelemetry.completeExactSettle(session.sessionId)
+        }
+    }
+
+    LaunchedEffect(authoritativeFraction, scrubbing) {
+        if (!scrubbing) {
+            scrubFraction = authoritativeFraction
+            delayedPreviewAdmission.cancel()
+            previewAdmissionPolicy.reset()
+        }
+    }
+
+    fun admitPreview(
+        fraction: Float,
+        targetKey: Long,
+        observedAtNanos: Long,
+        action: () -> Unit,
+    ) {
+        when (
+            val plan = previewAdmissionPolicy.plan(
+                sessionId = session.sessionId,
+                fraction = fraction,
+                targetKey = targetKey,
+                observedAtNanos = observedAtNanos,
+            )
+        ) {
+            LiveScrubAdmissionPlan.Immediate -> {
+                delayedPreviewAdmission.cancel()
+                val admittedAtNanos = System.nanoTime()
+                previewAdmissionPolicy.markAdmitted(fraction, targetKey, admittedAtNanos)
+                ScrubUxTelemetry.recordAdmissionDelay(observedAtNanos, admittedAtNanos)
+                action()
+            }
+            is LiveScrubAdmissionPlan.After -> {
+                delayedPreviewAdmission.replace(previewScope, plan.delayMs) {
+                    val admittedAtNanos = System.nanoTime()
+                    previewAdmissionPolicy.markAdmitted(fraction, targetKey, admittedAtNanos)
+                    ScrubUxTelemetry.recordAdmissionDelay(observedAtNanos, admittedAtNanos)
+                    action()
+                }
+            }
+            LiveScrubAdmissionPlan.NoPreview -> delayedPreviewAdmission.cancel()
+        }
+    }
+
+    val previewFrameId = if (bounds == null) {
+        MicroscopeTimelineMath.frameForFraction(
+            fraction = scrubFraction,
+            frameCount = session.frameCount,
+        )
+    } else {
+        null
+    }
+    val previewTimestampUs = bounds?.let { indexedBounds ->
+        MicroscopeTimelineMath.timestampForFraction(
+            fraction = scrubFraction,
+            startUs = indexedBounds.startUs,
+            endUs = indexedBounds.endUs,
+        )
+    }
+
+    Text(
+        text = if (bounds == null) {
+            "Presentation-order scrub"
+        } else {
+            "Indexed presentation timeline"
+        },
+        style = MaterialTheme.typography.titleSmall,
+    )
+    Text(
+        text = previewTimestampUs?.let { timestamp ->
+            "Preview ${MicroscopePreviewMath.formatTimestampUs(timestamp)}"
+        } ?: previewFrameId?.let { frameId ->
+            MicroscopeTimelineMath.framePositionLabel(frameId, session.frameCount)
+        } ?: "Indexed position unavailable",
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Slider(
+        value = scrubFraction,
+        onValueChange = { fraction ->
+            val observedAtNanos = System.nanoTime()
+            thumbDrawTracker.onPointerInput(observedAtNanos)
+            scrubbing = true
+            val nextFraction = fraction.coerceIn(0f, 1f)
+            // Gesture state is committed before any preview scheduling. Decoder work therefore
+            // cannot own the thumb position or decide whether it moves.
+            scrubFraction = nextFraction
+            val indexedBounds = bounds
+            if (indexedBounds != null) {
+                MicroscopeTimelineMath.timestampForFraction(
+                    fraction = nextFraction,
+                    startUs = indexedBounds.startUs,
+                    endUs = indexedBounds.endUs,
+                )?.let { targetTimestampUs ->
+                    admitPreview(
+                        fraction = nextFraction,
+                        targetKey = targetTimestampUs,
+                        observedAtNanos = observedAtNanos,
+                    ) {
+                        onPreviewTimestampUs(targetTimestampUs)
+                    }
+                }
+            } else {
+                MicroscopeTimelineMath.frameForFraction(
+                    fraction = nextFraction,
+                    frameCount = session.frameCount,
+                )?.let { targetFrameId ->
+                    admitPreview(
+                        fraction = nextFraction,
+                        targetKey = targetFrameId,
+                        observedAtNanos = observedAtNanos,
+                    ) {
+                        onPreviewFrame(targetFrameId)
+                    }
+                }
+            }
+        },
+        onValueChangeFinished = {
+            delayedPreviewAdmission.cancel()
+            previewAdmissionPolicy.reset()
+            val indexedBounds = bounds
+            val targetTimestampUs = indexedBounds?.let {
+                MicroscopeTimelineMath.timestampForFraction(
+                    fraction = scrubFraction,
+                    startUs = it.startUs,
+                    endUs = it.endUs,
+                )
+            }
+            val targetFrameId = if (indexedBounds == null) {
+                MicroscopeTimelineMath.frameForFraction(
+                    fraction = scrubFraction,
+                    frameCount = session.frameCount,
+                )
+            } else {
+                null
+            }
+            scrubbing = false
+            when {
+                targetTimestampUs != null -> {
+                    ScrubUxTelemetry.beginExactSettle(session.sessionId)
+                    onFinishScrubTimestampUs(targetTimestampUs)
+                }
+                targetFrameId != null -> {
+                    ScrubUxTelemetry.beginExactSettle(session.sessionId)
+                    onFinishScrubFrame(targetFrameId)
+                }
+            }
+        },
+        enabled = enabled && session.frameCount > 1L,
+        valueRange = 0f..1f,
+        modifier = Modifier
+            .fillMaxWidth()
+            .drawWithContent {
+                drawContent()
+                thumbDrawTracker.onDrawn(System.nanoTime())
+            }
+            .testTag(TIMELINE_SLIDER_TAG)
+            .semantics { contentDescription = "Video timeline scrubber" },
+    )
 }
 
 @Composable
