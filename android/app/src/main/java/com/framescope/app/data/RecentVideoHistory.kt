@@ -23,18 +23,29 @@ enum class RecentVideoAvailability {
     Available,
     PermissionLost,
     MissingDocument,
+    SourceUnlinked,
 }
 
 enum class RecentVideoIndexStatus {
     Unknown,
     Available,
+    InProgress,
+    Missing,
+    Stale,
+}
+
+enum class MediaLibraryCategory {
+    Recent,
+    Indexed,
+    InProgress,
+    PermissionLost,
     Missing,
     Stale,
 }
 
 data class RecentVideoRecord(
     val id: String,
-    val contentUri: String,
+    val contentUri: String?,
     val permissionStatus: VideoUriPermissionStatus,
     val availability: RecentVideoAvailability,
     val displayName: String,
@@ -49,8 +60,24 @@ data class RecentVideoRecord(
     val indexStatus: RecentVideoIndexStatus = RecentVideoIndexStatus.Unknown,
     val thumbnailUri: String? = null,
     val extractionCount: Int? = null,
+    val sourceIdentityKey: String? = null,
+    val indexStreamIndex: Int? = null,
+    val indexId: String? = null,
+    val indexRelativePath: String? = null,
+    val indexedFrameCount: Long? = null,
+    val indexLastModifiedEpochMs: Long? = null,
 ) {
-    fun canOpen(): Boolean = availability == RecentVideoAvailability.Available
+    fun canOpen(): Boolean =
+        contentUri != null && availability == RecentVideoAvailability.Available
+
+    fun category(): MediaLibraryCategory = when {
+        availability == RecentVideoAvailability.PermissionLost -> MediaLibraryCategory.PermissionLost
+        availability == RecentVideoAvailability.MissingDocument -> MediaLibraryCategory.Missing
+        indexStatus == RecentVideoIndexStatus.Stale -> MediaLibraryCategory.Stale
+        indexStatus == RecentVideoIndexStatus.InProgress -> MediaLibraryCategory.InProgress
+        indexStatus == RecentVideoIndexStatus.Available -> MediaLibraryCategory.Indexed
+        else -> MediaLibraryCategory.Recent
+    }
 }
 
 interface RecentVideoHistory {
@@ -75,6 +102,11 @@ interface RecentVideoHistory {
         contentUri: String,
         frameId: Long?,
         timestampUs: Long?,
+    )
+
+    suspend fun updateIndexBinding(
+        contentUri: String,
+        binding: SessionIndexBinding,
     )
 
     suspend fun remove(recordId: String)
@@ -107,6 +139,8 @@ object NoOpRecentVideoHistory : RecentVideoHistory {
     ): RecentVideoRecord = recordOpened(contentUri, video, permissionStatus)
 
     override suspend fun updatePosition(contentUri: String, frameId: Long?, timestampUs: Long?) = Unit
+
+    override suspend fun updateIndexBinding(contentUri: String, binding: SessionIndexBinding) = Unit
 
     override suspend fun remove(recordId: String) = Unit
 
@@ -168,7 +202,7 @@ class SharedPreferencesRecentVideoStore(
 
     override fun save(entries: List<RecentVideoRecord>) {
         check(preferences.edit().putString(KEY_HISTORY, RecentVideoJsonCodec.encode(entries)).commit()) {
-            "Android could not persist FrameScope recent-video history."
+            "Android could not persist FrameScope media-library metadata."
         }
     }
 
@@ -181,6 +215,7 @@ class SharedPreferencesRecentVideoStore(
 class RecentVideoHistoryRepository(
     private val store: RecentVideoStore,
     private val accessChecker: RecentVideoAccessChecker,
+    private val indexCatalog: PersistentFrameIndexCatalog = NoOpPersistentFrameIndexCatalog,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val clockEpochMs: () -> Long = System::currentTimeMillis,
     private val idFactory: () -> String = { UUID.randomUUID().toString() },
@@ -188,30 +223,11 @@ class RecentVideoHistoryRepository(
     private val mutex = Mutex()
 
     override suspend fun entries(refreshAccess: Boolean): List<RecentVideoRecord> = serialized {
-        val stored = normalized(store.load())
-        if (!refreshAccess) return@serialized stored
-
-        var changed = false
-        val refreshed = stored.map { record ->
-            val availability = accessChecker.availability(record.contentUri)
-            val permissionStatus = when {
-                availability == RecentVideoAvailability.PermissionLost -> VideoUriPermissionStatus.Lost
-                accessChecker.hasPersistedReadPermission(record.contentUri) -> VideoUriPermissionStatus.Persisted
-                else -> VideoUriPermissionStatus.Transient
-            }
-            val updated = record.copy(
-                availability = availability,
-                permissionStatus = permissionStatus,
-            )
-            if (updated != record) changed = true
-            updated
-        }
-        if (changed) store.save(refreshed)
-        refreshed
+        libraryEntries(refreshAccess)
     }
 
     override suspend fun findById(id: String): RecentVideoRecord? = serialized {
-        store.load().firstOrNull { it.id == id }
+        libraryEntries(refreshAccess = false).firstOrNull { it.id == id }
     }
 
     override suspend fun recordOpened(
@@ -239,11 +255,14 @@ class RecentVideoHistoryRepository(
         video: InspectedVideo,
         permissionStatus: VideoUriPermissionStatus,
     ): RecentVideoRecord = serialized {
-        require(recordId.isNotBlank()) { "Recent-video record id must not be blank." }
+        require(recordId.isNotBlank()) { "Media-library record id must not be blank." }
         requireContentUri(contentUri)
         val current = store.load()
         val previous = current.firstOrNull { it.id == recordId }
-            ?: throw IllegalArgumentException("Recent-video record no longer exists.")
+            ?: currentCatalogOrNull()
+                ?.firstOrNull { indexRecordId(it) == recordId }
+                ?.let(::indexOnlyRecord)
+            ?: throw IllegalArgumentException("Media-library record no longer exists.")
         val record = recentVideoRecord(
             id = previous.id,
             contentUri = contentUri,
@@ -253,7 +272,7 @@ class RecentVideoHistoryRepository(
             previous = previous,
         )
         val deduplicated = current.filterNot { it.id == recordId || it.contentUri == contentUri }
-        store.save(normalized(deduplicated + record))
+        store.save(normalizedStored(deduplicated + record))
         record
     }
 
@@ -273,30 +292,125 @@ class RecentVideoHistoryRepository(
                 lastViewedTimestampUs = timestampUs,
             )
         }
-        if (changed) store.save(normalized(updated))
+        if (changed) store.save(normalizedStored(updated))
+    }
+
+    override suspend fun updateIndexBinding(
+        contentUri: String,
+        binding: SessionIndexBinding,
+    ) = serialized {
+        requireContentUri(contentUri)
+        val current = store.load()
+        val target = current.firstOrNull { it.contentUri == contentUri } ?: return@serialized
+        val updated = target.copy(
+            sourceIdentityKey = binding.sourceKey,
+            indexStreamIndex = binding.streamIndex,
+            indexId = indexRecordId(binding.sourceKey, binding.streamIndex),
+            indexRelativePath = binding.relativePath,
+            indexStatus = binding.status.toRecentStatus(),
+            indexedFrameCount = binding.frameCount ?: binding.indexedFrames,
+        )
+        val deduplicated = current.filterNot { record ->
+            record.id == target.id ||
+                (record.sourceIdentityKey == binding.sourceKey &&
+                    record.indexStreamIndex == binding.streamIndex)
+        }
+        store.save(normalizedStored(deduplicated + updated))
     }
 
     override suspend fun remove(recordId: String) = serialized {
         val current = store.load()
         val updated = current.filterNot { it.id == recordId }
-        if (updated.size != current.size) store.save(normalized(updated))
+        if (updated.size != current.size) store.save(normalizedStored(updated))
     }
 
     override suspend fun clear() = serialized {
         if (store.load().isNotEmpty()) store.save(emptyList())
     }
 
+    private fun libraryEntries(refreshAccess: Boolean): List<RecentVideoRecord> {
+        var stored = normalizedStored(store.load())
+        if (refreshAccess) {
+            var changed = false
+            stored = stored.map { record ->
+                val contentUri = record.contentUri ?: return@map record
+                val availability = accessChecker.availability(contentUri)
+                val permissionStatus = when {
+                    availability == RecentVideoAvailability.PermissionLost -> VideoUriPermissionStatus.Lost
+                    accessChecker.hasPersistedReadPermission(contentUri) -> VideoUriPermissionStatus.Persisted
+                    else -> VideoUriPermissionStatus.Transient
+                }
+                val updated = record.copy(
+                    availability = availability,
+                    permissionStatus = permissionStatus,
+                )
+                if (updated != record) changed = true
+                updated
+            }
+            if (changed) store.save(stored)
+        }
+
+        val catalog = currentCatalogOrNull() ?: return sortLibrary(stored)
+        val descriptorsByKey = catalog.associateBy { it.sourceKey to it.streamIndex }
+        var storedChanged = false
+        val reconciledStored = stored.map { record ->
+            val sourceKey = record.sourceIdentityKey ?: return@map record
+            val streamIndex = record.indexStreamIndex ?: return@map record
+            val descriptor = descriptorsByKey[sourceKey to streamIndex]
+            val updated = if (descriptor == null) {
+                record.copy(
+                    indexStatus = RecentVideoIndexStatus.Missing,
+                    indexRelativePath = null,
+                    indexedFrameCount = null,
+                    indexLastModifiedEpochMs = null,
+                )
+            } else {
+                record.copy(
+                    indexId = indexRecordId(descriptor),
+                    indexRelativePath = descriptor.relativePath,
+                    indexStatus = descriptor.status.toRecentStatus(),
+                    indexedFrameCount = descriptor.frameCount ?: descriptor.indexedFrames,
+                    indexLastModifiedEpochMs = descriptor.lastModifiedEpochMs,
+                )
+            }
+            if (updated != record) storedChanged = true
+            updated
+        }
+        if (storedChanged) store.save(normalizedStored(reconciledStored))
+
+        val represented = reconciledStored.mapNotNull { record ->
+            val sourceKey = record.sourceIdentityKey ?: return@mapNotNull null
+            val streamIndex = record.indexStreamIndex ?: return@mapNotNull null
+            sourceKey to streamIndex
+        }.toSet()
+        val indexOnly = catalog
+            .filterNot { descriptor -> (descriptor.sourceKey to descriptor.streamIndex) in represented }
+            .map(::indexOnlyRecord)
+        return sortLibrary(reconciledStored + indexOnly)
+    }
+
+    private fun currentCatalogOrNull(): List<PersistentFrameIndexDescriptor>? =
+        runCatching(indexCatalog::entries).getOrNull()
+
     private fun saveUpsert(record: RecentVideoRecord) {
         val current = store.load()
         val updated = current.filterNot { it.id == record.id || it.contentUri == record.contentUri } + record
-        store.save(normalized(updated))
+        store.save(normalizedStored(updated))
     }
 
-    private fun normalized(entries: List<RecentVideoRecord>): List<RecentVideoRecord> =
+    private fun normalizedStored(entries: List<RecentVideoRecord>): List<RecentVideoRecord> =
         entries
+            .filter { it.contentUri != null }
             .distinctBy { it.id }
             .sortedByDescending { it.lastOpenedEpochMs }
-            .take(MAX_HISTORY_ITEMS)
+            .take(MAX_RECENT_ITEMS)
+
+    private fun sortLibrary(entries: List<RecentVideoRecord>): List<RecentVideoRecord> =
+        entries.sortedWith(
+            compareByDescending<RecentVideoRecord> {
+                maxOf(it.lastOpenedEpochMs, it.indexLastModifiedEpochMs ?: 0L)
+            }.thenBy { it.id },
+        )
 
     private suspend fun <T> serialized(block: () -> T): T = withContext(ioDispatcher) {
         mutex.withLock { block() }
@@ -304,14 +418,50 @@ class RecentVideoHistoryRepository(
 
     private fun requireContentUri(contentUri: String) {
         require(isContentUri(contentUri)) {
-            "Recent-video history accepts only content:// URIs."
+            "Media-library source records accept only content:// URIs."
         }
     }
 
     private companion object {
-        const val MAX_HISTORY_ITEMS = 100
+        const val MAX_RECENT_ITEMS = 100
     }
 }
+
+private fun indexOnlyRecord(descriptor: PersistentFrameIndexDescriptor): RecentVideoRecord =
+    RecentVideoRecord(
+        id = indexRecordId(descriptor),
+        contentUri = null,
+        permissionStatus = VideoUriPermissionStatus.Lost,
+        availability = RecentVideoAvailability.SourceUnlinked,
+        displayName = "Indexed video ${descriptor.sourceKey.take(8)}",
+        durationUs = null,
+        width = 0,
+        height = 0,
+        codec = null,
+        container = null,
+        lastOpenedEpochMs = 0L,
+        lastViewedFrameId = null,
+        lastViewedTimestampUs = null,
+        indexStatus = descriptor.status.toRecentStatus(),
+        sourceIdentityKey = descriptor.sourceKey,
+        indexStreamIndex = descriptor.streamIndex,
+        indexId = indexRecordId(descriptor),
+        indexRelativePath = descriptor.relativePath,
+        indexedFrameCount = descriptor.frameCount ?: descriptor.indexedFrames,
+        indexLastModifiedEpochMs = descriptor.lastModifiedEpochMs,
+    )
+
+private fun PersistentFrameIndexStatus.toRecentStatus(): RecentVideoIndexStatus = when (this) {
+    PersistentFrameIndexStatus.Indexed -> RecentVideoIndexStatus.Available
+    PersistentFrameIndexStatus.InProgress -> RecentVideoIndexStatus.InProgress
+    PersistentFrameIndexStatus.Stale -> RecentVideoIndexStatus.Stale
+}
+
+private fun indexRecordId(descriptor: PersistentFrameIndexDescriptor): String =
+    indexRecordId(descriptor.sourceKey, descriptor.streamIndex)
+
+private fun indexRecordId(sourceKey: String, streamIndex: Int): String =
+    "index:$sourceKey:$streamIndex"
 
 internal fun recentVideoRecord(
     id: String,
@@ -337,10 +487,16 @@ internal fun recentVideoRecord(
     indexStatus = previous?.indexStatus ?: RecentVideoIndexStatus.Unknown,
     thumbnailUri = previous?.thumbnailUri,
     extractionCount = previous?.extractionCount,
+    sourceIdentityKey = previous?.sourceIdentityKey,
+    indexStreamIndex = previous?.indexStreamIndex,
+    indexId = previous?.indexId,
+    indexRelativePath = previous?.indexRelativePath,
+    indexedFrameCount = previous?.indexedFrameCount,
+    indexLastModifiedEpochMs = previous?.indexLastModifiedEpochMs,
 )
 
 internal object RecentVideoJsonCodec {
-    private const val VERSION = 1
+    private const val VERSION = 2
 
     fun encode(entries: List<RecentVideoRecord>): String {
         val items = JSONArray()
@@ -353,19 +509,20 @@ internal object RecentVideoJsonCodec {
 
     fun decode(encoded: String): List<RecentVideoRecord> = runCatching {
         val root = JSONObject(encoded)
-        if (root.optInt("version", -1) != VERSION) return@runCatching emptyList()
+        val version = root.optInt("version", -1)
+        if (version !in setOf(1, VERSION)) return@runCatching emptyList()
         val items = root.optJSONArray("items") ?: return@runCatching emptyList()
         buildList {
             for (index in 0 until items.length()) {
                 val item = items.optJSONObject(index) ?: continue
-                decodeRecord(item)?.let(::add)
+                decodeRecord(item, version)?.let(::add)
             }
         }
     }.getOrElse { emptyList() }
 
     private fun encodeRecord(record: RecentVideoRecord): JSONObject = JSONObject()
         .put("id", record.id)
-        .put("contentUri", record.contentUri)
+        .putNullable("contentUri", record.contentUri)
         .put("permissionStatus", record.permissionStatus.name)
         .put("availability", record.availability.name)
         .put("displayName", record.displayName)
@@ -380,11 +537,22 @@ internal object RecentVideoJsonCodec {
         .put("indexStatus", record.indexStatus.name)
         .putNullable("thumbnailUri", record.thumbnailUri)
         .putNullable("extractionCount", record.extractionCount)
+        .putNullable("sourceIdentityKey", record.sourceIdentityKey)
+        .putNullable("indexStreamIndex", record.indexStreamIndex)
+        .putNullable("indexId", record.indexId)
+        .putNullable("indexRelativePath", record.indexRelativePath)
+        .putNullable("indexedFrameCount", record.indexedFrameCount)
+        .putNullable("indexLastModifiedEpochMs", record.indexLastModifiedEpochMs)
 
-    private fun decodeRecord(json: JSONObject): RecentVideoRecord? = runCatching {
+    private fun decodeRecord(json: JSONObject, version: Int): RecentVideoRecord? = runCatching {
         val id = json.getString("id").takeIf { it.isNotBlank() } ?: return@runCatching null
-        val contentUri = json.getString("contentUri")
-        if (!isContentUri(contentUri)) return@runCatching null
+        val contentUri = if (version == 1) {
+            json.getString("contentUri")
+        } else {
+            json.optNullableString("contentUri")
+        }
+        if (contentUri != null && !isContentUri(contentUri)) return@runCatching null
+        if (version == 1 && contentUri == null) return@runCatching null
         val displayName = json.getString("displayName").takeIf { it.isNotBlank() } ?: "Selected video"
         RecentVideoRecord(
             id = id,
@@ -395,7 +563,7 @@ internal object RecentVideoJsonCodec {
             ),
             availability = enumValueOrDefault(
                 json.optString("availability"),
-                RecentVideoAvailability.Available,
+                if (contentUri == null) RecentVideoAvailability.SourceUnlinked else RecentVideoAvailability.Available,
             ),
             displayName = displayName,
             durationUs = json.optNullableLong("durationUs"),
@@ -412,6 +580,12 @@ internal object RecentVideoJsonCodec {
             ),
             thumbnailUri = json.optNullableString("thumbnailUri"),
             extractionCount = json.optNullableInt("extractionCount"),
+            sourceIdentityKey = json.optNullableString("sourceIdentityKey"),
+            indexStreamIndex = json.optNullableInt("indexStreamIndex"),
+            indexId = json.optNullableString("indexId"),
+            indexRelativePath = json.optNullableString("indexRelativePath"),
+            indexedFrameCount = json.optNullableLong("indexedFrameCount"),
+            indexLastModifiedEpochMs = json.optNullableLong("indexLastModifiedEpochMs"),
         )
     }.getOrNull()
 
