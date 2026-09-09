@@ -3,21 +3,20 @@ package com.framescope.app.ui
 import com.framescope.app.data.PreparedMicroscopeFrame
 import java.nio.ByteBuffer
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class MicroscopeInspectorMathTest {
     @Test
     fun oneToOneScaleUndoFitDownscaling() {
-        val plan = assertNotNull(
+        val plan = requireNotNull(
             MicroscopeInspectorMath.viewportPlan(
                 imageWidth = 1920,
                 imageHeight = 1080,
                 viewportWidth = 960,
                 viewportHeight = 540,
             ),
-        ) as InspectorViewportPlan
+        )
 
         assertEquals(0.5f, plan.fitScale, 0.0001f)
         assertEquals(2f, plan.oneToOneScale, 0.0001f)
@@ -27,14 +26,14 @@ class MicroscopeInspectorMathTest {
 
     @Test
     fun oneToOneScaleCanShrinkSmallImageThatFitWouldUpscale() {
-        val plan = assertNotNull(
+        val plan = requireNotNull(
             MicroscopeInspectorMath.viewportPlan(
                 imageWidth = 100,
                 imageHeight = 100,
                 viewportWidth = 400,
                 viewportHeight = 400,
             ),
-        ) as InspectorViewportPlan
+        )
 
         assertEquals(4f, plan.fitScale, 0.0001f)
         assertEquals(0.25f, plan.oneToOneScale, 0.0001f)
