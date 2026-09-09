@@ -18,10 +18,13 @@ jobs:
           fetch-depth: 0
       - name: Apply integration patch
         run: python3 .github/remediation_seek_patch.py
+      - name: Install pinned formatting component
+        run: rustup component add --toolchain 1.85.1-x86_64-unknown-linux-gnu rustfmt
       - name: Format and run focused navigation regressions
         run: |
           cd rust
-          cargo +1.85.1 fmt --all --check || cargo +1.85.1 fmt --all
+          cargo +1.85.1 fmt --all
+          cargo +1.85.1 fmt --all --check
           cargo +1.85.1 test -p framescope-video target_rgba_navigation --lib
       - name: Commit product fix and remove temporary helpers
         run: |
