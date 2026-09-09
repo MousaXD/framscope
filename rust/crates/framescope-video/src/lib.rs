@@ -28,6 +28,7 @@ pub use microscope::{
 };
 pub use microscope_presentation::{
     MicroscopeFramePresentation, MicroscopePresentationError, present_microscope_frame,
+    present_microscope_frame_with_cursor,
 };
 pub use navigation::{
     NavigationDecoder, NavigationError, NavigationResult, TimestampSelection, navigate_to_frame,

@@ -25,10 +25,12 @@ const MIN_PREVIEW_EDGE: u32 = 64;
 const MAX_PREVIEW_EDGE: u32 = 1_024;
 const DEFAULT_PREVIEW_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES: usize = 64 * 1024 * 1024;
-const PREVIEW_CACHE_MAX_FRAMES: usize = 12;
+// The byte budget remains authoritative. This secondary count guard prevents pathological tiny
+// preview profiles from growing the map without making the normal 640px profile cap out at 12.
+const PREVIEW_CACHE_MAX_FRAMES: usize = 1_024;
 const MAX_RETAINED_PREVIEW_SESSIONS: usize = 2;
 const SOURCE_CACHE_DISK_BUDGET_BYTES: u64 = 0;
-const MAX_CONFIGURED_RAM_BUDGET_BYTES: usize = 512 * 1024 * 1024;
+const MAX_CONFIGURED_RAM_BUDGET_BYTES: usize = 1024 * 1024 * 1024;
 const MAX_FORWARD_CURSOR_REUSE_FRAMES: u64 = 48;
 const DEFAULT_PREFETCH_EDGE: u32 = 640;
 
@@ -56,6 +58,38 @@ enum PreviewResponse {
     Ok {
         engine: &'static str,
         preview: PreviewDetails,
+    },
+    Error {
+        engine: &'static str,
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct RamCacheTierStats {
+    budget_bytes: usize,
+    resident_bytes: usize,
+    resident_frames: usize,
+    hits: u64,
+    misses: u64,
+    insertions: u64,
+    evictions: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RamAccelerationStatsDetails {
+    source: RamCacheTierStats,
+    preview: RamCacheTierStats,
+    retained_preview_sessions: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum RamAccelerationStatsResponse {
+    Ok {
+        engine: &'static str,
+        ram: RamAccelerationStatsDetails,
     },
     Error {
         engine: &'static str,
@@ -453,6 +487,29 @@ pub extern "system" fn Java_com_framescope_app_data_RamAccelerationBridge_native
     if configured { 1 } else { 0 }
 }
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_RamAccelerationBridge_nativeRamAccelerationStats(
+    mut env: JNIEnv,
+    _class: JClass,
+    cache_root: JString,
+) -> jstring {
+    let cache_root: String = match env.get_string(&cache_root) {
+        Ok(value) => value.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        ram_acceleration_stats_response(&cache_root)
+    }))
+    .unwrap_or_else(|_| {
+        serialize_ram_stats_response(RamAccelerationStatsResponse::Error {
+            engine: ENGINE_VERSION,
+            code: "bridge_error".into(),
+            message: "Native RAM acceleration stats aborted safely after an internal panic.".into(),
+        })
+    });
+    to_jstring(&mut env, &json)
+}
+
 fn parse_ram_budget(value: jlong) -> Result<usize, PreviewFailure> {
     if value < 0 {
         return Err(PreviewFailure::new(
@@ -494,6 +551,84 @@ fn configure_ram_budgets(
     }
     rebalance_preview_cache_budgets(&mut registry);
     Ok(())
+}
+
+fn ram_acceleration_stats_response(cache_root: &str) -> String {
+    let response =
+        match validate_cache_root(cache_root).and_then(|root| ram_acceleration_stats(&root)) {
+            Ok(ram) => RamAccelerationStatsResponse::Ok {
+                engine: ENGINE_VERSION,
+                ram,
+            },
+            Err(error) => RamAccelerationStatsResponse::Error {
+                engine: ENGINE_VERSION,
+                code: error.code,
+                message: error.message,
+            },
+        };
+    serialize_ram_stats_response(response)
+}
+
+fn serialize_ram_stats_response(response: RamAccelerationStatsResponse) -> String {
+    serde_json::to_string(&response).unwrap_or_else(|_| {
+        format!(
+            "{{\"status\":\"error\",\"engine\":\"{ENGINE_VERSION}\",\"code\":\"bridge_error\",\"message\":\"Failed to serialize RAM acceleration stats.\"}}"
+        )
+    })
+}
+
+fn ram_acceleration_stats(
+    cache_root: &Path,
+) -> Result<RamAccelerationStatsDetails, PreviewFailure> {
+    let source_stats =
+        FrameCacheHierarchy::shared_ram_stats(cache_root.join("microscope-frame-cache"));
+    let mut preview_resident_bytes = 0usize;
+    let mut preview_resident_frames = 0usize;
+    let mut preview_hits = 0u64;
+    let mut preview_misses = 0u64;
+    let mut preview_insertions = 0u64;
+    let mut preview_evictions = 0u64;
+    let mut retained_preview_sessions = 0usize;
+
+    let registry = scrub_registry()
+        .lock()
+        .map_err(|_| PreviewFailure::new("bridge_error", "Live preview registry is poisoned."))?;
+    for handle in registry.sessions.values() {
+        let state = lock_scrub_state(&handle.state);
+        if state.cache_root != cache_root {
+            continue;
+        }
+        retained_preview_sessions = retained_preview_sessions.saturating_add(1);
+        let stats = state.preview_cache.stats();
+        preview_resident_bytes = preview_resident_bytes.saturating_add(stats.resident_bytes);
+        preview_resident_frames = preview_resident_frames.saturating_add(stats.resident_frames);
+        preview_hits = preview_hits.saturating_add(stats.hits);
+        preview_misses = preview_misses.saturating_add(stats.misses);
+        preview_insertions = preview_insertions.saturating_add(stats.insertions);
+        preview_evictions = preview_evictions.saturating_add(stats.evictions);
+    }
+
+    Ok(RamAccelerationStatsDetails {
+        source: RamCacheTierStats {
+            budget_bytes: source_cache_budget_bytes(),
+            resident_bytes: source_stats.resident_bytes,
+            resident_frames: source_stats.resident_frames,
+            hits: source_stats.hits,
+            misses: source_stats.misses,
+            insertions: source_stats.insertions,
+            evictions: source_stats.evictions,
+        },
+        preview: RamCacheTierStats {
+            budget_bytes: preview_cache_budget_bytes(),
+            resident_bytes: preview_resident_bytes,
+            resident_frames: preview_resident_frames,
+            hits: preview_hits,
+            misses: preview_misses,
+            insertions: preview_insertions,
+            evictions: preview_evictions,
+        },
+        retained_preview_sessions,
+    })
 }
 
 /// Divides the configured preview allowance across every retained session so the total process
@@ -1140,7 +1275,7 @@ mod tests {
         drop(registry);
         assert_eq!(MAX_RETAINED_PREVIEW_SESSIONS, 2);
         assert_eq!(DEFAULT_PREVIEW_CACHE_BUDGET_BYTES, 8 * 1024 * 1024);
-        assert_eq!(PREVIEW_CACHE_MAX_FRAMES, 12);
+        assert_eq!(PREVIEW_CACHE_MAX_FRAMES, 1_024);
     }
 
     #[test]
@@ -1286,8 +1421,47 @@ mod tests {
     }
 
     #[test]
-    fn native_ram_budget_rejects_values_above_safety_limit() {
+    fn ram_stats_report_actual_preview_residency_for_the_requested_root() {
+        let _test_guard = SCRUB_TEST_STATE_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "framescope-scrub-stats-test-{}",
+            std::process::id()
+        ));
+        {
+            let mut registry = scrub_registry().lock().unwrap();
+            for (_, removed) in registry.sessions.drain() {
+                trim_removed_preview_state(removed);
+            }
+            registry.clock = 0;
+        }
+        configure_ram_budgets(&root, 0, 64).unwrap();
+        let state = session_state(88_301, &root).unwrap();
+        state.lock().unwrap().preview_cache.insert(
+            FrameId(1),
+            320,
+            OwnedRgbaFrame::new(2, 2, 8, vec![9; 16]).unwrap(),
+        );
+
+        let details = ram_acceleration_stats(&root).unwrap();
+        assert_eq!(details.preview.budget_bytes, 64);
+        assert_eq!(details.preview.resident_bytes, 16);
+        assert_eq!(details.preview.resident_frames, 1);
+        assert_eq!(details.retained_preview_sessions, 1);
+
+        forget_session(88_301);
+        configure_ram_budgets(
+            &root,
+            DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES,
+            DEFAULT_PREVIEW_CACHE_BUDGET_BYTES,
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_ram_budget_accepts_the_new_one_gib_safety_limit() {
         assert!(parse_ram_budget(-1).is_err());
+        assert_eq!(MAX_CONFIGURED_RAM_BUDGET_BYTES, 1024 * 1024 * 1024);
         assert!(parse_ram_budget(MAX_CONFIGURED_RAM_BUDGET_BYTES as i64).is_ok());
     }
 }

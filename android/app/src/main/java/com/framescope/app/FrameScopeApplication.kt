@@ -2,14 +2,15 @@ package com.framescope.app
 
 import android.app.Application
 import com.framescope.app.data.RamAccelerationRuntime
-import java.io.File
 
 class FrameScopeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        // Keep RAM policy on the exact same namespace used by microscope/scrub/storage. A separate
+        // filesDir root makes live source-cache resize/trim target a cache that navigation never uses.
         RamAccelerationRuntime.initialize(
             context = this,
-            cacheRoot = File(filesDir, "framescope-cache").absolutePath,
+            cacheRoot = cacheDir.resolve("framescope").absolutePath,
         )
     }
 

@@ -14,6 +14,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.framescope.app.data.AndroidFrameScopeRepository
 import com.framescope.app.data.AndroidMicroscopeScrubPreviewSource
 import com.framescope.app.data.AndroidRecentVideoAccessChecker
+import com.framescope.app.data.NativePersistentFrameIndexCatalog
+import com.framescope.app.data.RamAccelerationRuntime
 import com.framescope.app.data.RecentVideoHistoryRepository
 import com.framescope.app.data.RecentVideoRecord
 import com.framescope.app.data.SharedPreferencesRecentVideoStore
@@ -57,10 +59,15 @@ class MainActivity : ComponentActivity() {
         AndroidMicroscopeScrubPreviewSource(cacheRoot = frameScopeCacheRoot)
     }
 
+    private val persistentFrameIndexCatalog by lazy {
+        NativePersistentFrameIndexCatalog(cacheRoot = frameScopeCacheRoot)
+    }
+
     private val recentVideoHistory by lazy {
         RecentVideoHistoryRepository(
             store = SharedPreferencesRecentVideoStore(applicationContext),
             accessChecker = AndroidRecentVideoAccessChecker(applicationContext.contentResolver),
+            indexCatalog = persistentFrameIndexCatalog,
         )
     }
 
@@ -82,6 +89,11 @@ class MainActivity : ComponentActivity() {
 
     private val batchExportViewModel: BatchExportViewModel by viewModels {
         BatchExportViewModelFactory(repository)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        RamAccelerationRuntime.onForeground()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -175,7 +187,9 @@ class MainActivity : ComponentActivity() {
                     videoState = state.videoState,
                     microscopeState = state.microscopeState,
                     history = recentVideoHistory,
+                    indexCatalog = persistentFrameIndexCatalog,
                     onResumeTimestampUs = viewModel::jumpMicroscopeTimestampUs,
+                    onLibraryChanged = historyViewModel::refresh,
                 )
 
                 FrameScopeScreen(

@@ -8,7 +8,7 @@ use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const META_ROW_ID: i64 = 1;
 const ENTRY_COLUMNS: &str = "frame_index,
@@ -238,10 +238,31 @@ impl FrameIndex {
     }
 
     pub fn append_batch(&mut self, entries: &[FrameIndexEntry]) -> Result<(), FrameIndexError> {
+        self.append_batch_profiled(entries).map(|_| ())
+    }
+
+    /// Append one contiguous authoritative batch and return timing for the two blocking boundaries
+    /// that matter to indexing throughput diagnostics.
+    ///
+    /// The transaction and batch semantics are identical to [`Self::append_batch`]. The first
+    /// duration measures acquisition of the IMMEDIATE transaction, including any SQLite busy wait;
+    /// the second measures the commit call. Both are monotonic wall-clock microseconds.
+    pub fn append_batch_profiled(
+        &mut self,
+        entries: &[FrameIndexEntry],
+    ) -> Result<(u64, u64), FrameIndexError> {
         if entries.is_empty() {
-            return Ok(());
+            return Ok((0, 0));
         }
-        let current = self.status()?.indexed_frames;
+
+        // append_batch only needs the current row count and persisted seek-safety decision. Reading
+        // status() here used to perform an unnecessary last-frame lookup, followed by a second
+        // metadata query via timestamp_seek_safety(). One metadata load is sufficient under &mut
+        // self and preserves the exact same authoritative state used by the transaction below.
+        let meta = self.load_meta()?.ok_or_else(|| {
+            FrameIndexError::InvalidState("frame-index metadata row is missing".into())
+        })?;
+        let current = meta.indexed_frames;
         for (offset, entry) in entries.iter().enumerate() {
             let expected = current
                 .checked_add(offset as u64)
@@ -255,7 +276,7 @@ impl FrameIndex {
             entry.validate(&self.stream_identity)?;
         }
 
-        let mut seek_safety = self.timestamp_seek_safety()?;
+        let mut seek_safety = meta.timestamp_seek_safety;
         let mut previous_clean_keyframe_ticks = if seek_safety.permits_timestamp_seek() {
             self.connection
                 .query_row(
@@ -289,9 +310,11 @@ impl FrameIndex {
         }
 
         let source_key = source_binding_key(&self.source_identity, seek_safety);
+        let transaction_started = Instant::now();
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction_begin_elapsed_us = duration_us(transaction_started.elapsed());
         {
             let mut statement = transaction.prepare_cached(
                 "INSERT INTO frame_index (
@@ -338,8 +361,10 @@ impl FrameIndex {
             "UPDATE index_meta SET source_key = ?1, indexed_frames = ?2 WHERE id = ?3",
             params![source_key, to_sql_u64(next, "frame count")?, META_ROW_ID],
         )?;
+        let commit_started = Instant::now();
         transaction.commit()?;
-        Ok(())
+        let commit_elapsed_us = duration_us(commit_started.elapsed());
+        Ok((transaction_begin_elapsed_us, commit_elapsed_us))
     }
 
     pub fn entry(&self, frame_id: FrameId) -> Result<Option<FrameIndexEntry>, FrameIndexError> {
@@ -906,6 +931,10 @@ fn remove_if_exists(path: &Path) -> Result<(), std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 fn to_sql_u64(value: u64, label: &str) -> Result<i64, FrameIndexError> {
