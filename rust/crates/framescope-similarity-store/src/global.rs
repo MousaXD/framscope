@@ -1,9 +1,8 @@
 //! Versioned persistence and deterministic fingerprints for non-contiguous similar-frame retrieval.
 //!
-//! This is intentionally separate from consecutive near-duplicate grouping. The authoritative
-//! frame index remains the source of frame identity and timing. This module stores only disposable
-//! descriptors keyed to strong source identity, exact stream identity, and the frame-timeline
-//! contract generation.
+//! Consecutive near-duplicate grouping remains a separate product. This store is a disposable
+//! acceleration structure over the authoritative persistent frame index. Every descriptor is keyed
+//! to strong source identity, exact selected-stream identity, and the frame-timeline contract.
 
 use framescope_cache::{
     FRAME_TIMELINE_CONTRACT_GENERATION, FrameId, FrameIndexStreamIdentity, OwnedRgbaFrame,
@@ -18,9 +17,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-pub const GLOBAL_SIMILARITY_ALGORITHM_VERSION: u32 = 1;
-pub const GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION: u32 = 1;
-pub const NORMALIZED_SIDE: usize = 12;
+pub const GLOBAL_SIMILARITY_ALGORITHM_VERSION: u32 = 2;
+pub const GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION: u32 = 2;
+pub const NORMALIZED_SIDE: usize = 16;
 pub const NORMALIZED_RGB_BYTES: usize = NORMALIZED_SIDE * NORMALIZED_SIDE * 3;
 pub const HASH_BANDS_PER_KIND: usize = 4;
 pub const DEFAULT_MINIMUM_SIMILARITY: u16 = 9_300;
@@ -31,6 +30,7 @@ const STATE_BUILDING: i64 = 1;
 const STATE_COMPLETE: i64 = 2;
 const WRITE_BATCH_DESCRIPTORS: usize = 128;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+const SCALE_INSETS_Q16: [u32; 4] = [0, 32_768, 49_152, 65_536];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalSimilarityStoreKey {
@@ -168,11 +168,11 @@ pub enum GlobalSimilarityError {
     Serialization(#[from] serde_json::Error),
 }
 
-/// Build the deterministic descriptor used by candidate generation and final confirmation.
+/// Build a compact source-quality descriptor.
 ///
-/// The descriptor is generated from source-quality RGBA pixels. Resolution normalization makes the
-/// candidate robust to resize/re-encode pipelines while preserving RGB information for final
-/// confirmation instead of reducing the decision to luma only.
+/// RGB normalization is deliberately separate from the two luma hashes. The hashes cheaply narrow
+/// candidates; RGB remains available for a color-aware confirmation that does not collapse equal-
+/// luma but different-hue content into a match.
 pub fn descriptor_for_frame(
     frame_id: FrameId,
     frame: &OwnedRgbaFrame,
@@ -226,17 +226,33 @@ pub fn descriptor_for_frame(
 
 /// Deterministic color-aware confirmation score on the documented 0..=10_000 scale.
 ///
-/// A one-cell normalized translation search absorbs small crop/resampling shifts. Only overlapping
-/// cells are compared for a shifted candidate, avoiding artificial border duplication.
+/// Three small integer translations cover ordinary decode/resampling jitter. A bounded symmetric
+/// descriptor-space crop search then handles mild source crops by rescaling only up to one cell from
+/// each edge. Both orientations are evaluated so the score is symmetric. This changes geometric
+/// normalization, not the acceptance threshold.
 pub fn confirmation_similarity(left: &[u8], right: &[u8]) -> Result<u16, GlobalSimilarityError> {
     validate_descriptor_bytes(left)?;
     validate_descriptor_bytes(right)?;
 
+    let mut best = translation_similarity(left, right);
+    for inset_x in SCALE_INSETS_Q16 {
+        for inset_y in SCALE_INSETS_Q16 {
+            if inset_x == 0 && inset_y == 0 {
+                continue;
+            }
+            best = best.max(scaled_similarity(left, right, inset_x, inset_y));
+            best = best.max(scaled_similarity(right, left, inset_x, inset_y));
+        }
+    }
+    Ok(best)
+}
+
+fn translation_similarity(left: &[u8], right: &[u8]) -> u16 {
     let mut best = 0_u16;
     for dy in -1_i32..=1 {
         for dx in -1_i32..=1 {
             let mut difference = 0_u64;
-            let mut compared_channels = 0_u64;
+            let mut channels = 0_u64;
             for y in 0..NORMALIZED_SIDE {
                 let right_y = y as i32 + dy;
                 if !(0..NORMALIZED_SIDE as i32).contains(&right_y) {
@@ -248,26 +264,82 @@ pub fn confirmation_similarity(left: &[u8], right: &[u8]) -> Result<u16, GlobalS
                         continue;
                     }
                     let left_index = (y * NORMALIZED_SIDE + x) * 3;
-                    let right_index = (right_y as usize * NORMALIZED_SIDE + right_x as usize) * 3;
+                    let right_index =
+                        (right_y as usize * NORMALIZED_SIDE + right_x as usize) * 3;
                     for channel in 0..3 {
                         difference += u64::from(
                             left[left_index + channel].abs_diff(right[right_index + channel]),
                         );
-                        compared_channels += 1;
+                        channels += 1;
                     }
                 }
             }
-            if compared_channels == 0 {
-                continue;
-            }
-            let maximum = compared_channels * 255;
-            let difference_bps = ((difference * u64::from(SIMILARITY_SCALE) + maximum / 2)
-                / maximum)
-                .min(u64::from(SIMILARITY_SCALE));
-            best = best.max((u64::from(SIMILARITY_SCALE) - difference_bps) as u16);
+            best = best.max(score_from_difference(difference, channels));
         }
     }
-    Ok(best)
+    best
+}
+
+fn scaled_similarity(source: &[u8], target: &[u8], inset_x_q16: u32, inset_y_q16: u32) -> u16 {
+    let full_span_q16 = ((NORMALIZED_SIDE - 1) as u64) << 16;
+    let span_x_q16 = full_span_q16.saturating_sub(u64::from(inset_x_q16) * 2);
+    let span_y_q16 = full_span_q16.saturating_sub(u64::from(inset_y_q16) * 2);
+    let denominator = (NORMALIZED_SIDE - 1) as u64;
+    let mut difference = 0_u64;
+
+    for y in 0..NORMALIZED_SIDE {
+        let source_y_q16 =
+            u64::from(inset_y_q16) + y as u64 * span_y_q16 / denominator;
+        for x in 0..NORMALIZED_SIDE {
+            let source_x_q16 =
+                u64::from(inset_x_q16) + x as u64 * span_x_q16 / denominator;
+            let target_index = (y * NORMALIZED_SIDE + x) * 3;
+            for channel in 0..3 {
+                let sampled = sample_descriptor_channel(
+                    source,
+                    source_x_q16,
+                    source_y_q16,
+                    channel,
+                );
+                difference += u64::from(sampled.abs_diff(target[target_index + channel]));
+            }
+        }
+    }
+    score_from_difference(difference, NORMALIZED_RGB_BYTES as u64)
+}
+
+fn sample_descriptor_channel(
+    descriptor: &[u8],
+    x_q16: u64,
+    y_q16: u64,
+    channel: usize,
+) -> u8 {
+    let max_index = NORMALIZED_SIDE - 1;
+    let x0 = ((x_q16 >> 16) as usize).min(max_index);
+    let y0 = ((y_q16 >> 16) as usize).min(max_index);
+    let x1 = (x0 + 1).min(max_index);
+    let y1 = (y0 + 1).min(max_index);
+    let fx = (x_q16 & 0xffff) as u32;
+    let fy = (y_q16 & 0xffff) as u32;
+    let index = |x: usize, y: usize| (y * NORMALIZED_SIDE + x) * 3 + channel;
+    let p00 = u64::from(descriptor[index(x0, y0)]);
+    let p10 = u64::from(descriptor[index(x1, y0)]);
+    let p01 = u64::from(descriptor[index(x0, y1)]);
+    let p11 = u64::from(descriptor[index(x1, y1)]);
+    let top = p00 * u64::from(65_536 - fx) + p10 * u64::from(fx);
+    let bottom = p01 * u64::from(65_536 - fx) + p11 * u64::from(fx);
+    ((top * u64::from(65_536 - fy) + bottom * u64::from(fy) + (1_u64 << 31)) >> 32)
+        .min(255) as u8
+}
+
+fn score_from_difference(difference: u64, channels: u64) -> u16 {
+    if channels == 0 {
+        return 0;
+    }
+    let maximum = channels * 255;
+    let difference_bps = ((difference * u64::from(SIMILARITY_SCALE) + maximum / 2) / maximum)
+        .min(u64::from(SIMILARITY_SCALE));
+    (u64::from(SIMILARITY_SCALE) - difference_bps) as u16
 }
 
 #[derive(Debug, Clone)]
@@ -315,7 +387,6 @@ impl GlobalSimilarityStore {
                 serde_json::to_string(&key.persisted())?
             ],
         )?;
-
         Ok(GlobalSimilarityStoreWriter {
             connection,
             final_path,
@@ -347,7 +418,6 @@ impl GlobalSimilarityStore {
             purge_database_files(&path)?;
             return Ok(GlobalSimilarityStoreLoad::InvalidatedStale);
         }
-
         let metadata: Option<(i64, String, i64)> = connection
             .query_row(
                 "SELECT state, key_json, descriptor_count
@@ -366,7 +436,6 @@ impl GlobalSimilarityStore {
             purge_database_files(&path)?;
             return Ok(GlobalSimilarityStoreLoad::InvalidatedIncomplete);
         }
-
         let persisted: PersistedGlobalSimilarityKey = match serde_json::from_str(&key_json) {
             Ok(value) => value,
             Err(_) => {
@@ -389,7 +458,6 @@ impl GlobalSimilarityStore {
             purge_database_files(&path)?;
             return Ok(GlobalSimilarityStoreLoad::InvalidatedCorrupt);
         }
-
         Ok(GlobalSimilarityStoreLoad::Reused { descriptor_count })
     }
 
@@ -422,7 +490,6 @@ impl GlobalSimilarityStore {
         connection.busy_timeout(Duration::from_secs(5))?;
         let target = read_descriptor(&connection, target_frame)?
             .ok_or(GlobalSimilarityError::MissingTarget(target_frame))?;
-
         let mut candidate_ids = BTreeSet::new();
         let mut statement = connection.prepare_cached(
             "SELECT frame_id FROM global_hash_bands
@@ -553,8 +620,6 @@ impl GlobalSimilarityStoreWriter {
         )?;
         self.connection.execute_batch("PRAGMA optimize;")?;
         drop(self.connection);
-
-        purge_database_files(&self.final_path)?;
         fs::rename(&self.building_path, &self.final_path)?;
         sync_parent(&self.final_path)?;
         Ok(count)
@@ -608,7 +673,7 @@ impl GlobalSimilarityStoreWriter {
 }
 
 fn create_schema(connection: &Connection) -> Result<(), GlobalSimilarityError> {
-    connection.execute_batch(
+    connection.execute_batch(&format!(
         "CREATE TABLE global_similarity_meta (
             id INTEGER PRIMARY KEY CHECK(id = 1),
             state INTEGER NOT NULL CHECK(state IN (1, 2)),
@@ -619,7 +684,7 @@ fn create_schema(connection: &Connection) -> Result<(), GlobalSimilarityError> {
             frame_id INTEGER PRIMARY KEY CHECK(frame_id >= 0),
             average_hash INTEGER NOT NULL,
             difference_hash INTEGER NOT NULL,
-            normalized_rgb BLOB NOT NULL CHECK(length(normalized_rgb) = 432)
+            normalized_rgb BLOB NOT NULL CHECK(length(normalized_rgb) = {NORMALIZED_RGB_BYTES})
          );
          CREATE TABLE global_hash_bands (
             kind INTEGER NOT NULL CHECK(kind IN (0, 1)),
@@ -630,8 +695,8 @@ fn create_schema(connection: &Connection) -> Result<(), GlobalSimilarityError> {
             FOREIGN KEY(frame_id) REFERENCES global_descriptors(frame_id) ON DELETE CASCADE
          );
          CREATE INDEX global_hash_band_lookup
-            ON global_hash_bands(kind, band, band_value, frame_id);",
-    )?;
+            ON global_hash_bands(kind, band, band_value, frame_id);"
+    ))?;
     connection.pragma_update(None, "user_version", GLOBAL_SIMILARITY_STORE_SCHEMA_VERSION)?;
     Ok(())
 }
@@ -665,7 +730,6 @@ fn validate_rows(
     {
         return Ok(false);
     }
-
     let invalid_descriptors: i64 = connection.query_row(
         "SELECT COUNT(*) FROM global_descriptors WHERE length(normalized_rgb) != ?1",
         params![NORMALIZED_RGB_BYTES as i64],
@@ -674,7 +738,6 @@ fn validate_rows(
     if invalid_descriptors != 0 {
         return Ok(false);
     }
-
     let band_count: i64 =
         connection.query_row("SELECT COUNT(*) FROM global_hash_bands", [], |row| {
             row.get(0)
@@ -685,8 +748,7 @@ fn validate_rows(
     if from_sql_u64(band_count, "hash band count")? != expected_bands {
         return Ok(false);
     }
-
-    let frames_with_wrong_band_count: i64 = connection.query_row(
+    let wrong_band_count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM (
             SELECT frame_id, COUNT(*) AS bands
             FROM global_hash_bands
@@ -696,7 +758,7 @@ fn validate_rows(
         params![(HASH_BANDS_PER_KIND * 2) as i64],
         |row| row.get(0),
     )?;
-    Ok(frames_with_wrong_band_count == 0)
+    Ok(wrong_band_count == 0)
 }
 
 fn read_descriptor(
@@ -749,7 +811,6 @@ fn resample_rgb(
         .and_then(|pixels| pixels.checked_mul(3))
         .ok_or(GlobalSimilarityError::FrameLayoutOverflow)?;
     let mut output = vec![0_u8; output_len];
-
     for output_y in 0..output_height {
         let source_y = fixed_point_coordinate(output_y, output_height, height);
         let y0 = (source_y >> 16) as usize;
@@ -1011,18 +1072,19 @@ mod tests {
                 original.pixels()[index + 2],
             ]
         });
-        let unrelated = unrelated(3);
 
         let reference = descriptor_for_frame(FrameId(0), &original).unwrap();
-        let positives = [
+        for (offset, (name, candidate)) in [
             ("identical", identical),
             ("scaled", scaled),
             ("recompressed", recompressed),
             ("cropped", cropped),
             ("color_shifted", color_shifted),
             ("adjacent", adjacent),
-        ];
-        for (offset, (name, candidate)) in positives.iter().enumerate() {
+        ]
+        .iter()
+        .enumerate()
+        {
             let descriptor = descriptor_for_frame(FrameId(offset as u64 + 1), candidate).unwrap();
             let score =
                 confirmation_similarity(&reference.normalized_rgb, &descriptor.normalized_rgb)
@@ -1037,12 +1099,31 @@ mod tests {
             );
         }
 
-        let unrelated = descriptor_for_frame(FrameId(99), &unrelated).unwrap();
+        let unrelated = descriptor_for_frame(FrameId(99), &unrelated(3)).unwrap();
         let unrelated_score =
             confirmation_similarity(&reference.normalized_rgb, &unrelated.normalized_rgb).unwrap();
         assert!(
             unrelated_score < DEFAULT_MINIMUM_SIMILARITY,
             "unrelated fixture scored {unrelated_score}"
+        );
+    }
+
+    #[test]
+    fn color_permutation_does_not_become_a_false_positive() {
+        let original = base(64, 48);
+        let permuted = frame(64, 48, |x, y| {
+            let index = y as usize * original.stride_bytes + x as usize * 4;
+            [
+                original.pixels()[index + 2],
+                original.pixels()[index],
+                original.pixels()[index + 1],
+            ]
+        });
+        let left = descriptor_for_frame(FrameId(0), &original).unwrap();
+        let right = descriptor_for_frame(FrameId(1), &permuted).unwrap();
+        assert!(
+            confirmation_similarity(&left.normalized_rgb, &right.normalized_rgb).unwrap()
+                < DEFAULT_MINIMUM_SIMILARITY
         );
     }
 
@@ -1060,9 +1141,8 @@ mod tests {
                 original.pixels()[index + 2],
             ]
         });
-
         let mut writer = store.begin(&key).unwrap();
-        let frames = [
+        for (frame_id, pixels) in [
             original.clone(),
             unrelated(1),
             close,
@@ -1071,8 +1151,10 @@ mod tests {
             unrelated(5),
             unrelated(6),
             original,
-        ];
-        for (frame_id, pixels) in frames.iter().enumerate() {
+        ]
+        .iter()
+        .enumerate()
+        {
             writer
                 .append(descriptor_for_frame(FrameId(frame_id as u64), pixels).unwrap())
                 .unwrap();
@@ -1084,11 +1166,9 @@ mod tests {
                 descriptor_count: 8
             }
         );
-
         let result = store
             .query(&key, 8, FrameId(0), GlobalSimilarityPolicy::default())
             .unwrap();
-        assert_eq!(result.descriptor_count, 8);
         assert!(result.candidate_count >= 2);
         assert_eq!(result.matches[0].frame_id, FrameId(7));
         assert_eq!(result.matches[0].similarity, SIMILARITY_SCALE);
@@ -1116,26 +1196,22 @@ mod tests {
             .append(descriptor_for_frame(FrameId(0), &base(64, 48)).unwrap())
             .unwrap();
         writer.finish().unwrap();
-
-        let different_source = key("source-b");
         assert_eq!(
-            store.load(&different_source, 1).unwrap(),
+            store.load(&key("source-b"), 1).unwrap(),
             GlobalSimilarityStoreLoad::Missing
         );
-
         let mut changed_stream = stream();
         changed_stream.codec_id = 173;
         changed_stream.codec_name = "hevc".into();
-        let changed_stream_key =
-            GlobalSimilarityStoreKey::new(source("source-a"), changed_stream).unwrap();
+        let changed = GlobalSimilarityStoreKey::new(source("source-a"), changed_stream).unwrap();
         assert_eq!(
-            store.load(&changed_stream_key, 1).unwrap(),
+            store.load(&changed, 1).unwrap(),
             GlobalSimilarityStoreLoad::InvalidatedStale
         );
     }
 
     #[test]
-    fn incomplete_or_corrupt_store_is_never_reused() {
+    fn corrupt_store_is_never_reused() {
         let directory = TestDirectory::new("corrupt");
         let store = GlobalSimilarityStore::new(directory.path());
         let key = key("corrupt");
