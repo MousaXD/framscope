@@ -48,6 +48,31 @@ fn current_decoded_frame_copies_to_owned_tightly_packed_rgba() {
 }
 
 #[test]
+fn repeated_rgba_copy_of_same_frame_is_pixel_identical() {
+    let mut session = Session::open_path(&fixture("h264-cfr.mp4"), None, CancellationToken::new())
+        .expect("fixture should open");
+    session
+        .next_frame()
+        .expect("decode should succeed")
+        .expect("fixture should contain a frame");
+
+    let first = session
+        .copy_current_frame_rgba()
+        .expect("first RGBA conversion should succeed");
+    let second = session
+        .copy_current_frame_rgba()
+        .expect("repeated RGBA conversion should succeed");
+
+    assert_eq!(first.width, second.width);
+    assert_eq!(first.height, second.height);
+    assert_eq!(first.stride, second.stride);
+    assert_eq!(
+        first.pixels, second.pixels,
+        "reusing conversion state must not change RGBA output"
+    );
+}
+
+#[test]
 fn video_decoder_exposes_source_quality_owned_rgba_with_pts_metadata() {
     let mut decoder =
         VideoDecoder::open_path(fixture("h264-cfr.mp4")).expect("fixture should open");
