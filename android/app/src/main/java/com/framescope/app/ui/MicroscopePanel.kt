@@ -233,6 +233,7 @@ private fun MicroscopeFrameCard(
                 rangeSelection = rangeSelection,
                 enabled = controlsEnabled,
                 exactSettleInProgress = exactSettleInProgress,
+                authoritativePresentationToken = frame,
                 onStep = onStep,
                 onPreviewFrame = onPreviewFrame,
                 onPreviewTimestampUs = onPreviewTimestampUs,
