@@ -306,8 +306,10 @@ private fun Wave1WorkspaceScreen(
                     workspaceExtractionContent()
                     OutlinedButton(
                         onClick = onOpenInspector,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Inspector & metadata") }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("inspect_current_frame_action"),
+                    ) { Text("Inspect current frame") }
                 }
                 VideoInspectionState.Opening,
                 VideoInspectionState.Inspecting,
@@ -375,6 +377,7 @@ private fun Wave1InspectorScreen(
             item {
                 MicroscopeInspectorPanel(
                     state = state.microscopeState,
+                    metadata = ready.video.metadata,
                     onStep = onStep,
                     onJumpFrame = onJumpFrame,
                     onJumpTimestampUs = onJumpTimestampUs,
