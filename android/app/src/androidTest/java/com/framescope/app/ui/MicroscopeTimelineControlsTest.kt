@@ -136,6 +136,41 @@ class MicroscopeTimelineControlsTest {
     }
 
     @Test
+    fun sameFramePresentationCompletesSettleWhenNavigatingStateWasConflatedAway() {
+        var presentationToken by mutableStateOf<Any>(Any())
+        val finishedTimestamps = mutableListOf<Long>()
+
+        composeRule.setContent {
+            MaterialTheme {
+                controls(
+                    session = session(frameId = 0L),
+                    authoritativePresentationToken = presentationToken,
+                    exactSettleInProgress = false,
+                    onFinishScrubTimestampUs = { finishedTimestamps += it },
+                )
+            }
+        }
+
+        // A small VFR timestamp move can legitimately settle back onto the same indexed FrameId.
+        // Simulate the parent conflating Ready -> Navigating -> Ready by never exposing Navigating.
+        dragTimeline(fromFraction = 0.04f, toFraction = 0.14f)
+        val releasedProgress = sliderProgress()
+        assertTrue(releasedProgress > 0.08f)
+        composeRule.onNodeWithTag(TIMELINE_SETTLING_TAG).assertExists()
+        composeRule.runOnIdle { assertEquals(1, finishedTimestamps.size) }
+
+        // Source-quality presentation completed for the same FrameId. Production passes the
+        // newly published MicroscopeFrame object as this token, so reference replacement is the
+        // authoritative completion signal even though the FrameId itself did not change.
+        composeRule.runOnIdle { presentationToken = Any() }
+        composeRule.waitForIdle()
+
+        assertEquals(0.0f, sliderProgress(), 0.02f)
+        composeRule.onNodeWithTag(TIMELINE_SETTLING_TAG).assertDoesNotExist()
+        composeRule.onNodeWithText("Frame 1 / 5").assertExists()
+    }
+
+    @Test
     fun settlingStateDoesNotPresentOldFramePositionAsCurrentTarget() {
         var exactSettleInProgress by mutableStateOf(false)
         composeRule.setContent {
@@ -206,6 +241,7 @@ class MicroscopeTimelineControlsTest {
         ),
         rangeSelection: TimelineRangeSelection? = null,
         exactSettleInProgress: Boolean = false,
+        authoritativePresentationToken: Any? = null,
         onPreviewTimestampUs: (Long) -> Unit = {},
         onFinishScrubTimestampUs: (Long) -> Unit = {},
         onClearRange: () -> Unit = {},
@@ -216,6 +252,7 @@ class MicroscopeTimelineControlsTest {
             rangeSelection = rangeSelection,
             enabled = true,
             exactSettleInProgress = exactSettleInProgress,
+            authoritativePresentationToken = authoritativePresentationToken,
             onStep = {},
             onPreviewFrame = {},
             onPreviewTimestampUs = onPreviewTimestampUs,
