@@ -138,6 +138,8 @@ internal fun MicroscopeSimilarityInspectorPanel(
 
                 is MicroscopeSimilarityUiState.Ready -> {
                     val result = resultState.result
+                    val resultActionsEnabled = ready?.session?.sessionId == result.sessionId &&
+                        currentFrameId == result.targetFrameId
                     Text(
                         text = "Target frame ${result.targetFrameId + 1} · ${result.matchedCount} confirmed match${if (result.matchedCount == 1L) "" else "es"}",
                         style = MaterialTheme.typography.bodyMedium,
@@ -167,6 +169,7 @@ internal fun MicroscopeSimilarityInspectorPanel(
                         result.matches.forEachIndexed { index, match ->
                             OutlinedButton(
                                 onClick = { onJumpFrame(match.frameId) },
+                                enabled = resultActionsEnabled,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .testTag("similar_frame_result_$index"),
