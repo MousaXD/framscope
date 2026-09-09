@@ -6,7 +6,7 @@ import org.junit.Test
 
 class ScrubUxTelemetryTest {
     @Test
-    fun pointerAdmissionAndPublishedTargetAgeAreCountedWithoutAffectingBehavior() {
+    fun pointerAdmissionAndPresentedTargetAgeAreCountedWithoutAffectingBehavior() {
         ScrubUxTelemetry.resetForTest()
 
         ScrubUxTelemetry.recordPointerToThumb(
@@ -19,14 +19,23 @@ class ScrubUxTelemetryTest {
         )
         ScrubUxTelemetry.recordRequestStarted(
             requestId = 3L,
+            sessionId = 21L,
             submittedAtNanos = 3_000_000_000L,
             startedAtNanos = 3_004_000_000L,
         )
         ScrubUxTelemetry.recordRequestFinished(
             requestId = 3L,
+            sessionId = 21L,
             submittedAtNanos = 3_000_000_000L,
             finishedAtNanos = 3_030_000_000L,
             publishable = true,
+        )
+
+        // Gate publication alone is not presentation. The target-age sample closes on draw.
+        assertEquals(0L, ScrubUxTelemetry.snapshot().targetAgeSamples)
+        ScrubUxTelemetry.recordPreviewPresented(
+            sessionId = 21L,
+            presentedAtNanos = 3_045_000_000L,
         )
 
         val snapshot = ScrubUxTelemetry.snapshot()
@@ -37,8 +46,33 @@ class ScrubUxTelemetryTest {
         assertEquals(1L, snapshot.requestStarts)
         assertEquals(1L, snapshot.requestFinishes)
         assertEquals(1L, snapshot.targetAgeSamples)
-        assertEquals(30_000L, snapshot.targetAgeLastUs)
+        assertEquals(45_000L, snapshot.targetAgeLastUs)
         assertEquals(0L, snapshot.staleResultDrops)
+    }
+
+    @Test
+    fun newerRequestInvalidatesAnOlderNotYetDrawnPresentationSample() {
+        ScrubUxTelemetry.resetForTest()
+        ScrubUxTelemetry.recordRequestFinished(
+            requestId = 1L,
+            sessionId = 21L,
+            submittedAtNanos = 4_000_000_000L,
+            finishedAtNanos = 4_020_000_000L,
+            publishable = true,
+        )
+        ScrubUxTelemetry.recordRequestStarted(
+            requestId = 2L,
+            sessionId = 21L,
+            submittedAtNanos = 4_025_000_000L,
+            startedAtNanos = 4_026_000_000L,
+        )
+
+        ScrubUxTelemetry.recordPreviewPresented(
+            sessionId = 21L,
+            presentedAtNanos = 4_030_000_000L,
+        )
+
+        assertEquals(0L, ScrubUxTelemetry.snapshot().targetAgeSamples)
     }
 
     @Test
@@ -47,9 +81,14 @@ class ScrubUxTelemetryTest {
 
         ScrubUxTelemetry.recordRequestFinished(
             requestId = 8L,
-            submittedAtNanos = 4_000_000_000L,
-            finishedAtNanos = 4_040_000_000L,
+            sessionId = 31L,
+            submittedAtNanos = 5_000_000_000L,
+            finishedAtNanos = 5_040_000_000L,
             publishable = false,
+        )
+        ScrubUxTelemetry.recordPreviewPresented(
+            sessionId = 31L,
+            presentedAtNanos = 5_050_000_000L,
         )
 
         val snapshot = ScrubUxTelemetry.snapshot()
@@ -62,19 +101,19 @@ class ScrubUxTelemetryTest {
     fun exactSettleOnlyCompletesForTheMatchingSession() {
         ScrubUxTelemetry.resetForTest()
         ScrubUxTelemetry.beginExactSettle(
-            sessionId = 21L,
-            startedAtNanos = 5_000_000_000L,
+            sessionId = 41L,
+            startedAtNanos = 6_000_000_000L,
         )
 
         ScrubUxTelemetry.completeExactSettle(
-            sessionId = 22L,
-            completedAtNanos = 5_010_000_000L,
+            sessionId = 42L,
+            completedAtNanos = 6_010_000_000L,
         )
         assertEquals(0L, ScrubUxTelemetry.snapshot().exactSettleSamples)
 
         ScrubUxTelemetry.completeExactSettle(
-            sessionId = 21L,
-            completedAtNanos = 5_025_000_000L,
+            sessionId = 41L,
+            completedAtNanos = 6_025_000_000L,
         )
         val snapshot = ScrubUxTelemetry.snapshot()
         assertEquals(1L, snapshot.exactSettleSamples)
