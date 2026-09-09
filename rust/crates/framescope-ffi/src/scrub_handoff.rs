@@ -453,8 +453,12 @@ fn rebalance_preview_cache_budgets(registry: &mut ScrubRegistry) {
     }
 }
 
-fn lock_scrub_state(state: &Arc<Mutex<ScrubSessionState>>) -> std::sync::MutexGuard<'_, ScrubSessionState> {
-    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+fn lock_scrub_state(
+    state: &Arc<Mutex<ScrubSessionState>>,
+) -> std::sync::MutexGuard<'_, ScrubSessionState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn trim_removed_preview_state(handle: ScrubSessionHandle) {
@@ -1023,14 +1027,20 @@ mod tests {
         assert_eq!(resident, 32);
 
         assert!(forget_session(88_101));
-        assert_eq!(first.lock().unwrap().preview_cache.stats().resident_bytes, 0);
+        assert_eq!(
+            first.lock().unwrap().preview_cache.stats().resident_bytes,
+            0
+        );
         let frame_c = OwnedRgbaFrame::new(2, 2, 8, vec![3; 16]).unwrap();
         second
             .lock()
             .unwrap()
             .preview_cache
             .insert(FrameId(2), 320, frame_c);
-        assert_eq!(second.lock().unwrap().preview_cache.stats().resident_bytes, 32);
+        assert_eq!(
+            second.lock().unwrap().preview_cache.stats().resident_bytes,
+            32
+        );
 
         assert!(forget_session(88_102));
         configure_ram_budgets(
@@ -1067,13 +1077,19 @@ mod tests {
         let _second = session_state(88_202, &root).unwrap();
         let _third = session_state(88_203, &root).unwrap();
 
-        assert_eq!(oldest.lock().unwrap().preview_cache.stats().resident_bytes, 0);
+        assert_eq!(
+            oldest.lock().unwrap().preview_cache.stats().resident_bytes,
+            0
+        );
         oldest.lock().unwrap().preview_cache.insert(
             FrameId(2),
             320,
             OwnedRgbaFrame::new(2, 2, 8, vec![5; 16]).unwrap(),
         );
-        assert_eq!(oldest.lock().unwrap().preview_cache.stats().resident_bytes, 0);
+        assert_eq!(
+            oldest.lock().unwrap().preview_cache.stats().resident_bytes,
+            0
+        );
 
         forget_session(88_202);
         forget_session(88_203);
