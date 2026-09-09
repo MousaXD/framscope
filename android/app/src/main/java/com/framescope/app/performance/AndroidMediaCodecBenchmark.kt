@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.BatteryManager
 import android.os.Build
 import android.os.PowerManager
 import android.os.Process
@@ -25,6 +26,10 @@ internal data class MediaCodecDecodeBenchmarkResult(
     val outputColorFormat: Int?,
     val thermalStatusBefore: Int?,
     val thermalStatusAfter: Int?,
+    val batteryEnergyBeforeNwh: Long?,
+    val batteryEnergyAfterNwh: Long?,
+    val batteryEnergyConsumedNwh: Long?,
+    val averageBatteryPowerMw: Double?,
     val cancelled: Boolean,
 )
 
@@ -52,6 +57,7 @@ internal object AndroidMediaCodecBenchmark {
         val extractor = MediaExtractor()
         var codec: MediaCodec? = null
         val thermalBefore = currentThermalStatus(context)
+        val batteryEnergyBeforeNwh = batteryEnergyNwh(context)
         val wallStartNs = SystemClock.elapsedRealtimeNanos()
         val processCpuStartMs = Process.getElapsedCpuTime()
 
@@ -181,6 +187,23 @@ internal object AndroidMediaCodecBenchmark {
             } else {
                 0.0
             }
+            val batteryEnergyAfterNwh = batteryEnergyNwh(context)
+            val batteryEnergyConsumedNwh = if (
+                batteryEnergyBeforeNwh != null &&
+                batteryEnergyAfterNwh != null &&
+                batteryEnergyBeforeNwh >= batteryEnergyAfterNwh
+            ) {
+                batteryEnergyBeforeNwh - batteryEnergyAfterNwh
+            } else {
+                null
+            }
+            val averageBatteryPowerMw = if (
+                batteryEnergyConsumedNwh != null && wallTimeMs > 0.0
+            ) {
+                batteryEnergyConsumedNwh * 3.6 / wallTimeMs
+            } else {
+                null
+            }
             return MediaCodecDecodeBenchmarkResult(
                 codecName = capability.codecName,
                 mimeType = mimeType,
@@ -196,6 +219,10 @@ internal object AndroidMediaCodecBenchmark {
                 outputColorFormat = outputColorFormat,
                 thermalStatusBefore = thermalBefore,
                 thermalStatusAfter = currentThermalStatus(context),
+                batteryEnergyBeforeNwh = batteryEnergyBeforeNwh,
+                batteryEnergyAfterNwh = batteryEnergyAfterNwh,
+                batteryEnergyConsumedNwh = batteryEnergyConsumedNwh,
+                averageBatteryPowerMw = averageBatteryPowerMw,
                 cancelled = cancelled,
             )
         } finally {
@@ -220,6 +247,14 @@ internal object AndroidMediaCodecBenchmark {
             return null
         }
         return context.getSystemService(PowerManager::class.java)?.currentThermalStatus
+    }
+
+    private fun batteryEnergyNwh(context: Context): Long? {
+        val energyNwh = context
+            .getSystemService(BatteryManager::class.java)
+            ?.getLongProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER)
+            ?: return null
+        return energyNwh.takeUnless { it == Long.MIN_VALUE }
     }
 
     private fun nanosToMillis(nanos: Long): Double = nanos / 1_000_000.0
