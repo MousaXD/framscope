@@ -1,6 +1,5 @@
 package com.framescope.app.ui
 
-import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -665,7 +664,7 @@ class MainViewModel(
                                 sessionId = request.sessionId,
                                 frameId = preview.descriptor.frameId,
                                 frameCount = count,
-                                completedAtMs = SystemClock.uptimeMillis(),
+                                completedAtMs = System.nanoTime() / 1_000_000L,
                                 accelerationEnabled = accelerationEnabled,
                             )?.let { candidate ->
                                 launchSpeculativeScrubPrefetch(request.sessionId, candidate)
