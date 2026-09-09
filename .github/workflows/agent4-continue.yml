@@ -1,0 +1,34 @@
+name: Agent 4 continuation helper
+
+on:
+  push:
+    branches:
+      - perf/scrub-ram-acceleration
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rustfmt:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: perf/scrub-ram-acceleration
+      - name: Install pinned Rust formatter
+        run: rustup toolchain install 1.85.1 --profile minimal --component rustfmt
+      - name: Format Rust workspace
+        working-directory: rust
+        run: cargo +1.85.1 fmt --all
+      - name: Commit formatting if needed
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add rust
+          git commit -m 'style(agent4): rustfmt continuation changes'
+          git push origin HEAD:perf/scrub-ram-acceleration
