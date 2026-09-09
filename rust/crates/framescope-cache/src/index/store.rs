@@ -1,6 +1,7 @@
 use super::model::{
-    FRAME_INDEX_SCHEMA_VERSION, FrameId, FrameIndexEntry, FrameIndexError, FrameIndexLifecycle,
-    FrameIndexOpenDisposition, FrameIndexStatus, FrameIndexStreamIdentity, KeyframeAnchor,
+    FRAME_INDEX_SCHEMA_VERSION, FRAME_TIMELINE_CONTRACT_GENERATION, FrameId, FrameIndexEntry,
+    FrameIndexError, FrameIndexLifecycle, FrameIndexOpenDisposition, FrameIndexStatus,
+    FrameIndexStreamIdentity, KeyframeAnchor, TimestampSeekSafety,
 };
 use crate::SourceIdentity;
 use framescope_core::{MediaDuration, MediaTimestamp, TimeBase};
@@ -21,6 +22,9 @@ const ENTRY_COLUMNS: &str = "frame_index,
 struct MetaRow {
     lifecycle: FrameIndexLifecycle,
     source_identity: SourceIdentity,
+    source_binding_stable_key: String,
+    timeline_contract_generation: u32,
+    timestamp_seek_safety: TimestampSeekSafety,
     stream_identity: FrameIndexStreamIdentity,
     indexed_frames: u64,
     frame_count: Option<u64>,
@@ -99,7 +103,18 @@ impl FrameIndex {
                 index.reset_and_rebind()?;
                 FrameIndexOpenDisposition::RebuiltStaleSource
             }
+            Some(meta)
+                if meta.timeline_contract_generation != FRAME_TIMELINE_CONTRACT_GENERATION =>
+            {
+                index.reset_and_rebind()?;
+                FrameIndexOpenDisposition::RebuiltIncompatibleTimelineContract
+            }
             Some(meta) => {
+                if meta.source_binding_stable_key != source_identity.stable_key() {
+                    return Err(FrameIndexError::InvalidState(
+                        "stored source binding key does not match stored source identity".into(),
+                    ));
+                }
                 index.validate_persistent_state(&meta)?;
                 FrameIndexOpenDisposition::Reused
             }
@@ -117,6 +132,17 @@ impl FrameIndex {
 
     pub fn stream_identity(&self) -> &FrameIndexStreamIdentity {
         &self.stream_identity
+    }
+
+    /// Persisted authority decision for timestamp-keyframe seeking over the currently indexed prefix.
+    ///
+    /// Future bounded resume code must consume this instead of re-inventing timestamp heuristics.
+    pub fn timestamp_seek_safety(&self) -> Result<TimestampSeekSafety, FrameIndexError> {
+        self.load_meta()?
+            .map(|meta| meta.timestamp_seek_safety)
+            .ok_or_else(|| {
+                FrameIndexError::InvalidState("frame-index metadata row is missing".into())
+            })
     }
 
     pub fn status(&self) -> Result<FrameIndexStatus, FrameIndexError> {
@@ -163,15 +189,22 @@ impl FrameIndex {
     }
 
     pub fn clear_for_rebuild(&mut self) -> Result<(), FrameIndexError> {
+        let source_key =
+            source_binding_key(&self.source_identity, TimestampSeekSafety::Unambiguous);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute("DELETE FROM frame_index", [])?;
         transaction.execute(
             "UPDATE index_meta
-             SET lifecycle = ?1, indexed_frames = 0, frame_count = NULL, last_error = NULL
-             WHERE id = ?2",
-            params![FrameIndexLifecycle::Incomplete.as_i64(), META_ROW_ID],
+             SET lifecycle = ?1, source_key = ?2, indexed_frames = 0,
+                 frame_count = NULL, last_error = NULL
+             WHERE id = ?3",
+            params![
+                FrameIndexLifecycle::Incomplete.as_i64(),
+                source_key,
+                META_ROW_ID
+            ],
         )?;
         transaction.commit()?;
         Ok(())
@@ -186,11 +219,19 @@ impl FrameIndex {
             "DELETE FROM frame_index WHERE frame_index >= ?1",
             params![count],
         )?;
+        let seek_safety = compute_timestamp_seek_safety(&transaction)?;
+        let source_key = source_binding_key(&self.source_identity, seek_safety);
         transaction.execute(
             "UPDATE index_meta
-             SET lifecycle = ?1, indexed_frames = ?2, frame_count = NULL, last_error = NULL
-             WHERE id = ?3",
-            params![FrameIndexLifecycle::Incomplete.as_i64(), count, META_ROW_ID],
+             SET lifecycle = ?1, source_key = ?2, indexed_frames = ?3,
+                 frame_count = NULL, last_error = NULL
+             WHERE id = ?4",
+            params![
+                FrameIndexLifecycle::Incomplete.as_i64(),
+                source_key,
+                count,
+                META_ROW_ID
+            ],
         )?;
         transaction.commit()?;
         Ok(())
@@ -214,6 +255,40 @@ impl FrameIndex {
             entry.validate(&self.stream_identity)?;
         }
 
+        let mut seek_safety = self.timestamp_seek_safety()?;
+        let mut previous_clean_keyframe_ticks = if seek_safety.permits_timestamp_seek() {
+            self.connection
+                .query_row(
+                    "SELECT timestamp_ticks FROM frame_index
+                     WHERE keyframe = 1 AND corrupt = 0
+                     ORDER BY frame_index DESC LIMIT 1",
+                    [],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?
+                .flatten()
+        } else {
+            None
+        };
+        if seek_safety.permits_timestamp_seek() {
+            for entry in entries {
+                if !entry.keyframe || entry.corrupt {
+                    continue;
+                }
+                let Some(timestamp) = entry.presentation_timestamp else {
+                    seek_safety = TimestampSeekSafety::Ambiguous;
+                    break;
+                };
+                if previous_clean_keyframe_ticks.is_some_and(|previous| timestamp.ticks <= previous)
+                {
+                    seek_safety = TimestampSeekSafety::Ambiguous;
+                    break;
+                }
+                previous_clean_keyframe_ticks = Some(timestamp.ticks);
+            }
+        }
+
+        let source_key = source_binding_key(&self.source_identity, seek_safety);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -260,8 +335,8 @@ impl FrameIndex {
             .checked_add(entries.len() as u64)
             .ok_or_else(|| FrameIndexError::InvalidState("frame count overflow".into()))?;
         transaction.execute(
-            "UPDATE index_meta SET indexed_frames = ?1 WHERE id = ?2",
-            params![to_sql_u64(next, "frame count")?, META_ROW_ID],
+            "UPDATE index_meta SET source_key = ?1, indexed_frames = ?2 WHERE id = ?3",
+            params![source_key, to_sql_u64(next, "frame count")?, META_ROW_ID],
         )?;
         transaction.commit()?;
         Ok(())
@@ -406,7 +481,7 @@ impl FrameIndex {
             params![
                 META_ROW_ID,
                 FrameIndexLifecycle::Incomplete.as_i64(),
-                self.source_identity.stable_key(),
+                source_binding_key(&self.source_identity, TimestampSeekSafety::Unambiguous),
                 serde_json::to_string(&self.source_identity)?,
                 serde_json::to_string(&self.stream_identity)?,
             ],
@@ -417,6 +492,8 @@ impl FrameIndex {
     fn reset_and_rebind(&mut self) -> Result<(), FrameIndexError> {
         let source_json = serde_json::to_string(&self.source_identity)?;
         let stream_json = serde_json::to_string(&self.stream_identity)?;
+        let source_key =
+            source_binding_key(&self.source_identity, TimestampSeekSafety::Unambiguous);
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -430,7 +507,7 @@ impl FrameIndex {
             params![
                 META_ROW_ID,
                 FrameIndexLifecycle::Incomplete.as_i64(),
-                self.source_identity.stable_key(),
+                source_key,
                 source_json,
                 stream_json,
             ],
@@ -484,14 +561,14 @@ impl FrameIndex {
             return Ok(None);
         };
         let source_identity: SourceIdentity = serde_json::from_str(&source_json)?;
-        if source_key != source_identity.stable_key() {
-            return Err(FrameIndexError::InvalidState(
-                "stored source key does not match stored source identity".into(),
-            ));
-        }
+        let (timeline_contract_generation, timestamp_seek_safety, source_binding_stable_key) =
+            decode_source_binding_key(&source_key)?;
         Ok(Some(MetaRow {
             lifecycle: FrameIndexLifecycle::from_i64(lifecycle)?,
             source_identity,
+            source_binding_stable_key,
+            timeline_contract_generation,
+            timestamp_seek_safety,
             stream_identity: serde_json::from_str(&stream_json)?,
             indexed_frames: from_sql_u64(indexed, "indexed frame count")?,
             frame_count: count
@@ -594,8 +671,77 @@ impl FrameIndex {
                 "frame index contains {invalid_anchors} invalid keyframe anchor(s)"
             )));
         }
+        let actual_seek_safety = compute_timestamp_seek_safety(&self.connection)?;
+        if actual_seek_safety != meta.timestamp_seek_safety {
+            return Err(FrameIndexError::InvalidState(
+                "stored timestamp-seek safety does not match indexed keyframe timeline".into(),
+            ));
+        }
         Ok(())
     }
+}
+
+fn source_binding_key(source: &SourceIdentity, seek_safety: TimestampSeekSafety) -> String {
+    format!(
+        "t{}:s{}:{}",
+        FRAME_TIMELINE_CONTRACT_GENERATION,
+        seek_safety.as_i64(),
+        source.stable_key()
+    )
+}
+
+fn decode_source_binding_key(
+    value: &str,
+) -> Result<(u32, TimestampSeekSafety, String), FrameIndexError> {
+    if !value.starts_with('t') {
+        // Pre-contract indexes stored only the source stable key. Treat them as generation 1 so the
+        // normal compatibility branch rebuilds them rather than silently accepting old semantics.
+        return Ok((1, TimestampSeekSafety::Ambiguous, value.to_owned()));
+    }
+    let mut parts = value.splitn(3, ':');
+    let generation = parts
+        .next()
+        .and_then(|part| part.strip_prefix('t'))
+        .ok_or_else(|| FrameIndexError::InvalidState("invalid source binding generation".into()))?
+        .parse::<u32>()
+        .map_err(|_| FrameIndexError::InvalidState("invalid source binding generation".into()))?;
+    let safety = parts
+        .next()
+        .and_then(|part| part.strip_prefix('s'))
+        .ok_or_else(|| FrameIndexError::InvalidState("invalid source binding seek safety".into()))?
+        .parse::<i64>()
+        .map_err(|_| FrameIndexError::InvalidState("invalid source binding seek safety".into()))?;
+    let stable_key = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_else(|| FrameIndexError::InvalidState("source binding key is missing".into()))?;
+    Ok((
+        generation,
+        TimestampSeekSafety::from_i64(safety)?,
+        stable_key.to_owned(),
+    ))
+}
+
+fn compute_timestamp_seek_safety(
+    connection: &Connection,
+) -> Result<TimestampSeekSafety, FrameIndexError> {
+    let mut statement = connection.prepare(
+        "SELECT timestamp_ticks FROM frame_index
+         WHERE keyframe = 1 AND corrupt = 0
+         ORDER BY frame_index ASC",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut previous = None;
+    while let Some(row) = rows.next()? {
+        let Some(ticks) = row.get::<_, Option<i64>>(0)? else {
+            return Ok(TimestampSeekSafety::Ambiguous);
+        };
+        if previous.is_some_and(|previous| ticks <= previous) {
+            return Ok(TimestampSeekSafety::Ambiguous);
+        }
+        previous = Some(ticks);
+    }
+    Ok(TimestampSeekSafety::Unambiguous)
 }
 
 fn decode_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<FrameIndexEntry> {

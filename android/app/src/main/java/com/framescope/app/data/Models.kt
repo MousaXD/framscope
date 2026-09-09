@@ -52,15 +52,116 @@ data class FrameDetails(
             (durationTicks == null || durationTicks > 0L)
 }
 
+data class IndexingRuntimeDiagnostics(
+    val reusedExistingFrames: Long,
+    val newlyIndexedFrames: Long,
+    val restartedAfterPartialMismatch: Boolean,
+    val maxPendingEntries: Long,
+    val totalElapsedUs: Long,
+    val indexStatusElapsedUs: Long,
+    val decoderOpenElapsedUs: Long,
+    val decoderOpenCount: Long,
+    val framesDecoded: Long,
+    val validationFramesReplayed: Long,
+    val reconciliationSqliteElapsedUs: Long,
+    val reconciliationRangeQueries: Long,
+    val sqliteBatchElapsedUs: Long,
+    val batchCommits: Long,
+    val boundedResumeAttempted: Boolean,
+    val boundedResumeSucceeded: Boolean,
+    val boundedResumeFellBack: Boolean,
+    val resumeCheckpointFrameId: Long?,
+    val resumeSeekScanFrames: Long,
+) {
+    fun isSane(): Boolean {
+        val counters = listOf(
+            reusedExistingFrames,
+            newlyIndexedFrames,
+            maxPendingEntries,
+            totalElapsedUs,
+            indexStatusElapsedUs,
+            decoderOpenElapsedUs,
+            decoderOpenCount,
+            framesDecoded,
+            validationFramesReplayed,
+            reconciliationSqliteElapsedUs,
+            reconciliationRangeQueries,
+            sqliteBatchElapsedUs,
+            batchCommits,
+            resumeSeekScanFrames,
+        )
+        if (counters.any { it < 0L }) return false
+        if (resumeCheckpointFrameId != null && resumeCheckpointFrameId < 0L) return false
+        if (boundedResumeSucceeded && (!boundedResumeAttempted || boundedResumeFellBack)) return false
+        if (boundedResumeFellBack && !boundedResumeAttempted) return false
+        if (resumeCheckpointFrameId != null && !boundedResumeAttempted) return false
+        return true
+    }
+}
+
+data class MicroscopeOpenDiagnostics(
+    val sourceSeekable: Boolean,
+    val sourceSizeBytes: Long?,
+    val sourceIdentityBytesRead: Long,
+    val sourceIdentityReadCalls: Long,
+    val sourceIdentitySeekCalls: Long,
+    val sourceIdentityIoElapsedUs: Long,
+    val sourceIdentityElapsedUs: Long,
+    val sourceReuseSafe: Boolean,
+    val persistentIndex: Boolean,
+    val probeOpenElapsedUs: Long,
+    val indexOpenElapsedUs: Long,
+    val indexOpenDisposition: String,
+    val databaseBytes: Long,
+    val walBytes: Long,
+    val totalOpenElapsedUs: Long,
+    val indexing: IndexingRuntimeDiagnostics,
+) {
+    fun isSane(): Boolean {
+        val counters = listOf(
+            sourceIdentityBytesRead,
+            sourceIdentityReadCalls,
+            sourceIdentitySeekCalls,
+            sourceIdentityIoElapsedUs,
+            sourceIdentityElapsedUs,
+            probeOpenElapsedUs,
+            indexOpenElapsedUs,
+            databaseBytes,
+            walBytes,
+            totalOpenElapsedUs,
+        )
+        if (sourceSizeBytes != null && sourceSizeBytes < 0L) return false
+        if (counters.any { it < 0L }) return false
+        if (persistentIndex != sourceReuseSafe) return false
+        if (!sourceSeekable && sourceSizeBytes != null) return false
+        if (indexOpenDisposition !in INDEX_OPEN_DISPOSITIONS) return false
+        return indexing.isSane()
+    }
+
+    companion object {
+        private val INDEX_OPEN_DISPOSITIONS = setOf(
+            "created",
+            "reused",
+            "rebuilt_stale_source",
+            "rebuilt_unverifiable_source",
+            "rebuilt_incompatible_timeline_contract",
+            "recovered_corrupt_state",
+            "recreated_unsupported_schema",
+        )
+    }
+}
+
 data class MicroscopeSessionSnapshot(
     val sessionId: Long,
     val frameCount: Long,
     val currentFrame: FrameDetails?,
     val canStepPrevious: Boolean,
     val canStepNext: Boolean,
+    val openDiagnostics: MicroscopeOpenDiagnostics? = null,
 ) {
     fun isSane(): Boolean {
         if (sessionId <= 0L || frameCount < 0L) return false
+        if (openDiagnostics?.isSane() == false) return false
         if ((currentFrame == null) != (frameCount == 0L)) return false
         val frame = currentFrame ?: return !canStepPrevious && !canStepNext
         if (!frame.isSane() || frame.frameId >= frameCount) return false

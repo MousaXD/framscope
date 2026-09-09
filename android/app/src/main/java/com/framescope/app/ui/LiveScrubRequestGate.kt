@@ -1,13 +1,17 @@
 package com.framescope.app.ui
 
+import com.framescope.app.data.ScrubPerformanceTelemetry
+
 /**
  * Bounds live-scrub work to one native request in flight plus one replaceable pending request.
  *
- * The gate deliberately does not cancel an in-flight native call. A blocking JNI call may not be
- * cooperatively cancellable, and starting a replacement beside it would defeat the backpressure
- * guarantee. Instead, newer submissions replace the single pending slot and make older results
- * ineligible for publication. Releasing the scrub gesture or replacing the source invalidates the
- * current epoch, so a late native result can never become visible.
+ * Newer submissions replace the single pending slot and make older results ineligible for
+ * publication. Repeated submissions for the same session/target reuse existing pending or in-flight
+ * work instead of creating redundant native decodes. Releasing the scrub gesture or replacing the
+ * source invalidates the current epoch and returns the active request, if any, so callers can
+ * identify disposable work. Publication fencing remains independent from native cancellation: a
+ * late native result is never allowed to become visible even if cancellation is delayed or
+ * unsupported.
  */
 internal class LiveScrubRequestGate {
     private var nextRequestId = 1L
@@ -25,6 +29,20 @@ internal class LiveScrubRequestGate {
             }
             is LiveScrubTarget.Timestamp -> Unit
         }
+
+        pending?.takeIf { it.sessionId == sessionId && it.target == target }?.let { existing ->
+            return existing
+        }
+        inFlight?.takeIf { it.sessionId == sessionId && it.target == target }?.let { existing ->
+            val replacedPending = pending != null
+            pending = null
+            latestRequestId = existing.requestId
+            if (replacedPending) {
+                ScrubPerformanceTelemetry.recordGateSubmission(replacedPending = true)
+            }
+            return existing
+        }
+
         val request = LiveScrubRequest(
             requestId = nextRequestId,
             epoch = epoch,
@@ -33,8 +51,26 @@ internal class LiveScrubRequestGate {
         )
         nextRequestId = increment(nextRequestId, "live scrub request id")
         latestRequestId = request.requestId
+        val replacedPending = pending != null
         pending = request
+        ScrubPerformanceTelemetry.recordGateSubmission(replacedPending)
         return request
+    }
+
+    /**
+     * Returns the active native request that [latest] superseded, if any.
+     *
+     * The caller may use this identity to cancel disposable native work immediately. Publication
+     * safety does not depend on cancellation succeeding; [finish] still fences stale results.
+     */
+    @Synchronized
+    fun cancellationForSupersededInFlight(latest: LiveScrubRequest): LiveScrubCancellation? {
+        val active = inFlight ?: return null
+        if (active.requestId == latest.requestId) return null
+        return LiveScrubCancellation(
+            sessionId = active.sessionId,
+            requestId = active.requestId,
+        )
     }
 
     /** Returns work only when no native preview request is already running. */
@@ -52,19 +88,35 @@ internal class LiveScrubRequestGate {
      */
     @Synchronized
     fun finish(request: LiveScrubRequest): Boolean {
-        if (inFlight?.requestId != request.requestId) return false
+        if (inFlight?.requestId != request.requestId) {
+            ScrubPerformanceTelemetry.recordGateCompletion(publishable = false)
+            return false
+        }
         inFlight = null
-        return request.epoch == epoch && request.requestId == latestRequestId
+        val publishable = request.epoch == epoch && request.requestId == latestRequestId
+        ScrubPerformanceTelemetry.recordGateCompletion(publishable)
+        return publishable
     }
 
     /**
-     * Invalidates queued/current publication without pretending a blocking native call was stopped.
+     * Invalidates queued/current publication and identifies work that was in flight at invalidation.
+     *
+     * Native exact navigation independently installs an admission barrier before authoritative work.
+     * That barrier and the native preview registry share one mutex, so exact-navigation priority does
+     * not depend on this Kotlin-side invalidation racing successfully with preview registration.
      */
     @Synchronized
-    fun invalidate() {
+    fun invalidate(): LiveScrubCancellation? {
+        val cancellation = inFlight?.let {
+            LiveScrubCancellation(
+                sessionId = it.sessionId,
+                requestId = it.requestId,
+            )
+        }
         epoch = increment(epoch, "live scrub epoch")
         latestRequestId = 0L
         pending = null
+        return cancellation
     }
 
     @Synchronized
@@ -97,4 +149,9 @@ internal data class LiveScrubRequest(
     val epoch: Long,
     val sessionId: Long,
     val target: LiveScrubTarget,
+)
+
+internal data class LiveScrubCancellation(
+    val sessionId: Long,
+    val requestId: Long,
 )

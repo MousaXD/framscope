@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.framescope.app.data.AndroidFrameScopeStorageRepository
+import com.framescope.app.data.RamAccelerationRuntime
 
 /**
  * Shell-facing Storage destination body. The app shell owns navigation; this surface owns only
@@ -32,16 +33,25 @@ fun StorageDestinationContent(
         ),
     )
     val state by storageViewModel.state.collectAsStateWithLifecycle()
+    val ramController = RamAccelerationRuntime.current()
 
-    StorageSettingsContent(
-        state = state,
-        onRefresh = storageViewModel::refresh,
-        onRequestClear = storageViewModel::requestClear,
-        onConfirmClear = storageViewModel::confirmClear,
-        onDismissClear = storageViewModel::dismissClearConfirmation,
-        onDismissStatus = storageViewModel::dismissStatus,
-        modifier = modifier,
-    )
+    Column(modifier = modifier) {
+        if (ramController != null) {
+            RamAccelerationSettingsContent(
+                controller = ramController,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+            )
+        }
+        StorageSettingsContent(
+            state = state,
+            onRefresh = storageViewModel::refresh,
+            onRequestClear = storageViewModel::requestClear,
+            onConfirmClear = storageViewModel::confirmClear,
+            onDismissClear = storageViewModel::dismissClearConfirmation,
+            onDismissStatus = storageViewModel::dismissStatus,
+            modifier = Modifier.weight(1f),
+        )
+    }
 }
 
 /** Read-only Home summary for Agent 1's storage-summary integration slot. */

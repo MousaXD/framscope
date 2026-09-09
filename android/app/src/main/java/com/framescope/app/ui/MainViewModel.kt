@@ -12,6 +12,8 @@ import com.framescope.app.data.MicroscopeOperationException
 import com.framescope.app.data.MicroscopeScrubPreview
 import com.framescope.app.data.MicroscopeScrubPreviewSource
 import com.framescope.app.data.MicroscopeSessionSnapshot
+import com.framescope.app.data.RamAccelerationMode
+import com.framescope.app.data.RamAccelerationRuntime
 import com.framescope.app.data.TimestampSelectionPolicy
 import com.framescope.app.data.UnsupportedMicroscopeScrubPreviewSource
 import com.framescope.app.data.VideoOpenException
@@ -108,9 +110,11 @@ class MainViewModel(
     private var inspectJob: Job? = null
     private var microscopeJob: Job? = null
     private var scrubWorkerJob: Job? = null
+    private var scrubPrefetchJob: Job? = null
     private val inspectionGeneration = AtomicLong(0)
     private val microscopeGeneration = AtomicLong(0)
     private val scrubGate = LiveScrubRequestGate()
+    private val scrubPrefetchPolicy = LiveScrubPrefetchPolicy()
     private val scrubSignal = Channel<Unit>(capacity = Channel.CONFLATED)
     private val lifecycleCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -604,7 +608,11 @@ class MainViewModel(
 
     private fun enqueueLiveScrub(target: LiveScrubTarget) {
         val ready = _uiState.value.microscopeState as? MicroscopeUiState.Ready ?: return
-        scrubGate.submit(ready.session.sessionId, target)
+        cancelSpeculativeScrubPrefetch(ready.session.sessionId)
+        val request = scrubGate.submit(ready.session.sessionId, target)
+        scrubGate.cancellationForSupersededInFlight(request)?.let { cancellation ->
+            scrubPreviewSource.cancelSession(cancellation.sessionId)
+        }
         scrubSignal.trySend(Unit)
     }
 
@@ -635,12 +643,31 @@ class MainViewModel(
             if (publishable) {
                 result.onSuccess { preview ->
                     if (preview.descriptor.sessionId == request.sessionId) {
+                        var frameCount: Long? = null
                         _uiState.update { current ->
                             val ready = current.microscopeState as? MicroscopeUiState.Ready
                             if (ready?.session?.sessionId == request.sessionId) {
+                                frameCount = ready.session.frameCount
                                 current.copy(scrubPreview = preview)
                             } else {
                                 current
+                            }
+                        }
+                        val count = frameCount
+                        if (count != null && !scrubGate.hasPendingWork()) {
+                            val ram = RamAccelerationRuntime.current()?.state?.value
+                            val accelerationEnabled = ram != null &&
+                                ram.mode != RamAccelerationMode.Off &&
+                                !ram.underMemoryPressure &&
+                                ram.sourceCacheMiB > 0
+                            scrubPrefetchPolicy.candidate(
+                                sessionId = request.sessionId,
+                                frameId = preview.descriptor.frameId,
+                                frameCount = count,
+                                completedAtMs = System.nanoTime() / 1_000_000L,
+                                accelerationEnabled = accelerationEnabled,
+                            )?.let { candidate ->
+                                launchSpeculativeScrubPrefetch(request.sessionId, candidate)
                             }
                         }
                     }
@@ -651,10 +678,38 @@ class MainViewModel(
     }
 
     private fun invalidateLiveScrub(clearPreview: Boolean) {
-        scrubGate.invalidate()
+        val sessionId = currentMicroscopeSessionId()
+        cancelSpeculativeScrubPrefetch(sessionId)
+        scrubPrefetchPolicy.reset()
+        scrubGate.invalidate()?.let { cancellation ->
+            scrubPreviewSource.cancelSession(cancellation.sessionId)
+        }
         if (clearPreview) {
             _uiState.update { it.copy(scrubPreview = null) }
         }
+    }
+
+    private fun launchSpeculativeScrubPrefetch(sessionId: Long, frameId: Long) {
+        if (sessionId <= 0L || frameId < 0L || scrubGate.hasPendingWork()) return
+        scrubPrefetchJob?.cancel()
+        scrubPrefetchJob = viewModelScope.launch {
+            try {
+                scrubPreviewSource.prefetchFrame(sessionId, frameId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Speculation is never user-visible and must not affect authoritative navigation.
+            }
+        }
+    }
+
+    private fun cancelSpeculativeScrubPrefetch(sessionId: Long?) {
+        val job = scrubPrefetchJob
+        if (job?.isActive == true && sessionId != null && sessionId > 0L) {
+            scrubPreviewSource.cancelSession(sessionId)
+        }
+        job?.cancel()
+        scrubPrefetchJob = null
     }
 
     private fun forgetPreviewSession(sessionId: Long?) {

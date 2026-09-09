@@ -108,53 +108,59 @@ where
     let target = index
         .entry(frame_id)?
         .ok_or(NavigationError::FrameNotIndexed)?;
+    let timestamp_seek_safe = index.timestamp_seek_safety()?.permits_timestamp_seek();
     let mut decoder = open_checked_decoder(index, &mut open_fresh_decoder)?;
 
-    if let KeyframeAnchor::Keyframe {
-        frame_id: anchor_id,
-        presentation_timestamp: Some(anchor_timestamp),
-    } = target.anchor
-    {
-        if let Some(timestamp_us) = anchor_timestamp
-            .to_microseconds()
-            .filter(|value| *value >= 0)
+    if timestamp_seek_safe {
+        if let KeyframeAnchor::Keyframe {
+            frame_id: anchor_id,
+            presentation_timestamp: Some(anchor_timestamp),
+        } = target.anchor
         {
-            decoder.seek_for_navigation(timestamp_us)?;
-            match decode_from_seek(index, &mut decoder, anchor_id, frame_id) {
-                Ok((frame, decoded_frames)) => {
-                    return Ok(NavigationResult {
-                        frame_id,
-                        frame,
-                        decoded_frames,
-                        used_keyframe_seek: true,
-                        fell_back_to_stream_start: false,
-                    });
+            if let Some(timestamp_us) = anchor_timestamp
+                .to_microseconds()
+                .filter(|value| *value >= 0)
+            {
+                decoder.seek_for_navigation(timestamp_us)?;
+                match decode_from_seek(index, &mut decoder, anchor_id, frame_id) {
+                    Ok((frame, decoded_frames)) => {
+                        return Ok(NavigationResult {
+                            frame_id,
+                            frame,
+                            decoded_frames,
+                            used_keyframe_seek: true,
+                            fell_back_to_stream_start: false,
+                        });
+                    }
+                    Err(NavigationError::TimelineMismatch | NavigationError::UnexpectedEof) => {}
+                    Err(error) => return Err(error),
                 }
-                Err(NavigationError::TimelineMismatch | NavigationError::UnexpectedEof) => {}
-                Err(error) => return Err(error),
-            }
 
-            // Timestamp seek is only a hint. If the demuxer cannot reconcile the indexed anchor,
-            // reopen and prove the timeline from stream start instead of returning a wrong frame.
-            let mut fallback = open_checked_decoder(index, &mut open_fresh_decoder)?;
-            let (frame, decoded_frames) = decode_from_start(index, &mut fallback, frame_id)?;
-            return Ok(NavigationResult {
-                frame_id,
-                frame,
-                decoded_frames,
-                used_keyframe_seek: true,
-                fell_back_to_stream_start: true,
-            });
+                // Timestamp seek is only a hint. If the demuxer cannot reconcile the indexed
+                // anchor, reopen and prove the timeline from stream start instead of returning a
+                // wrong frame.
+                let mut fallback = open_checked_decoder(index, &mut open_fresh_decoder)?;
+                let (frame, decoded_frames) = decode_from_start(index, &mut fallback, frame_id)?;
+                return Ok(NavigationResult {
+                    frame_id,
+                    frame,
+                    decoded_frames,
+                    used_keyframe_seek: true,
+                    fell_back_to_stream_start: true,
+                });
+            }
         }
     }
 
+    // Ambiguous/reset/duplicate clean keyframe timestamps are never used as authoritative seek
+    // anchors. Prove persistent FrameId alignment from source start instead.
     let (frame, decoded_frames) = decode_from_start(index, &mut decoder, frame_id)?;
     Ok(NavigationResult {
         frame_id,
         frame,
         decoded_frames,
         used_keyframe_seek: false,
-        fell_back_to_stream_start: false,
+        fell_back_to_stream_start: !timestamp_seek_safe,
     })
 }
 
@@ -208,7 +214,8 @@ fn decode_from_seek<D: NavigationDecoder>(
     let mut decoded_frames = 0_u64;
 
     // FFmpeg may land before the requested keyframe. Do not assume the first decoded frame is the
-    // anchor; scan until the exact persisted anchor metadata is observed.
+    // anchor; scan until the exact persisted anchor metadata is observed. The persisted seek-safety
+    // contract guarantees that no other clean keyframe can share/regress across this anchor PTS.
     let mut decoded = loop {
         let candidate = next_decoded(decoder, &mut decoded_frames)?;
         if matches_index_entry(&candidate, &anchor_entry) {
@@ -307,7 +314,7 @@ fn choose_nearest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use framescope_cache::{FrameIndexOpenDisposition, SourceIdentity};
+    use framescope_cache::{FrameIndexOpenDisposition, SourceIdentity, TimestampSeekSafety};
     use framescope_core::{CodecInfo, MediaDuration, MediaKind, TimeBase};
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -318,6 +325,7 @@ mod tests {
     struct FakeDecoder {
         stream: StreamInfo,
         frames: VecDeque<DecodedFrame>,
+        seek_lands_at_frame: u64,
     }
 
     impl NavigationDecoder for FakeDecoder {
@@ -328,7 +336,11 @@ mod tests {
             Ok(self.frames.pop_front())
         }
         fn seek_for_navigation(&mut self, _timestamp_us: i64) -> Result<(), FrameScopeError> {
-            while self.frames.front().is_some_and(|frame| frame.index < 2) {
+            while self
+                .frames
+                .front()
+                .is_some_and(|frame| frame.index < self.seek_lands_at_frame)
+            {
                 self.frames.pop_front();
             }
             Ok(())
@@ -391,21 +403,20 @@ mod tests {
         ))
     }
 
-    fn complete_index() -> (PathBuf, FrameIndex) {
+    fn complete_index_from_timeline(ticks: &[i64], keyframes: &[usize]) -> (PathBuf, FrameIndex) {
         let path = temp_db();
         let identity = FrameIndexStreamIdentity::from_stream(&stream()).unwrap();
-        let source = SourceIdentity::new(100, None, Some("navigation".into()));
+        let source = SourceIdentity::new(100, None, Some("navigation-complete-proof".into()));
         let (mut index, disposition) = FrameIndex::open_or_create(&path, source, identity).unwrap();
         assert_eq!(disposition, FrameIndexOpenDisposition::Created);
         index.mark_building().unwrap();
-        let ticks = [0, 40, 100, 140, 220];
         let mut anchor_id = 0;
-        let mut anchor_ticks = 0;
+        let mut anchor_ticks = ticks.first().copied().unwrap_or(0);
         let entries = ticks
             .iter()
             .enumerate()
             .map(|(id, ticks)| {
-                let keyframe = id == 0 || id == 2;
+                let keyframe = keyframes.contains(&id);
                 if keyframe {
                     anchor_id = id as u64;
                     anchor_ticks = *ticks;
@@ -419,9 +430,13 @@ mod tests {
                     }),
                     keyframe,
                     corrupt: false,
-                    anchor: KeyframeAnchor::Keyframe {
-                        frame_id: FrameId(anchor_id),
-                        presentation_timestamp: Some(timestamp(anchor_ticks)),
+                    anchor: if keyframes.is_empty() {
+                        KeyframeAnchor::StreamStart
+                    } else {
+                        KeyframeAnchor::Keyframe {
+                            frame_id: FrameId(anchor_id),
+                            presentation_timestamp: Some(timestamp(anchor_ticks)),
+                        }
                     },
                 }
             })
@@ -429,6 +444,10 @@ mod tests {
         index.append_batch(&entries).unwrap();
         index.mark_complete().unwrap();
         (path, index)
+    }
+
+    fn complete_index() -> (PathBuf, FrameIndex) {
+        complete_index_from_timeline(&[0, 40, 100, 140, 220], &[0, 2])
     }
 
     fn fake_decoder() -> FakeDecoder {
@@ -441,6 +460,7 @@ mod tests {
                 frame(3, 140, false),
                 frame(4, 220, false),
             ]),
+            seek_lands_at_frame: 2,
         }
     }
 
@@ -464,8 +484,12 @@ mod tests {
     }
 
     #[test]
-    fn distant_frame_uses_keyframe_anchor() {
+    fn distant_frame_uses_keyframe_anchor_when_timestamps_are_unambiguous() {
         let (path, index) = complete_index();
+        assert_eq!(
+            index.timestamp_seek_safety().unwrap(),
+            TimestampSeekSafety::Unambiguous
+        );
         let result = navigate_to_frame(&index, || Ok(fake_decoder()), FrameId(4)).unwrap();
         assert!(result.used_keyframe_seek);
         assert!(!result.fell_back_to_stream_start);
@@ -476,10 +500,76 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_clean_keyframe_pts_never_alias_later_frame_to_earlier_gop() {
+        let (path, index) = complete_index_from_timeline(&[0, 40, 0, 40], &[0, 2]);
+        assert_eq!(
+            index.timestamp_seek_safety().unwrap(),
+            TimestampSeekSafety::Ambiguous
+        );
+        let frames = vec![
+            frame(0, 0, true),
+            frame(1, 40, false),
+            frame(2, 0, true),
+            frame(3, 40, false),
+        ];
+        let result = navigate_to_frame(
+            &index,
+            || {
+                Ok(FakeDecoder {
+                    stream: stream(),
+                    frames: VecDeque::from(frames.clone()),
+                    // A timestamp seek to 0 would land on the earlier GOP and satisfy the old
+                    // metadata predicate. The safe contract must prevent the seek entirely.
+                    seek_lands_at_frame: 0,
+                })
+            },
+            FrameId(3),
+        )
+        .unwrap();
+        assert!(!result.used_keyframe_seek);
+        assert!(result.fell_back_to_stream_start);
+        assert_eq!(result.frame.index, 3);
+        drop(index);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn regressed_keyframe_pts_force_source_start_decode() {
+        let (path, index) = complete_index_from_timeline(&[100, 140, 50, 90], &[0, 2]);
+        assert_eq!(
+            index.timestamp_seek_safety().unwrap(),
+            TimestampSeekSafety::Ambiguous
+        );
+        let frames = vec![
+            frame(0, 100, true),
+            frame(1, 140, false),
+            frame(2, 50, true),
+            frame(3, 90, false),
+        ];
+        let result = navigate_to_frame(
+            &index,
+            || {
+                Ok(FakeDecoder {
+                    stream: stream(),
+                    frames: VecDeque::from(frames.clone()),
+                    seek_lands_at_frame: 0,
+                })
+            },
+            FrameId(3),
+        )
+        .unwrap();
+        assert!(!result.used_keyframe_seek);
+        assert!(result.fell_back_to_stream_start);
+        assert_eq!(result.frame.index, 3);
+        drop(index);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn incomplete_index_is_rejected() {
         let path = temp_db();
         let identity = FrameIndexStreamIdentity::from_stream(&stream()).unwrap();
-        let source = SourceIdentity::new(100, None, Some("partial".into()));
+        let source = SourceIdentity::new(100, None, Some("partial-complete-proof".into()));
         let (index, _) = FrameIndex::open_or_create(&path, source, identity).unwrap();
         let error = navigate_to_frame(&index, || Ok(fake_decoder()), FrameId(0)).unwrap_err();
         assert!(matches!(error, NavigationError::IncompleteIndex));

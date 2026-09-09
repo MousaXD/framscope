@@ -171,6 +171,13 @@ impl RamFrameCache {
         self.budget_bytes
     }
 
+    /// Changes the live byte ceiling and synchronously evicts least-recently-used frames until the
+    /// resident set complies. Setting zero implements an immediate no-discretionary-RAM mode.
+    pub fn set_budget_bytes(&mut self, budget_bytes: usize) {
+        self.budget_bytes = budget_bytes;
+        self.evict_to_budget();
+    }
+
     pub fn resident_bytes(&self) -> usize {
         self.resident_bytes
     }
@@ -339,6 +346,39 @@ mod tests {
         assert!(cache.get(&third_key).is_some());
         assert_eq!(cache.resident_bytes(), 32);
         assert_eq!(cache.stats().evictions, 1);
+    }
+
+    #[test]
+    fn shrinking_budget_evicts_immediately_and_zero_disables_residency() {
+        let source = source("video-a");
+        let first = frame(&source, 1, 2, 2);
+        let second = frame(&source, 2, 2, 2);
+        let mut cache = RamFrameCache::new(32);
+        cache.insert(first);
+        cache.insert(second);
+        assert_eq!(cache.resident_bytes(), 32);
+
+        cache.set_budget_bytes(16);
+        assert_eq!(cache.resident_bytes(), 16);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.stats().evictions, 1);
+
+        cache.set_budget_bytes(0);
+        assert_eq!(cache.resident_bytes(), 0);
+        assert!(cache.is_empty());
+        assert_eq!(cache.stats().evictions, 2);
+    }
+
+    #[test]
+    fn growing_budget_does_not_recreate_evicted_frames() {
+        let source = source("video-a");
+        let mut cache = RamFrameCache::new(16);
+        cache.insert(frame(&source, 1, 2, 2));
+        cache.insert(frame(&source, 2, 2, 2));
+        assert_eq!(cache.len(), 1);
+        cache.set_budget_bytes(64);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.budget_bytes(), 64);
     }
 
     #[test]

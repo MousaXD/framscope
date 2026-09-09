@@ -3,6 +3,7 @@ package com.framescope.app.ui
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -44,7 +45,89 @@ class LiveScrubRequestGateTest {
     }
 
     @Test
-    fun invalidateDropsPendingAndMakesLateInFlightResultUnpublishable() {
+    fun newerTargetIdentifiesObsoleteInFlightNativeWorkForCancellation() {
+        val gate = LiveScrubRequestGate()
+        val active = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(8L),
+        )
+        assertEquals(active, gate.beginNext())
+
+        val latest = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+
+        assertEquals(
+            LiveScrubCancellation(sessionId = 41L, requestId = active.requestId),
+            gate.cancellationForSupersededInFlight(latest),
+        )
+        assertNull(gate.cancellationForSupersededInFlight(active))
+    }
+
+    @Test
+    fun repeatedPendingTargetReusesRequestWithoutAddingWork() {
+        val gate = LiveScrubRequestGate()
+        val first = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+        val duplicate = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+
+        assertSame(first, duplicate)
+        assertEquals(1, gate.pendingCount())
+        assertEquals(first, gate.beginNext())
+        assertTrue(gate.finish(first))
+    }
+
+    @Test
+    fun returningToInFlightTargetDropsObsoletePendingDecode() {
+        val gate = LiveScrubRequestGate()
+        val inFlight = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Timestamp(100_000L),
+        )
+        assertEquals(inFlight, gate.beginNext())
+        gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Timestamp(200_000L),
+        )
+
+        val duplicate = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Timestamp(100_000L),
+        )
+
+        assertSame(inFlight, duplicate)
+        assertEquals(0, gate.pendingCount())
+        assertFalse(gate.hasPendingWork())
+        assertTrue(gate.finish(inFlight))
+        assertNull(gate.beginNext())
+    }
+
+    @Test
+    fun sameTargetInDifferentSessionIsNeverDeduplicated() {
+        val gate = LiveScrubRequestGate()
+        val first = gate.submit(
+            sessionId = 41L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+        val replacement = gate.submit(
+            sessionId = 42L,
+            target = LiveScrubTarget.Frame(9L),
+        )
+
+        assertFalse(first.requestId == replacement.requestId)
+        assertEquals(1, gate.pendingCount())
+        assertEquals(replacement, gate.beginNext())
+        assertTrue(gate.finish(replacement))
+    }
+
+    @Test
+    fun invalidateDropsPendingReturnsInFlightCancellationAndFencesLateResult() {
         val gate = LiveScrubRequestGate()
         val inFlight = gate.submit(
             sessionId = 7L,
@@ -56,13 +139,30 @@ class LiveScrubRequestGateTest {
             target = LiveScrubTarget.Frame(11L),
         )
 
-        gate.invalidate()
+        val cancellation = gate.invalidate()
 
+        assertEquals(
+            LiveScrubCancellation(sessionId = 7L, requestId = inFlight.requestId),
+            cancellation,
+        )
         assertEquals(1, gate.inFlightCount())
         assertEquals(0, gate.pendingCount())
         assertFalse(gate.hasPendingWork())
         assertFalse(gate.finish(inFlight))
         assertNull(gate.beginNext())
+    }
+
+    @Test
+    fun invalidatingOnlyPendingWorkDoesNotInventNativeCancellation() {
+        val gate = LiveScrubRequestGate()
+        gate.submit(
+            sessionId = 12L,
+            target = LiveScrubTarget.Frame(2L),
+        )
+
+        assertNull(gate.invalidate())
+        assertEquals(0, gate.inFlightCount())
+        assertEquals(0, gate.pendingCount())
     }
 
     @Test
@@ -73,7 +173,10 @@ class LiveScrubRequestGateTest {
             target = LiveScrubTarget.Timestamp(-250_000L),
         )
         assertEquals(stale, gate.beginNext())
-        gate.invalidate()
+        assertEquals(
+            LiveScrubCancellation(sessionId = 5L, requestId = stale.requestId),
+            gate.invalidate(),
+        )
         assertFalse(gate.finish(stale))
 
         val fresh = gate.submit(

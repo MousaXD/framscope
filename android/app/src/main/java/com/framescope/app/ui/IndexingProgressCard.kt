@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.framescope.app.data.MicroscopeIndexingStage
+import kotlin.math.floor
 import kotlin.math.roundToInt
 
 @Composable
@@ -42,13 +43,13 @@ internal fun MicroscopeIndexingCard(progress: IndexingProgressUi?) {
                 )
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        text = progress?.stage?.title() ?: "Preparing frame index",
+                        text = progress?.let(::stageTitle) ?: "Preparing video…",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
                         text = progress?.stage?.detail()
-                            ?: "Reading exact presentation timing. Progress will appear as soon as the native indexer reports it.",
+                            ?: "Reading media information before frame indexing begins.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -71,34 +72,47 @@ internal fun MicroscopeIndexingCard(progress: IndexingProgressUi?) {
 
                 if (current.indexedFrames > 0L) {
                     Text(
-                        text = "Index contains ${current.indexedFrames} frames",
+                        text = if (current.stage == MicroscopeIndexingStage.Indexing) {
+                            "${current.indexedFrames} frames indexed"
+                        } else {
+                            "Index currently contains ${current.indexedFrames} frames"
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
 
-                current.estimatedFraction?.let { fraction ->
-                    val percent = (fraction.coerceIn(0.0, 1.0) * 100.0).roundToInt()
+                current.mediaTimelineFraction?.let { fraction ->
                     Text(
-                        text = "Estimated progress: $percent%",
+                        text = "Media timeline covered: ${displayProgressPercent(fraction)}%",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
                     )
                 }
 
-                current.framesPerSecond?.takeIf { it.isFinite() && it > 0.0 }?.let { rate ->
+                if (!current.telemetryAvailable) {
                     Text(
-                        text = "Observed indexing rate: ${formatRate(rate)} frames/s",
+                        text = "Progress details temporarily unavailable",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
+                } else {
+                    current.framesPerSecond?.takeIf { it.isFinite() && it > 0.0 }?.let { rate ->
+                        Text(
+                            text = "Observed indexing rate: ${formatRate(rate)} frames/s",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
 
-                current.estimatedRemainingSeconds?.let { remaining ->
-                    Text(
-                        text = "Estimated time remaining: ${formatRemaining(remaining)}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (current.stage == MicroscopeIndexingStage.Indexing) {
+                        val etaText = current.estimatedRemainingRange?.let(::formatRemainingRange)
+                            ?: "Estimating time remaining…"
+                        Text(
+                            text = etaText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
 
                 if (
@@ -106,7 +120,7 @@ internal fun MicroscopeIndexingCard(progress: IndexingProgressUi?) {
                     current.currentTimestampUs != null
                 ) {
                     Text(
-                        text = "Indexed through ${MicroscopePreviewMath.formatTimestampUs(current.currentTimestampUs)}",
+                        text = "Current decoded timestamp: ${MicroscopePreviewMath.formatTimestampUs(current.currentTimestampUs)}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -116,19 +130,29 @@ internal fun MicroscopeIndexingCard(progress: IndexingProgressUi?) {
     }
 }
 
+private fun stageTitle(progress: IndexingProgressUi): String {
+    if (
+        progress.stage == MicroscopeIndexingStage.ValidatingExistingIndex &&
+        progress.stageProgressFraction != null
+    ) {
+        return "Validating saved index: ${displayProgressPercent(progress.stageProgressFraction)}%"
+    }
+    return progress.stage.title()
+}
+
 private fun MicroscopeIndexingStage.title(): String = when (this) {
-    MicroscopeIndexingStage.ProbingMedia -> "Opening media"
-    MicroscopeIndexingStage.CheckingExistingIndex -> "Checking saved frame index"
+    MicroscopeIndexingStage.ProbingMedia -> "Preparing video…"
+    MicroscopeIndexingStage.CheckingExistingIndex -> "Checking saved index…"
     MicroscopeIndexingStage.ReusingExistingIndex -> "Reusing saved frame index"
-    MicroscopeIndexingStage.ValidatingExistingIndex -> "Validating saved frame index"
-    MicroscopeIndexingStage.RebuildingIndex -> "Rebuilding frame index"
-    MicroscopeIndexingStage.Indexing -> "Indexing exact timestamps"
-    MicroscopeIndexingStage.Finalizing -> "Finalizing frame index"
+    MicroscopeIndexingStage.ValidatingExistingIndex -> "Validating saved index…"
+    MicroscopeIndexingStage.RebuildingIndex -> "Rebuilding frame index…"
+    MicroscopeIndexingStage.Indexing -> "Indexing frames"
+    MicroscopeIndexingStage.Finalizing -> "Finalizing frame index…"
 }
 
 private fun MicroscopeIndexingStage.detail(): String = when (this) {
     MicroscopeIndexingStage.ProbingMedia ->
-        "Reading stream metadata before indexing begins."
+        "Reading media information before frame indexing begins."
     MicroscopeIndexingStage.CheckingExistingIndex ->
         "Looking for a persistent index that matches this exact source."
     MicroscopeIndexingStage.ReusingExistingIndex ->
@@ -138,9 +162,14 @@ private fun MicroscopeIndexingStage.detail(): String = when (this) {
     MicroscopeIndexingStage.RebuildingIndex ->
         "Saved progress cannot be trusted as-is, so FrameScope is rebuilding it safely."
     MicroscopeIndexingStage.Indexing ->
-        "Traversing presentation timestamps. Exact navigation unlocks when the index is complete."
+        "Traversing exact presentation timestamps. Navigation unlocks when the index is complete."
     MicroscopeIndexingStage.Finalizing ->
-        "Committing the completed persistent index."
+        "Saving the completed persistent index."
+}
+
+internal fun displayProgressPercent(fraction: Double): Int {
+    val bounded = fraction.coerceIn(0.0, 1.0)
+    return if (bounded >= 1.0) 100 else floor(bounded * 100.0).toInt()
 }
 
 private fun formatRate(rate: Double): String = when {
@@ -149,16 +178,39 @@ private fun formatRate(rate: Double): String = when {
     else -> ((rate * 100.0).roundToInt() / 100.0).toString()
 }
 
-private fun formatRemaining(seconds: Long): String {
-    val safe = seconds.coerceAtLeast(0L)
-    if (safe < 60L) return "about ${safe}s"
-    val minutes = safe / 60L
-    val remainder = safe % 60L
-    return if (minutes < 60L) {
-        "about ${minutes}m ${remainder}s"
-    } else {
-        val hours = minutes / 60L
-        val minuteRemainder = minutes % 60L
-        "about ${hours}h ${minuteRemainder}m"
+internal fun formatRemainingRange(range: IndexingEtaRange): String {
+    val minimum = range.minSeconds.coerceAtLeast(0L)
+    val maximum = range.maxSeconds.coerceAtLeast(minimum)
+    return when {
+        maximum < 60L -> {
+            val low = floorToBucket(minimum, 10L).coerceAtLeast(10L)
+            val high = ceilToBucket(maximum, 10L).coerceAtLeast(low)
+            if (low == high) "About ${high}s remaining" else "About ${low}–${high}s remaining"
+        }
+        maximum < 3_600L -> {
+            val lowMinutes = (minimum / 60L).coerceAtLeast(1L)
+            val highMinutes = ceilDiv(maximum, 60L).coerceAtLeast(lowMinutes)
+            if (lowMinutes == highMinutes) {
+                "About ${highMinutes} min remaining"
+            } else {
+                "About ${lowMinutes}–${highMinutes} min remaining"
+            }
+        }
+        else -> {
+            val lowHours = (minimum / 3_600L).coerceAtLeast(1L)
+            val highHours = ceilDiv(maximum, 3_600L).coerceAtLeast(lowHours)
+            if (lowHours == highHours) {
+                "About ${highHours} hr remaining"
+            } else {
+                "About ${lowHours}–${highHours} hr remaining"
+            }
+        }
     }
 }
+
+private fun floorToBucket(value: Long, bucket: Long): Long = (value / bucket) * bucket
+
+private fun ceilToBucket(value: Long, bucket: Long): Long = ceilDiv(value, bucket) * bucket
+
+private fun ceilDiv(value: Long, divisor: Long): Long =
+    if (value <= 0L) 0L else 1L + (value - 1L) / divisor

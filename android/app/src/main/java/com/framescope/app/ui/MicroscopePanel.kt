@@ -451,24 +451,35 @@ private suspend fun rgbaToBoundedPreview(
     try {
         bitmap = Bitmap.createBitmap(plan.targetWidth, plan.targetHeight, Bitmap.Config.ARGB_8888)
         val source = rgba.duplicate()
-        val row = IntArray(plan.targetWidth)
-
-        for (outputY in 0 until plan.targetHeight) {
-            currentCoroutineContext().ensureActive()
-            val sourceY = plan.sourceY(outputY)
-            val rowStart = Math.multiplyExact(sourceY.toLong(), strideBytes)
-            for (outputX in 0 until plan.targetWidth) {
-                val sourceX = plan.sourceX(outputX)
-                val offsetLong = Math.addExact(rowStart, sourceX.toLong() * 4L)
-                val offset = Math.toIntExact(offsetLong)
-                val red = source.get(offset).toInt() and 0xff
-                val green = source.get(offset + 1).toInt() and 0xff
-                val blue = source.get(offset + 2).toInt() and 0xff
-                val alpha = source.get(offset + 3).toInt() and 0xff
-                row[outputX] =
-                    (alpha shl 24) or (red shl 16) or (green shl 8) or blue
+        val packedRowBytes = width.toLong() * 4L
+        if (!plan.isDownscaled && strideBytes == packedRowBytes) {
+            val requiredBytes = Math.multiplyExact(packedRowBytes, height.toLong())
+            if (requiredBytes > source.capacity().toLong()) {
+                bitmap.recycle()
+                return MicroscopePreviewState.Error(errorMessage)
             }
-            bitmap.setPixels(row, 0, plan.targetWidth, 0, outputY, plan.targetWidth, 1)
+            source.position(0)
+            source.limit(Math.toIntExact(requiredBytes))
+            bitmap.copyPixelsFromBuffer(source)
+        } else {
+            val row = IntArray(plan.targetWidth)
+            for (outputY in 0 until plan.targetHeight) {
+                currentCoroutineContext().ensureActive()
+                val sourceY = plan.sourceY(outputY)
+                val rowStart = Math.multiplyExact(sourceY.toLong(), strideBytes)
+                for (outputX in 0 until plan.targetWidth) {
+                    val sourceX = plan.sourceX(outputX)
+                    val offsetLong = Math.addExact(rowStart, sourceX.toLong() * 4L)
+                    val offset = Math.toIntExact(offsetLong)
+                    val red = source.get(offset).toInt() and 0xff
+                    val green = source.get(offset + 1).toInt() and 0xff
+                    val blue = source.get(offset + 2).toInt() and 0xff
+                    val alpha = source.get(offset + 3).toInt() and 0xff
+                    row[outputX] =
+                        (alpha shl 24) or (red shl 16) or (green shl 8) or blue
+                }
+                bitmap.setPixels(row, 0, plan.targetWidth, 0, outputY, plan.targetWidth, 1)
+            }
         }
         return MicroscopePreviewState.Ready(
             bitmap = bitmap,
@@ -519,6 +530,7 @@ private fun MicroscopeStatusCard(message: String) {
             text = message,
             modifier = Modifier.padding(18.dp),
             style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -539,19 +551,20 @@ private fun MicroscopeErrorCard(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                text = "Frame microscope error",
+                text = "Microscope error",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onErrorContainer,
+                fontWeight = FontWeight.SemiBold,
             )
             Text(
                 text = message,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )
             code?.let {
                 Text(
-                    text = "Code: $it",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = it,
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
             }

@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const FRAME_INDEX_SCHEMA_VERSION: i64 = 1;
+/// Compatibility generation for presentation-frame identity and timestamp interpretation.
+///
+/// This is intentionally independent from the SQLite schema. Any incompatible change to decoder
+/// output ordering, authoritative timestamp selection, keyframe-seek reconciliation, or another
+/// policy that can change which real presentation frame a persistent `FrameId` identifies must bump
+/// this generation even when the database columns themselves do not change.
+pub const FRAME_TIMELINE_CONTRACT_GENERATION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FrameId(pub u64);
@@ -160,6 +167,41 @@ impl FrameIndexLifecycle {
     }
 }
 
+/// Whether timestamp-based keyframe seeking can be used as an authoritative shortcut for the
+/// currently persisted presentation-frame prefix.
+///
+/// `Ambiguous` is fail-closed. Navigation and future bounded-resume code must decode from stream
+/// start instead of treating a timestamp seek as proof of persistent `FrameId` alignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampSeekSafety {
+    Unambiguous,
+    Ambiguous,
+}
+
+impl TimestampSeekSafety {
+    pub(crate) fn as_i64(self) -> i64 {
+        match self {
+            Self::Unambiguous => 1,
+            Self::Ambiguous => 0,
+        }
+    }
+
+    pub(crate) fn from_i64(value: i64) -> Result<Self, FrameIndexError> {
+        match value {
+            1 => Ok(Self::Unambiguous),
+            0 => Ok(Self::Ambiguous),
+            _ => Err(FrameIndexError::InvalidState(format!(
+                "unknown timestamp-seek safety value {value}"
+            ))),
+        }
+    }
+
+    pub fn permits_timestamp_seek(self) -> bool {
+        matches!(self, Self::Unambiguous)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameIndexStatus {
     pub lifecycle: FrameIndexLifecycle,
@@ -176,6 +218,7 @@ pub enum FrameIndexOpenDisposition {
     Reused,
     RebuiltStaleSource,
     RebuiltUnverifiableSource,
+    RebuiltIncompatibleTimelineContract,
     RecoveredCorruptState,
     RecreatedUnsupportedSchema,
 }

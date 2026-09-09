@@ -1,10 +1,10 @@
 use framescope_cache::{
     FRAME_INDEX_SCHEMA_VERSION, FrameCacheHierarchy, FrameId, FrameIndex, FrameIndexError,
-    FrameIndexStreamIdentity, SourceIdentity,
+    FrameIndexOpenDisposition, FrameIndexStreamIdentity, SourceIdentity,
 };
 use framescope_core::FrameScopeError;
 use framescope_video::{
-    CachedNavigationError, CancellationToken, IndexingError, IndexingOptions,
+    CachedNavigationError, CancellationToken, IndexingError, IndexingOptions, IndexingReport,
     MicroscopeFramePresentation, MicroscopeNavigationError, MicroscopePresentationError,
     MicroscopeStep, MicroscopeTarget, MicroscopeTimestampSelection, OpenOptions, VideoDecoder,
     build_or_resume_frame_index, microscope_step, microscope_target, microscope_timestamp_us,
@@ -16,6 +16,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 #[cfg(unix)]
 use std::io::{Read, Seek, SeekFrom};
@@ -44,6 +45,95 @@ struct FrameDetails {
     corrupt: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct IndexingRuntimeDiagnostics {
+    reused_existing_frames: u64,
+    newly_indexed_frames: u64,
+    restarted_after_partial_mismatch: bool,
+    max_pending_entries: usize,
+    total_elapsed_us: u64,
+    index_status_elapsed_us: u64,
+    decoder_open_elapsed_us: u64,
+    decoder_open_count: u64,
+    frames_decoded: u64,
+    validation_frames_replayed: u64,
+    reconciliation_sqlite_elapsed_us: u64,
+    reconciliation_range_queries: u64,
+    sqlite_batch_elapsed_us: u64,
+    batch_commits: u64,
+    bounded_resume_attempted: bool,
+    bounded_resume_succeeded: bool,
+    bounded_resume_fell_back: bool,
+    resume_checkpoint_frame_id: Option<u64>,
+    resume_seek_scan_frames: u64,
+}
+
+impl From<&IndexingReport> for IndexingRuntimeDiagnostics {
+    fn from(report: &IndexingReport) -> Self {
+        Self {
+            reused_existing_frames: report.reused_existing_frames,
+            newly_indexed_frames: report.newly_indexed_frames,
+            restarted_after_partial_mismatch: report.restarted_after_partial_mismatch,
+            max_pending_entries: report.max_pending_entries,
+            total_elapsed_us: report.total_elapsed_us,
+            index_status_elapsed_us: report.index_status_elapsed_us,
+            decoder_open_elapsed_us: report.decoder_open_elapsed_us,
+            decoder_open_count: report.decoder_open_count,
+            frames_decoded: report.frames_decoded,
+            validation_frames_replayed: report.validation_frames_replayed,
+            reconciliation_sqlite_elapsed_us: report.reconciliation_sqlite_elapsed_us,
+            reconciliation_range_queries: report.reconciliation_range_queries,
+            sqlite_batch_elapsed_us: report.sqlite_batch_elapsed_us,
+            batch_commits: report.batch_commits,
+            bounded_resume_attempted: report.bounded_resume_attempted,
+            bounded_resume_succeeded: report.bounded_resume_succeeded,
+            bounded_resume_fell_back: report.bounded_resume_fell_back,
+            resume_checkpoint_frame_id: report
+                .resume_checkpoint_frame_id
+                .map(|frame_id| frame_id.0),
+            resume_seek_scan_frames: report.resume_seek_scan_frames,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MicroscopeOpenDiagnostics {
+    source_seekable: bool,
+    source_size_bytes: Option<u64>,
+    source_identity_bytes_read: u64,
+    source_identity_read_calls: u64,
+    source_identity_seek_calls: u64,
+    source_identity_io_elapsed_us: u64,
+    source_identity_elapsed_us: u64,
+    source_reuse_safe: bool,
+    persistent_index: bool,
+    probe_open_elapsed_us: u64,
+    index_open_elapsed_us: u64,
+    index_open_disposition: &'static str,
+    database_bytes: u64,
+    wal_bytes: u64,
+    total_open_elapsed_us: u64,
+    indexing: IndexingRuntimeDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SourceIdentityMetrics {
+    seekable: bool,
+    size_bytes: Option<u64>,
+    bytes_read: u64,
+    read_calls: u64,
+    seek_calls: u64,
+    io_elapsed_us: u64,
+    elapsed_us: u64,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct SourceIdentityOutcome {
+    identity: SourceIdentity,
+    metrics: SourceIdentityMetrics,
+}
+
 #[derive(Debug, Serialize)]
 struct SessionSnapshot {
     session_id: i64,
@@ -51,6 +141,8 @@ struct SessionSnapshot {
     current_frame: Option<FrameDetails>,
     can_step_previous: bool,
     can_step_next: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    open_diagnostics: Option<MicroscopeOpenDiagnostics>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,7 +161,7 @@ struct PreparedFrameDetails {
 enum MicroscopeResponse {
     Ok {
         engine: &'static str,
-        session: SessionSnapshot,
+        session: Box<SessionSnapshot>,
     },
     Error {
         engine: &'static str,
@@ -155,6 +247,7 @@ struct NavigationSession {
     current: Option<FrameId>,
     presentation_generation: i64,
     current_presentation: Option<MicroscopeFramePresentation>,
+    open_diagnostics: MicroscopeOpenDiagnostics,
 }
 
 #[cfg(not(unix))]
@@ -218,7 +311,7 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
     let response = match result {
         Ok(session) => MicroscopeResponse::Ok {
             engine: ENGINE_VERSION,
-            session,
+            session: Box::new(session),
         },
         Err(error) => MicroscopeResponse::Error {
             engine: ENGINE_VERSION,
@@ -264,6 +357,7 @@ fn open_session(
     operation_id: OperationId,
     cache_root: &str,
 ) -> Result<SessionSnapshot, MicroscopeFailure> {
+    let open_started = Instant::now();
     if fd < 0 {
         return Err(MicroscopeFailure::new(
             "invalid_source",
@@ -280,10 +374,14 @@ fn open_session(
 
     let (cancellation, _operation) = operation_token(operation_id).map_err(from_frame_scope)?;
     let source_fd = duplicate_fd(fd).map_err(from_io)?;
-    let source_identity = source_identity(source_fd.as_raw_fd());
+    let identity_outcome = source_identity(source_fd.as_raw_fd(), &cancellation)?;
+    let source_identity = identity_outcome.identity;
+    let source_metrics = identity_outcome.metrics;
     let reusable_index = source_identity.is_reuse_safe();
 
+    let probe_started = Instant::now();
     let probe = open_decoder(source_fd.as_fd(), cancellation.clone()).map_err(from_frame_scope)?;
+    let probe_open_elapsed_us = elapsed_us(probe_started);
     let stream_identity =
         FrameIndexStreamIdentity::from_stream(probe.selected_stream()).map_err(from_index)?;
     drop(probe);
@@ -295,10 +393,13 @@ fn open_session(
     // removes the operation-scoped database and sidecars.
     let ephemeral_index_cleanup =
         (!reusable_index).then(|| EphemeralIndexCleanup::new(index_path.clone()));
-    let (mut index, _) = FrameIndex::open_or_create(index_path, source_identity, stream_identity)
-        .map_err(from_index)?;
+    let index_open_started = Instant::now();
+    let (mut index, index_open_disposition) =
+        FrameIndex::open_or_create(index_path.clone(), source_identity, stream_identity)
+            .map_err(from_index)?;
+    let index_open_elapsed_us = elapsed_us(index_open_started);
 
-    build_or_resume_frame_index(
+    let indexing_report = build_or_resume_frame_index(
         &mut index,
         || open_decoder(source_fd.as_fd(), cancellation.clone()),
         IndexingOptions::default(),
@@ -313,6 +414,26 @@ fn open_session(
         MICROSCOPE_RAM_CACHE_BUDGET_BYTES,
         MICROSCOPE_DISK_CACHE_BUDGET_BYTES,
     );
+    let mut open_diagnostics = MicroscopeOpenDiagnostics {
+        source_seekable: source_metrics.seekable,
+        source_size_bytes: source_metrics.size_bytes,
+        source_identity_bytes_read: source_metrics.bytes_read,
+        source_identity_read_calls: source_metrics.read_calls,
+        source_identity_seek_calls: source_metrics.seek_calls,
+        source_identity_io_elapsed_us: source_metrics.io_elapsed_us,
+        source_identity_elapsed_us: source_metrics.elapsed_us,
+        source_reuse_safe: reusable_index,
+        persistent_index: reusable_index,
+        probe_open_elapsed_us,
+        index_open_elapsed_us,
+        index_open_disposition: index_open_disposition_name(index_open_disposition),
+        database_bytes: file_len_or_zero(&index_path),
+        wal_bytes: file_len_or_zero(&sqlite_sidecar_path(&index_path, "-wal")),
+        total_open_elapsed_us: 0,
+        indexing: IndexingRuntimeDiagnostics::from(&indexing_report),
+    };
+    open_diagnostics.total_open_elapsed_us = elapsed_us(open_started);
+
     let session_id = next_session_id()?;
     let session = NavigationSession {
         _source_fd: source_fd,
@@ -323,6 +444,7 @@ fn open_session(
         current,
         presentation_generation,
         current_presentation: None,
+        open_diagnostics,
     };
     let snapshot = snapshot(session_id, &session)?;
 
@@ -668,6 +790,7 @@ fn snapshot(
         can_step_next: current_target
             .as_ref()
             .is_some_and(MicroscopeTarget::has_next),
+        open_diagnostics: Some(session.open_diagnostics.clone()),
     })
 }
 
@@ -703,6 +826,31 @@ fn frame_index_path(
         .join(format!("v{FRAME_INDEX_SCHEMA_VERSION}"))
         .join(source_namespace)
         .join(format!("stream-{}.sqlite3", stream.stream_index))
+}
+
+fn index_open_disposition_name(disposition: FrameIndexOpenDisposition) -> &'static str {
+    match disposition {
+        FrameIndexOpenDisposition::Created => "created",
+        FrameIndexOpenDisposition::Reused => "reused",
+        FrameIndexOpenDisposition::RebuiltStaleSource => "rebuilt_stale_source",
+        FrameIndexOpenDisposition::RebuiltUnverifiableSource => "rebuilt_unverifiable_source",
+        FrameIndexOpenDisposition::RebuiltIncompatibleTimelineContract => {
+            "rebuilt_incompatible_timeline_contract"
+        }
+        FrameIndexOpenDisposition::RecoveredCorruptState => "recovered_corrupt_state",
+        FrameIndexOpenDisposition::RecreatedUnsupportedSchema => "recreated_unsupported_schema",
+    }
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(unix)]
+fn file_len_or_zero(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -809,15 +957,83 @@ fn duplicate_fd(fd: RawFd) -> io::Result<OwnedFd> {
 }
 
 #[cfg(unix)]
-fn source_identity(fd: RawFd) -> SourceIdentity {
-    match FdLogicalReader::new(fd) {
-        Ok(mut reader) if reader.len > 0 => {
-            let size = reader.len;
-            SourceIdentity::from_seekable(&mut reader, None, None)
-                .unwrap_or_else(|_| SourceIdentity::metadata_only(Some(size), None, None))
+fn descriptor_seekable(fd: RawFd) -> bool {
+    // SAFETY: SEEK_CUR with offset zero only queries the descriptor's current offset. It neither
+    // changes the caller-visible offset nor takes ownership. ESPIPE cleanly identifies pipes and
+    // other non-seekable descriptors.
+    unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) >= 0 }
+}
+
+#[cfg(unix)]
+fn source_identity(
+    fd: RawFd,
+    cancellation: &CancellationToken,
+) -> Result<SourceIdentityOutcome, MicroscopeFailure> {
+    let started = Instant::now();
+    let seekable = descriptor_seekable(fd);
+    let mut reader = match FdLogicalReader::new(fd) {
+        Ok(reader) => reader,
+        Err(_) => {
+            return Ok(SourceIdentityOutcome {
+                identity: SourceIdentity::metadata_only(None, None, None),
+                metrics: SourceIdentityMetrics {
+                    seekable: false,
+                    size_bytes: None,
+                    bytes_read: 0,
+                    read_calls: 0,
+                    seek_calls: 0,
+                    io_elapsed_us: 0,
+                    elapsed_us: elapsed_us(started),
+                },
+            });
         }
-        Ok(reader) => SourceIdentity::metadata_only(Some(reader.len), None, None),
-        Err(_) => SourceIdentity::metadata_only(None, None, None),
+    };
+
+    let size_bytes = seekable.then_some(reader.len);
+    if !seekable || reader.len == 0 {
+        return Ok(SourceIdentityOutcome {
+            identity: SourceIdentity::metadata_only(size_bytes, None, None),
+            metrics: SourceIdentityMetrics {
+                seekable,
+                size_bytes,
+                bytes_read: 0,
+                read_calls: 0,
+                seek_calls: 0,
+                io_elapsed_us: 0,
+                elapsed_us: elapsed_us(started),
+            },
+        });
+    }
+
+    let size = reader.len;
+    let identity_result =
+        SourceIdentity::from_seekable_cancellable(&mut reader, None, None, || {
+            if cancellation.is_cancelled() {
+                Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "source identity hashing cancelled",
+                ))
+            } else {
+                Ok(())
+            }
+        });
+    let metrics = SourceIdentityMetrics {
+        seekable,
+        size_bytes: Some(size),
+        bytes_read: reader.bytes_read,
+        read_calls: reader.read_calls,
+        seek_calls: reader.seek_calls,
+        io_elapsed_us: reader.io_elapsed_us,
+        elapsed_us: elapsed_us(started),
+    };
+
+    match identity_result {
+        Ok(identity) => Ok(SourceIdentityOutcome { identity, metrics }),
+        Err(_) if cancellation.is_cancelled() => Err(from_frame_scope(FrameScopeError::Cancelled)),
+        Err(_) => Ok(SourceIdentityOutcome {
+            identity: SourceIdentity::metadata_only(Some(size), None, None),
+            metrics,
+        }),
     }
 }
 
@@ -826,6 +1042,10 @@ struct FdLogicalReader {
     fd: RawFd,
     position: u64,
     len: u64,
+    bytes_read: u64,
+    read_calls: u64,
+    seek_calls: u64,
+    io_elapsed_us: u64,
 }
 
 #[cfg(unix)]
@@ -844,6 +1064,10 @@ impl FdLogicalReader {
             fd,
             position: 0,
             len,
+            bytes_read: 0,
+            read_calls: 0,
+            seek_calls: 0,
+            io_elapsed_us: 0,
         })
     }
 }
@@ -860,6 +1084,8 @@ impl Read for FdLogicalReader {
             .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         let offset = libc::off_t::try_from(self.position)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source offset overflow"))?;
+        self.read_calls = self.read_calls.saturating_add(1);
+        let read_started = Instant::now();
         // SAFETY: `buffer` is valid for `count` writable bytes. pread does not mutate the shared
         // file offset, which is essential for borrowed SAF descriptors and decoder duplicates.
         let read = unsafe {
@@ -870,6 +1096,7 @@ impl Read for FdLogicalReader {
                 offset,
             )
         };
+        self.io_elapsed_us = self.io_elapsed_us.saturating_add(elapsed_us(read_started));
         if read < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -878,6 +1105,7 @@ impl Read for FdLogicalReader {
         self.position = self.position.checked_add(read as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "source position overflow")
         })?;
+        self.bytes_read = self.bytes_read.saturating_add(read as u64);
         Ok(read)
     }
 }
@@ -896,6 +1124,7 @@ impl Seek for FdLogicalReader {
                 "seek would leave the supported source range",
             ));
         }
+        self.seek_calls = self.seek_calls.saturating_add(1);
         self.position = u64::try_from(next)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source seek overflow"))?;
         Ok(self.position)
@@ -993,7 +1222,95 @@ mod tests {
         let mut bytes = [0_u8; 4];
         reader.read_exact(&mut bytes).unwrap();
         assert_eq!(&bytes, b"0123");
+        assert_eq!(reader.bytes_read, 4);
+        assert_eq!(reader.read_calls, 1);
         assert_eq!(file.stream_position().unwrap(), 7);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_identity_reports_whole_source_io_and_reuse_safety() {
+        use std::fs::File;
+        use std::io::Write as _;
+
+        let path = std::env::temp_dir().join(format!(
+            "framescope-microscope-identity-metrics-{}",
+            std::process::id()
+        ));
+        let payload = vec![0x2a_u8; 768 * 1024 + 17];
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&payload).unwrap();
+        drop(file);
+        let file = File::open(&path).unwrap();
+        let cancellation = CancellationToken::new();
+
+        let outcome = source_identity(file.as_raw_fd(), &cancellation).unwrap();
+        assert!(outcome.identity.is_reuse_safe());
+        assert!(outcome.metrics.seekable);
+        assert_eq!(outcome.metrics.size_bytes, Some(payload.len() as u64));
+        assert_eq!(outcome.metrics.bytes_read, payload.len() as u64);
+        assert!(outcome.metrics.read_calls >= 3);
+        assert!(outcome.metrics.seek_calls >= 2);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zero_size_seekable_source_is_reported_but_never_reuse_safe() {
+        use std::fs::File;
+
+        let path = std::env::temp_dir().join(format!(
+            "framescope-microscope-zero-size-{}",
+            std::process::id()
+        ));
+        File::create(&path).unwrap();
+        let file = File::open(&path).unwrap();
+        let outcome = source_identity(file.as_raw_fd(), &CancellationToken::new()).unwrap();
+        assert!(outcome.metrics.seekable);
+        assert_eq!(outcome.metrics.size_bytes, Some(0));
+        assert_eq!(outcome.metrics.bytes_read, 0);
+        assert!(!outcome.identity.is_reuse_safe());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_seekable_pipe_is_ephemeral_without_claiming_source_size() {
+        let mut descriptors = [0_i32; 2];
+        // SAFETY: `descriptors` provides storage for the two descriptors returned by pipe.
+        assert_eq!(unsafe { libc::pipe(descriptors.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned two fresh descriptors and ownership is transferred exactly once.
+        let read_fd = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+        // SAFETY: as above for the write end.
+        let _write_fd = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+
+        let outcome = source_identity(read_fd.as_raw_fd(), &CancellationToken::new()).unwrap();
+        assert!(!outcome.metrics.seekable);
+        assert_eq!(outcome.metrics.size_bytes, None);
+        assert_eq!(outcome.metrics.bytes_read, 0);
+        assert!(!outcome.identity.is_reuse_safe());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_identity_propagates_cancellation_instead_of_downgrading_reuse() {
+        use std::fs::File;
+        use std::io::Write as _;
+
+        let path = std::env::temp_dir().join(format!(
+            "framescope-microscope-identity-cancel-{}",
+            std::process::id()
+        ));
+        let mut file = File::create(&path).unwrap();
+        file.write_all(&vec![0x55_u8; 512 * 1024]).unwrap();
+        drop(file);
+        let file = File::open(&path).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = source_identity(file.as_raw_fd(), &cancellation).unwrap_err();
+        assert_eq!(error.code(), FrameScopeError::Cancelled.code());
         let _ = std::fs::remove_file(path);
     }
 }

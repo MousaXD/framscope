@@ -108,6 +108,7 @@ pub struct VideoDecoder {
     source_id: u64,
     cancellation: CancellationToken,
     cadence: TimestampCadence,
+    current_frame: Option<DecodedFrame>,
 }
 
 impl VideoDecoder {
@@ -219,6 +220,7 @@ impl VideoDecoder {
             source_id: next_source_id(),
             cancellation,
             cadence: TimestampCadence::default(),
+            current_frame: None,
         })
     }
 
@@ -259,24 +261,33 @@ impl VideoDecoder {
             return Err(FrameScopeError::Cancelled);
         }
         let Some(native) = self.session.next_frame().map_err(map_native_error)? else {
+            self.current_frame = None;
             return Ok(None);
         };
         let frame = self.map_frame(native)?;
         if let Some(timestamp) = frame.presentation_timestamp {
             self.cadence.record(timestamp);
         }
+        self.current_frame = Some(frame.clone());
         Ok(Some(frame))
     }
 
-    /// Decode the next display frame and copy its full-resolution pixels into owned RGBA storage.
+    /// Copy source-quality RGBA for the exact frame most recently returned by [`Self::next_frame`].
     ///
-    /// Unlike [`Self::next_frame`], this performs a pixel-format conversion and allocation, so
-    /// metadata-only indexing should continue to use `next_frame`. The returned pixels are owned and
-    /// can safely be retained by the Phase 3 RAM cache after the decoder advances.
-    pub fn next_frame_rgba(&mut self) -> Result<Option<DecodedRgbaFrame>, FrameScopeError> {
-        let Some(frame) = self.next_frame()? else {
-            return Ok(None);
-        };
+    /// The metadata argument is checked against the decoder cursor before any pixels are labelled.
+    /// This prevents a stale `DecodedFrame` from being paired with a newer reusable FFmpeg frame.
+    pub fn snapshot_current_frame_rgba(
+        &mut self,
+        frame: &DecodedFrame,
+    ) -> Result<DecodedRgbaFrame, FrameScopeError> {
+        if self.cancellation.is_cancelled() {
+            return Err(FrameScopeError::Cancelled);
+        }
+        if self.current_frame.as_ref() != Some(frame) {
+            return Err(FrameScopeError::DecoderFailure(
+                "RGBA snapshot request does not match the decoder's current frame".into(),
+            ));
+        }
         let rgba = self
             .session
             .copy_current_frame_rgba()
@@ -302,11 +313,23 @@ impl VideoDecoder {
             )));
         }
 
-        Ok(Some(DecodedRgbaFrame {
-            frame,
+        Ok(DecodedRgbaFrame {
+            frame: frame.clone(),
             stride_bytes: rgba.stride,
             pixels: rgba.pixels,
-        }))
+        })
+    }
+
+    /// Decode the next display frame and copy its full-resolution pixels into owned RGBA storage.
+    ///
+    /// Unlike [`Self::next_frame`], this performs a pixel-format conversion and allocation, so
+    /// metadata-only indexing should continue to use `next_frame`. The returned pixels are owned and
+    /// can safely be retained by the Phase 3 RAM cache after the decoder advances.
+    pub fn next_frame_rgba(&mut self) -> Result<Option<DecodedRgbaFrame>, FrameScopeError> {
+        let Some(frame) = self.next_frame()? else {
+            return Ok(None);
+        };
+        self.snapshot_current_frame_rgba(&frame).map(Some)
     }
 
     /// Foundational timestamp seek. FFmpeg may land on an earlier keyframe.
@@ -326,6 +349,7 @@ impl VideoDecoder {
             .seek_us(timestamp_us)
             .map_err(map_native_error)?;
         self.cadence = TimestampCadence::default();
+        self.current_frame = None;
         Ok(())
     }
 

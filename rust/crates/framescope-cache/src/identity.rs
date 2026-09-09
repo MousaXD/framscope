@@ -1,21 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Seek, SeekFrom};
 
-const SAMPLE_BYTES: u64 = 64 * 1024;
-const SAMPLE_DOMAIN: &[u8] = b"framescope-source-sample-v1\0";
-const KEY_DOMAIN: &[u8] = b"framescope-source-v2\0";
+const FULL_HASH_BUFFER_BYTES: usize = 256 * 1024;
+const FULL_HASH_DOMAIN: &[u8] = b"framescope-source-full-v2\0";
+const FULL_HASH_TAG_PREFIX: &str = "blake3-full-v2:";
+const LEGACY_SAMPLE_TAG_PREFIX: &str = "blake3-sample-v1:";
+const KEY_DOMAIN: &[u8] = b"framescope-source-v3\0";
 
 /// Path-independent identity for a media source.
 ///
 /// `provider_document_id` is useful metadata, but it is never treated as proof that content is
-/// unchanged. Persisted indexes are reusable only when a content-derived tag is also available.
+/// unchanged. Persisted indexes are reusable only when a complete collision-resistant
+/// content-derived tag is also available.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceIdentity {
     pub size_bytes: Option<u64>,
     pub modified_time_ms: Option<u64>,
     pub provider_document_id: Option<String>,
-    /// Content-derived identity evidence. [`SourceIdentity::from_seekable`] produces a bounded
-    /// BLAKE3 sample tag; callers may also supply another strong content-derived tag.
+    /// Complete content-derived identity evidence. [`SourceIdentity::from_seekable`] produces a
+    /// whole-source BLAKE3 tag. Callers that supply another tag are responsible for ensuring that it
+    /// is collision-resistant evidence over the complete logical source, not sparse sampling.
     pub content_tag: Option<String>,
 }
 
@@ -25,6 +29,9 @@ pub type SourceVideoIdentity = SourceIdentity;
 impl SourceIdentity {
     /// Preserve the Phase 2 constructor while upgrading the representation to support unknown size
     /// and provider/document metadata.
+    ///
+    /// A caller-supplied `content_tag` is trusted only as an explicit complete-content proof. Legacy
+    /// FrameScope sparse-sample tags are rejected by [`SourceIdentity::is_reuse_safe`].
     pub fn new(
         size_bytes: u64,
         modified_time_ms: Option<u64>,
@@ -61,21 +68,40 @@ impl SourceIdentity {
         self
     }
 
-    /// Build a strong reusable identity without hashing the entire source.
+    /// Build a reusable identity by hashing the complete logical source with BLAKE3.
     ///
-    /// At most three 64 KiB windows are read: beginning, middle, and end. The reader position is
-    /// restored before returning. This helper is for a seekable source owned by the caller; it must
-    /// not be run concurrently against another consumer sharing the same underlying file offset.
+    /// The reader position is restored before returning. This helper is for a seekable source owned
+    /// by the caller; it must not be run concurrently against another consumer sharing the same
+    /// underlying file offset. Android's microscope path uses `pread`, so hashing does not disturb
+    /// the decoder descriptor offset even though it intentionally reads the whole source.
     pub fn from_seekable<R: Read + Seek>(
         reader: &mut R,
         modified_time_ms: Option<u64>,
         provider_document_id: Option<String>,
     ) -> io::Result<Self> {
+        Self::from_seekable_cancellable(reader, modified_time_ms, provider_document_id, || Ok(()))
+    }
+
+    /// Whole-source identity hashing with a cooperative cancellation/check hook.
+    ///
+    /// `check` runs before hashing and before every source-read chunk. Returning an error aborts the
+    /// hash and still restores the reader's original logical position. Higher layers can map a
+    /// cancellation-specific error without making the source optimistically reusable.
+    pub fn from_seekable_cancellable<R, F>(
+        reader: &mut R,
+        modified_time_ms: Option<u64>,
+        provider_document_id: Option<String>,
+        mut check: F,
+    ) -> io::Result<Self>
+    where
+        R: Read + Seek,
+        F: FnMut() -> io::Result<()>,
+    {
         let original_position = reader.stream_position()?;
-        let sampled = sample_seekable(reader);
+        let hashed = hash_complete_seekable(reader, &mut check);
         let restore = reader.seek(SeekFrom::Start(original_position));
 
-        let (size_bytes, content_tag) = match sampled {
+        let (size_bytes, content_tag) = match hashed {
             Ok(value) => value,
             Err(error) => {
                 let _ = restore;
@@ -92,17 +118,17 @@ impl SourceIdentity {
         })
     }
 
-    /// Persisted indexes are reused only when identity includes content-derived evidence.
+    /// Persisted indexes are reused only when identity includes complete content-derived evidence.
     ///
-    /// Filename, URI text, display name, provider document ID, size, and modification time are not
-    /// sufficient on their own. If this returns false the index layer rebuilds instead of risking a
-    /// stale match.
+    /// Filename, URI text, display name, provider document ID, size, modification time, and the old
+    /// bounded `blake3-sample-v1` identity are not sufficient. If this returns false the index layer
+    /// rebuilds instead of risking a stale match.
     pub fn is_reuse_safe(&self) -> bool {
         self.size_bytes.is_some()
             && self
                 .content_tag
                 .as_deref()
-                .is_some_and(|tag| !tag.trim().is_empty())
+                .is_some_and(is_complete_content_tag)
     }
 
     /// Stable path-safe key used to namespace index/cache storage.
@@ -117,36 +143,48 @@ impl SourceIdentity {
     }
 }
 
-fn sample_seekable<R: Read + Seek>(reader: &mut R) -> io::Result<(u64, String)> {
+fn is_complete_content_tag(tag: &str) -> bool {
+    let tag = tag.trim();
+    !tag.is_empty() && !tag.starts_with(LEGACY_SAMPLE_TAG_PREFIX)
+}
+
+fn hash_complete_seekable<R, F>(reader: &mut R, check: &mut F) -> io::Result<(u64, String)>
+where
+    R: Read + Seek,
+    F: FnMut() -> io::Result<()>,
+{
+    check()?;
     let size = reader.seek(SeekFrom::End(0))?;
-    let sample_len = size.min(SAMPLE_BYTES);
-    let mut offsets = Vec::with_capacity(3);
-    offsets.push(0);
-    if size > sample_len {
-        offsets.push((size / 2).saturating_sub(sample_len / 2));
-        offsets.push(size - sample_len);
-    }
-    offsets.sort_unstable();
-    offsets.dedup();
+    reader.seek(SeekFrom::Start(0))?;
 
     let mut hasher = blake3::Hasher::new();
-    hasher.update(SAMPLE_DOMAIN);
+    hasher.update(FULL_HASH_DOMAIN);
     hasher.update(&size.to_le_bytes());
-    let mut buffer = vec![0_u8; usize::try_from(sample_len).unwrap_or(0)];
 
-    for offset in offsets {
-        reader.seek(SeekFrom::Start(offset))?;
-        if !buffer.is_empty() {
-            reader.read_exact(&mut buffer)?;
+    let mut buffer = vec![0_u8; FULL_HASH_BUFFER_BYTES];
+    let mut total_read = 0_u64;
+    while total_read < size {
+        check()?;
+        let remaining = size - total_read;
+        let wanted = buffer
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let read = reader.read(&mut buffer[..wanted])?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source ended while computing complete reusable identity",
+            ));
         }
-        hasher.update(&offset.to_le_bytes());
-        hasher.update(&(buffer.len() as u64).to_le_bytes());
-        hasher.update(&buffer);
+        hasher.update(&buffer[..read]);
+        total_read = total_read
+            .checked_add(read as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "source size overflow"))?;
     }
 
     Ok((
         size,
-        format!("blake3-sample-v1:{}", hasher.finalize().to_hex()),
+        format!("{FULL_HASH_TAG_PREFIX}{}", hasher.finalize().to_hex()),
     ))
 }
 
@@ -222,7 +260,7 @@ mod tests {
 
     #[test]
     fn stable_key_is_deterministic() {
-        let id = SourceIdentity::new(1234, Some(5678), Some("sample".into()));
+        let id = SourceIdentity::new(1234, Some(5678), Some("complete-proof".into()));
         assert_eq!(id.stable_key(), id.stable_key());
     }
 
@@ -240,21 +278,42 @@ mod tests {
     }
 
     #[test]
-    fn sampled_identity_is_bounded_and_restores_position() {
-        let bytes = (0..400_000)
-            .map(|value| (value % 251) as u8)
-            .collect::<Vec<_>>();
-        let mut cursor = Cursor::new(bytes);
-        cursor.seek(SeekFrom::Start(123)).unwrap();
-        let id = SourceIdentity::from_seekable(&mut cursor, Some(7), Some("doc:7".into())).unwrap();
-        assert_eq!(cursor.stream_position().unwrap(), 123);
-        assert_eq!(id.size_bytes, Some(400_000));
-        assert!(id.is_reuse_safe());
-        assert!(id.content_tag.unwrap().starts_with("blake3-sample-v1:"));
+    fn legacy_sparse_sample_identity_is_not_reuse_safe() {
+        let id = SourceIdentity::new(1234, None, Some("blake3-sample-v1:0123456789abcdef".into()));
+        assert!(!id.is_reuse_safe());
     }
 
     #[test]
-    fn sampled_identity_detects_changed_content_with_same_size() {
+    fn complete_identity_hashes_unsampled_bytes_and_restores_position() {
+        let a = (0..400_000)
+            .map(|value| (value % 251) as u8)
+            .collect::<Vec<_>>();
+        let mut b = a.clone();
+        // This offset sits outside all three windows used by the removed sparse-sample algorithm.
+        b[100_000] ^= 0x7f;
+
+        let mut cursor_a = Cursor::new(a);
+        cursor_a.seek(SeekFrom::Start(123)).unwrap();
+        let id_a =
+            SourceIdentity::from_seekable(&mut cursor_a, Some(7), Some("doc:7".into())).unwrap();
+        let id_b =
+            SourceIdentity::from_seekable(&mut Cursor::new(b), Some(7), Some("doc:7".into()))
+                .unwrap();
+
+        assert_eq!(cursor_a.stream_position().unwrap(), 123);
+        assert_eq!(id_a.size_bytes, Some(400_000));
+        assert!(id_a.is_reuse_safe());
+        assert!(
+            id_a.content_tag
+                .as_deref()
+                .unwrap()
+                .starts_with(FULL_HASH_TAG_PREFIX)
+        );
+        assert_ne!(id_a.content_tag, id_b.content_tag);
+    }
+
+    #[test]
+    fn complete_identity_detects_changed_content_with_same_size() {
         let mut a = vec![0_u8; 300_000];
         let mut b = a.clone();
         a[150_000] = 1;
@@ -265,9 +324,28 @@ mod tests {
     }
 
     #[test]
+    fn cancellable_identity_restores_position_and_stops_before_full_read() {
+        let mut cursor = Cursor::new(vec![0x5a_u8; FULL_HASH_BUFFER_BYTES * 4]);
+        cursor.seek(SeekFrom::Start(77)).unwrap();
+        let mut checks = 0_u32;
+        let error = SourceIdentity::from_seekable_cancellable(&mut cursor, None, None, || {
+            checks += 1;
+            if checks >= 3 {
+                Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(cursor.stream_position().unwrap(), 77);
+        assert!(checks < 6);
+    }
+
+    #[test]
     fn cache_directory_namespace_is_versioned_and_path_safe() {
         let layout = CacheDirectoryLayout::new(1).unwrap();
-        let id = SourceIdentity::new(1234, Some(5678), Some("sample".into()));
+        let id = SourceIdentity::new(1234, Some(5678), Some("complete-proof".into()));
         let namespace = layout.source_namespace(&id);
         assert!(namespace.starts_with("v1/"));
         assert_eq!(namespace.len(), 3 + 64);
