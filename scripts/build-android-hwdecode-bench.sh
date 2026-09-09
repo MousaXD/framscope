@@ -56,6 +56,7 @@ mkdir -p "$OUTPUT_DIR"
   -ldl \
   -llog \
   -landroid \
+  -lmediandk \
   -o "$OUTPUT_DIR/framescope-decode-bench"
 
 echo "Android hardware-decode benchmark ready: $OUTPUT_DIR/framescope-decode-bench"
