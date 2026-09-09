@@ -6,7 +6,6 @@ mod index_progress;
 mod microscope;
 pub mod presentation_handoff;
 mod scrub_handoff;
-mod similarity;
 mod storage_admin;
 mod unique_export;
 
