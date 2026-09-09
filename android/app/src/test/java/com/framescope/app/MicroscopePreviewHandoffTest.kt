@@ -4,6 +4,7 @@ import com.framescope.app.data.MicroscopePreviewBridge
 import com.framescope.app.data.NativeMicroscopePreview
 import java.nio.ByteBuffer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -25,10 +26,12 @@ class MicroscopePreviewHandoffTest {
         assertEquals(123_456L, result.preview.descriptor.timestampUs)
         assertEquals("decoded", result.preview.descriptor.source)
         assertEquals(3L, result.preview.descriptor.decodedFrames)
-        assertTrue(result.preview.rgba.isDirect)
-        assertTrue(result.preview.rgba.isReadOnly)
-        assertEquals(0, result.preview.rgba.position())
-        assertEquals(16, result.preview.rgba.limit())
+        assertEquals(16L, result.preview.descriptor.nativeBytesCopied)
+        val rgba = assertNotNull(result.preview.rgba).let { result.preview.rgba!! }
+        assertTrue(rgba.isDirect)
+        assertTrue(rgba.isReadOnly)
+        assertEquals(0, rgba.position())
+        assertEquals(16, rgba.limit())
     }
 
     @Test
@@ -109,6 +112,24 @@ class MicroscopePreviewHandoffTest {
         assertEquals("malformed_preview_descriptor", result.code)
     }
 
+    @Test
+    fun rejectsPreviewWhoseCopyAccountingDoesNotMatchPayload() {
+        val raw = successJson(sessionId = 7L).replace(
+            "\"native_bytes_copied\":16",
+            "\"native_bytes_copied\":12",
+        )
+        val result = MicroscopePreviewBridge.parseResponse(
+            raw = raw,
+            destination = ByteBuffer.allocateDirect(640 * 640 * 4),
+            expectedSessionId = 7L,
+            maxEdge = 640,
+        )
+
+        assertTrue(result is NativeMicroscopePreview.Failure)
+        result as NativeMicroscopePreview.Failure
+        assertEquals("malformed_preview_descriptor", result.code)
+    }
+
     private fun successJson(sessionId: Long) = """
         {
           "status":"ok",
@@ -122,7 +143,11 @@ class MicroscopePreviewHandoffTest {
             "stride_bytes":8,
             "byte_len":16,
             "source":"decoded",
-            "decoded_frames":3
+            "decoded_frames":3,
+            "native_conversion_us":7,
+            "native_copy_us":3,
+            "native_bytes_copied":16,
+            "preview_pixel_allocations":1
           }
         }
     """.trimIndent()
