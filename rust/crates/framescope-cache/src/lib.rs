@@ -9,6 +9,7 @@ mod frame_cache;
 mod hierarchy;
 mod identity;
 mod index;
+mod index_catalog;
 mod storage_admin;
 
 pub use disk_cache::{
@@ -26,6 +27,10 @@ pub use index::{
     FRAME_INDEX_SCHEMA_VERSION, FRAME_TIMELINE_CONTRACT_GENERATION, FrameId, FrameIndex,
     FrameIndexEntry, FrameIndexError, FrameIndexLifecycle, FrameIndexOpenDisposition,
     FrameIndexStatus, FrameIndexStreamIdentity, KeyframeAnchor, TimestampSeekSafety,
+};
+pub use index_catalog::{
+    FrameIndexCatalog, FrameIndexCatalogError, PersistentFrameIndexDescriptor,
+    PersistentFrameIndexStatus,
 };
 pub use storage_admin::{
     FRAME_INDEX_NAMESPACE, FrameScopeStorageStats, PREVIEW_PROXY_NAMESPACE, StorageAdmin,
