@@ -52,7 +52,10 @@ fun RecentVideosHomeContent(
                     color = MaterialTheme.colorScheme.error,
                 )
                 is HistoryUiState.Ready -> {
-                    val recent = state.entries.take(3)
+                    val recent = state.entries
+                        .filter { it.contentUri != null }
+                        .sortedByDescending(RecentVideoRecord::lastOpenedEpochMs)
+                        .take(3)
                     if (recent.isEmpty()) {
                         Text(
                             text = "Videos you inspect will appear here for quick resume.",

@@ -24,7 +24,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.framescope.app.data.MediaLibraryCategory
 import com.framescope.app.data.RecentVideoAvailability
+import com.framescope.app.data.RecentVideoIndexStatus
 import com.framescope.app.data.RecentVideoRecord
 import com.framescope.app.data.VideoUriPermissionStatus
 import java.text.DateFormat
@@ -53,19 +55,22 @@ fun HistoryScreen(
         ) {
             Column {
                 Text(
-                    text = "History",
+                    text = "Media Library",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    text = "Recent videos stay on this device.",
+                    text = "Recent sources and persistent frame indexes on this device.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (state is HistoryUiState.Ready && state.entries.isNotEmpty()) {
+            if (
+                state is HistoryUiState.Ready &&
+                state.entries.any { it.contentUri != null }
+            ) {
                 TextButton(onClick = onClear) {
-                    Text("Clear history")
+                    Text("Clear recent activity")
                 }
             }
         }
@@ -81,7 +86,7 @@ fun HistoryScreen(
                 ) {
                     CircularProgressIndicator(modifier = Modifier.testTag("history-loading"))
                     Spacer(Modifier.height(12.dp))
-                    Text("Checking recent videos…")
+                    Text("Reconciling media library…")
                 }
             }
 
@@ -115,12 +120,12 @@ fun HistoryScreen(
                         verticalArrangement = Arrangement.Center,
                     ) {
                         Text(
-                            text = "No recent videos yet",
+                            text = "No videos or indexes yet",
                             style = MaterialTheme.typography.titleLarge,
                         )
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            text = "Videos you open will appear here with their last viewed position.",
+                            text = "Open a video to create a resumable source record and persistent frame index.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -136,7 +141,7 @@ fun HistoryScreen(
                             items = state.entries,
                             key = RecentVideoRecord::id,
                         ) { record ->
-                            RecentVideoCard(
+                            MediaLibraryCard(
                                 record = record,
                                 onOpen = { onOpen(record) },
                                 onReselect = { onReselect(record) },
@@ -151,7 +156,7 @@ fun HistoryScreen(
 }
 
 @Composable
-private fun RecentVideoCard(
+private fun MediaLibraryCard(
     record: RecentVideoRecord,
     onOpen: () -> Unit,
     onReselect: () -> Unit,
@@ -166,21 +171,49 @@ private fun RecentVideoCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = record.displayName,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = record.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = categoryLabel(record.category()),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.testTag("history-category-${record.id}"),
+                )
+            }
             Text(
                 text = metadataSummary(record),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Text(
-                text = "Last opened ${formatLastOpened(record.lastOpenedEpochMs)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            record.indexedFrameCount?.let { frameCount ->
+                Text(
+                    text = "${formatFrameCount(frameCount)} indexed frames",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (record.lastOpenedEpochMs > 0L) {
+                Text(
+                    text = "Last opened ${formatLastOpened(record.lastOpenedEpochMs)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Text(
+                    text = "Persistent index discovered on this device",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             record.lastViewedTimestampUs?.let { timestampUs ->
                 Text(
                     text = "Resume at ${formatDurationUs(timestampUs)}",
@@ -188,10 +221,11 @@ private fun RecentVideoCard(
                 )
             }
 
-            if (record.availability != RecentVideoAvailability.Available) {
+            val warning = unavailableMessage(record)
+            if (warning != null) {
                 HorizontalDivider()
                 Text(
-                    text = unavailableMessage(record),
+                    text = warning,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
@@ -200,6 +234,14 @@ private fun RecentVideoCard(
                     text = "Access is not permanently retained and may need to be selected again later.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (record.indexStatus == RecentVideoIndexStatus.Missing) {
+                Text(
+                    text = "The previously linked persistent index is no longer present.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
 
@@ -214,15 +256,26 @@ private fun RecentVideoCard(
                     }
                 } else {
                     Button(onClick = onReselect) {
-                        Text("Reselect")
+                        Text(if (record.contentUri == null) "Locate source" else "Reselect")
                     }
                 }
-                TextButton(onClick = onRemove) {
-                    Text("Remove")
+                if (record.contentUri != null) {
+                    TextButton(onClick = onRemove) {
+                        Text(if (record.indexStatus == RecentVideoIndexStatus.Unknown) "Remove" else "Forget source")
+                    }
                 }
             }
         }
     }
+}
+
+private fun categoryLabel(category: MediaLibraryCategory): String = when (category) {
+    MediaLibraryCategory.Recent -> "Recent"
+    MediaLibraryCategory.Indexed -> "Indexed"
+    MediaLibraryCategory.InProgress -> "In progress"
+    MediaLibraryCategory.PermissionLost -> "Permission lost"
+    MediaLibraryCategory.Missing -> "Missing"
+    MediaLibraryCategory.Stale -> "Stale"
 }
 
 private fun metadataSummary(record: RecentVideoRecord): String {
@@ -232,16 +285,20 @@ private fun metadataSummary(record: RecentVideoRecord): String {
         record.codec?.takeIf(String::isNotBlank)?.let(::add)
         record.container?.takeIf(String::isNotBlank)?.let(::add)
     }
-    return pieces.joinToString(" · ").ifBlank { "Video" }
+    return pieces.joinToString(" · ").ifBlank { "Indexed video" }
 }
 
-private fun unavailableMessage(record: RecentVideoRecord): String = when (record.availability) {
-    RecentVideoAvailability.Available -> ""
+private fun unavailableMessage(record: RecentVideoRecord): String? = when (record.availability) {
+    RecentVideoAvailability.Available -> null
     RecentVideoAvailability.PermissionLost ->
         "FrameScope no longer has permission to read this video. Reselect it to restore access."
     RecentVideoAvailability.MissingDocument ->
-        "This video is no longer available at its saved location. Reselect it or remove this entry."
+        "This video is no longer available at its saved location. Reselect it or forget this source."
+    RecentVideoAvailability.SourceUnlinked ->
+        "A persistent index exists, but no source URI or Android read grant is saved. Locate the original video to reopen it."
 }
+
+private fun formatFrameCount(frameCount: Long): String = "%,d".format(frameCount.coerceAtLeast(0L))
 
 internal fun formatDurationUs(durationUs: Long): String {
     val totalSeconds = (durationUs.coerceAtLeast(0L) / 1_000_000L)

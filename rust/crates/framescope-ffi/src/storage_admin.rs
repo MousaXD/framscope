@@ -1,11 +1,14 @@
 use framescope_cache::{
-    FrameScopeStorageStats, StorageAdmin, StorageAdminError, StorageClearReport, StorageClearScope,
+    FrameIndexCatalog, FrameIndexCatalogError, FrameIndexLifecycle, FrameScopeStorageStats,
+    PersistentFrameIndexDescriptor, StorageAdmin, StorageAdminError, StorageClearReport,
+    StorageClearScope,
 };
 use jni::JNIEnv;
 use jni::objects::{JClass, JString};
-use jni::sys::{jint, jstring};
+use jni::sys::{jint, jlong, jstring};
 use serde::Serialize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::Path;
 use std::ptr;
 
 use crate::{
@@ -50,6 +53,44 @@ enum StorageResponse {
         storage: FrameScopeStorageStats,
         #[serde(skip_serializing_if = "Option::is_none")]
         cleared: Option<StorageClearDetails>,
+    },
+    Error {
+        engine: &'static str,
+        code: &'static str,
+        message: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum IndexCatalogResponse {
+    Ok {
+        engine: &'static str,
+        indexes: Vec<PersistentFrameIndexDescriptor>,
+    },
+    Error {
+        engine: &'static str,
+        code: &'static str,
+        message: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct SessionIndexBinding {
+    source_key: String,
+    stream_index: u32,
+    relative_path: String,
+    status: &'static str,
+    indexed_frames: u64,
+    frame_count: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum SessionIndexBindingResponse {
+    Ok {
+        engine: &'static str,
+        binding: SessionIndexBinding,
     },
     Error {
         engine: &'static str,
@@ -128,6 +169,103 @@ fn stats_response(cache_root: &str) -> String {
         Err(InvalidCacheRoot) => invalid_cache_root_response(),
     };
     serialize_response(response)
+}
+
+fn index_catalog_response(cache_root: &str) -> String {
+    let response = if validate_cache_root(cache_root).is_err() {
+        IndexCatalogResponse::Error {
+            engine: ENGINE_VERSION,
+            code: "invalid_cache_root",
+            message: "FrameScope cache root is invalid".into(),
+        }
+    } else {
+        match FrameIndexCatalog::new(cache_root).entries() {
+            Ok(indexes) => IndexCatalogResponse::Ok {
+                engine: ENGINE_VERSION,
+                indexes,
+            },
+            Err(error) => {
+                let code = match &error {
+                    FrameIndexCatalogError::RootIsSymlink(_) => "unsafe_cache_root",
+                    FrameIndexCatalogError::Io { .. } => "storage_io",
+                };
+                IndexCatalogResponse::Error {
+                    engine: ENGINE_VERSION,
+                    code,
+                    message: error.to_string(),
+                }
+            }
+        }
+    };
+    serde_json::to_string(&response).unwrap_or_else(|_| {
+        format!(
+            "{{\"status\":\"error\",\"engine\":\"{ENGINE_VERSION}\",\"code\":\"bridge_error\",\"message\":\"failed to serialize frame-index catalog\"}}"
+        )
+    })
+}
+
+fn session_index_binding_response(cache_root: &str, session_id: i64) -> String {
+    let response = if validate_cache_root(cache_root).is_err() || session_id <= 0 {
+        SessionIndexBindingResponse::Error {
+            engine: ENGINE_VERSION,
+            code: "invalid_request",
+            message: "A valid cache root and positive microscope session id are required".into(),
+        }
+    } else {
+        let root = Path::new(cache_root);
+        match crate::microscope::with_extraction_context(session_id, |_fd, index| {
+            if !index.source_identity().is_reuse_safe() {
+                return Err(
+                    "the current microscope index is operation-scoped and not persistent"
+                        .to_string(),
+                );
+            }
+            let status = index.status().map_err(|error| error.to_string())?;
+            let relative_path = index
+                .path()
+                .strip_prefix(root)
+                .map_err(|_| {
+                    "microscope index path is outside the configured cache root".to_string()
+                })?
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let status_name = match status.lifecycle {
+                FrameIndexLifecycle::Complete => "indexed",
+                FrameIndexLifecycle::Building | FrameIndexLifecycle::Incomplete => "in_progress",
+                FrameIndexLifecycle::FailedRecoverable => "stale",
+            };
+            Ok::<SessionIndexBinding, String>(SessionIndexBinding {
+                source_key: index.source_identity().stable_key(),
+                stream_index: index.stream_identity().stream_index,
+                relative_path,
+                status: status_name,
+                indexed_frames: status.indexed_frames,
+                frame_count: status.frame_count,
+            })
+        }) {
+            Ok(Ok(binding)) => SessionIndexBindingResponse::Ok {
+                engine: ENGINE_VERSION,
+                binding,
+            },
+            Ok(Err(message)) => SessionIndexBindingResponse::Error {
+                engine: ENGINE_VERSION,
+                code: "non_persistent_index",
+                message,
+            },
+            Err(error) => SessionIndexBindingResponse::Error {
+                engine: ENGINE_VERSION,
+                code: error.code(),
+                message: error.message().to_string(),
+            },
+        }
+    };
+    serde_json::to_string(&response).unwrap_or_else(|_| {
+        format!(
+            "{{\"status\":\"error\",\"engine\":\"{ENGINE_VERSION}\",\"code\":\"bridge_error\",\"message\":\"failed to serialize session index binding\"}}"
+        )
+    })
 }
 
 fn with_destructive_access(operation: impl FnOnce() -> StorageResponse) -> StorageResponse {
@@ -216,6 +354,24 @@ fn panic_response() -> String {
     })
 }
 
+fn panic_catalog_response() -> String {
+    serde_json::to_string(&IndexCatalogResponse::Error {
+        engine: ENGINE_VERSION,
+        code: "bridge_error",
+        message: "native frame-index catalog aborted safely after an internal panic".into(),
+    })
+    .unwrap_or_else(|_| "{\"status\":\"error\",\"code\":\"bridge_error\"}".into())
+}
+
+fn panic_binding_response() -> String {
+    serde_json::to_string(&SessionIndexBindingResponse::Error {
+        engine: ENGINE_VERSION,
+        code: "bridge_error",
+        message: "native session index binding aborted safely after an internal panic".into(),
+    })
+    .unwrap_or_else(|_| "{\"status\":\"error\",\"code\":\"bridge_error\"}".into())
+}
+
 fn jstring_value(env: &mut JNIEnv<'_>, value: JString<'_>) -> Result<String, ()> {
     env.get_string(&value)
         .map(|value| value.into())
@@ -234,6 +390,39 @@ pub extern "system" fn Java_com_framescope_app_data_FrameScopeStorageBridge_nati
     };
     let json = catch_unwind(AssertUnwindSafe(|| stats_response(&cache_root)))
         .unwrap_or_else(|_| panic_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeIndexCatalog(
+    mut env: JNIEnv,
+    _class: JClass,
+    cache_root: JString,
+) -> jstring {
+    let cache_root = match jstring_value(&mut env, cache_root) {
+        Ok(value) => value,
+        Err(()) => return ptr::null_mut(),
+    };
+    let json = catch_unwind(AssertUnwindSafe(|| index_catalog_response(&cache_root)))
+        .unwrap_or_else(|_| panic_catalog_response());
+    to_jstring(&mut env, &json)
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeSessionIndexBinding(
+    mut env: JNIEnv,
+    _class: JClass,
+    cache_root: JString,
+    session_id: jlong,
+) -> jstring {
+    let cache_root = match jstring_value(&mut env, cache_root) {
+        Ok(value) => value,
+        Err(()) => return ptr::null_mut(),
+    };
+    let json = catch_unwind(AssertUnwindSafe(|| {
+        session_index_binding_response(&cache_root, session_id)
+    }))
+    .unwrap_or_else(|_| panic_binding_response());
     to_jstring(&mut env, &json)
 }
 
@@ -291,6 +480,14 @@ mod tests {
     fn invalid_root_fails_before_touching_storage() {
         let json = stats_response("");
         assert!(json.contains("invalid_cache_root"));
+        let catalog_json = index_catalog_response("");
+        assert!(catalog_json.contains("invalid_cache_root"));
+    }
+
+    #[test]
+    fn invalid_session_binding_request_fails_closed() {
+        let json = session_index_binding_response("/tmp/framescope-storage-ffi", 0);
+        assert!(json.contains("invalid_request"));
     }
 
     #[test]
@@ -312,6 +509,10 @@ mod tests {
     fn wave1_storage_and_live_scrub_exports_are_linked_together() {
         let _storage_stats =
             Java_com_framescope_app_data_FrameScopeStorageBridge_nativeStorageStats;
+        let _index_catalog =
+            Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeIndexCatalog;
+        let _session_binding =
+            Java_com_framescope_app_data_FrameIndexCatalogBridge_nativeSessionIndexBinding;
         let _preview_frame = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewFrame;
         let _preview_timestamp = scrub_handoff::Java_com_framescope_app_data_MicroscopePreviewBridge_nativeRenderMicroscopePreviewTimestampUs;
     }
