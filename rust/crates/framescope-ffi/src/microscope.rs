@@ -147,11 +147,7 @@ struct ExactNavigationDiagnostics {
 }
 
 impl ExactNavigationDiagnostics {
-    fn record_success(
-        &mut self,
-        presentation: &MicroscopeFramePresentation,
-        decoder_reopens: u64,
-    ) {
+    fn record_success(&mut self, presentation: &MicroscopeFramePresentation, decoder_reopens: u64) {
         let random_seek = presentation.used_keyframe_seek;
         let warm_navigation_hit =
             decoder_reopens == 0 && presentation.decoded_frames > 0 && !random_seek;
@@ -407,8 +403,8 @@ fn serialize_response(result: Result<SessionSnapshot, MicroscopeFailure>) -> Str
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
-            r#""message":"failed to serialize microscope response"}"#,
+            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
+            r#"\"message\":\"failed to serialize microscope response\"}"#,
         )
         .into()
     })
@@ -430,8 +426,8 @@ fn serialize_prepared_frame_response(
     };
     serde_json::to_string(&response).unwrap_or_else(|_| {
         concat!(
-            r#"{"status":"error","engine":"framescope-rust/unknown","code":"bridge_error","#,
-            r#""message":"failed to serialize frame preparation response"}"#,
+            r#"{\"status\":\"error\",\"engine\":\"framescope-rust/unknown\",\"code\":\"bridge_error\","#,
+            r#"\"message\":\"failed to serialize frame preparation response\"}"#,
         )
         .into()
     })
@@ -790,7 +786,7 @@ pub(crate) fn copy_prepared_frame(
         if destination.len() < pixels.len() {
             return Err(MicroscopeFailure::new(
                 "buffer_too_small",
-                "direct frame buffer is smaller than the prepared RGBA payload",
+                "Android's direct frame buffer is smaller than the prepared RGBA payload",
             ));
         }
         destination[..pixels.len()].copy_from_slice(pixels);
