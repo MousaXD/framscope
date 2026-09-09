@@ -47,10 +47,11 @@ jobs:
           text = text[:start] + body + text[end:]
 
           test_start = text.index('fn bounded_preview_miss_never_populates_full_quality_cache()')
-          test_end = text.index('        drop(index);', test_start)
-          test_body = text[test_start:test_end]
-          test_body = replace_once(test_body, '            &mut cache,\n', '', 'bounded test cache argument')
-          text = text[:test_start] + test_body + text[test_end:]
+          call_start = text.index('let preview = navigate_to_frame_bounded_preview_with_cursor(', test_start)
+          call_end = text.index('        .unwrap();', call_start)
+          call = text[call_start:call_end]
+          call = replace_once(call, '            &mut cache,\n', '', 'bounded test cache argument')
+          text = text[:call_start] + call + text[call_end:]
           target.write_text(text)
 
           ffi = Path('rust/crates/framescope-ffi/src/scrub_handoff.rs')
