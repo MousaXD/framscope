@@ -93,7 +93,10 @@ jobs:
 
       - name: Install measurement tool
         run: |
-          sudo apt-get update
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" \
+            -o Dir::Etc::sourceparts="-" \
+            -o APT::Get::List-Cleanup="0"
           sudo apt-get install --yes --no-install-recommends time
 
       - name: Set up pinned Rust host toolchain
