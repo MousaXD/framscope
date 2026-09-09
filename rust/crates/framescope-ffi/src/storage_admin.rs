@@ -1,6 +1,3 @@
-#[path = "scrub_handoff.rs"]
-mod scrub_handoff;
-
 use framescope_cache::{
     FrameScopeStorageStats, StorageAdmin, StorageAdminError, StorageClearReport, StorageClearScope,
 };
@@ -281,6 +278,7 @@ pub extern "system" fn Java_com_framescope_app_data_FrameScopeStorageBridge_nati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scrub_handoff;
     use std::sync::atomic::Ordering;
 
     #[test]

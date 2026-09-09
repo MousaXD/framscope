@@ -40,6 +40,10 @@ pub use preview_navigation::{
 pub use scrub_preview::{
     ScrubPreviewCache, ScrubPreviewCacheStats, ScrubPreviewError, downscale_scrub_preview,
 };
+pub use target_rgba_navigation::{
+    TargetRgbaNavigationCursor, TargetRgbaNavigationDecoder, navigate_to_frame_cached_target_only,
+    navigate_to_frame_cached_target_only_with_cursor,
+};
 
 const MAX_STTS_ENTRIES: u32 = 1_000_000;
 
@@ -233,6 +237,7 @@ mod microscope_presentation;
 mod navigation;
 mod preview_navigation;
 mod scrub_preview;
+mod target_rgba_navigation;
 
 use iso::{
     parse_hdlr_is_video, parse_mdhd, parse_minf_sample_count, parse_mvhd, parse_tkhd,
