@@ -773,6 +773,9 @@ mod tests {
     use super::*;
     use framescope_cache::OwnedRgbaFrame;
     use std::fs;
+    use std::sync::Mutex as TestMutex;
+
+    static SCRUB_TEST_STATE_LOCK: TestMutex<()> = TestMutex::new(());
 
     #[test]
     fn timestamp_policy_wire_values_are_stable() {
@@ -817,6 +820,7 @@ mod tests {
 
     #[test]
     fn retained_preview_session_registry_is_bounded() {
+        let _test_guard = SCRUB_TEST_STATE_LOCK.lock().unwrap();
         let mut registry = scrub_registry().lock().unwrap();
         registry.sessions.clear();
         registry.clock = 0;
@@ -828,6 +832,7 @@ mod tests {
 
     #[test]
     fn configuring_zero_budget_trims_existing_preview_state_immediately() {
+        let _test_guard = SCRUB_TEST_STATE_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!(
             "framescope-scrub-budget-test-{}",
             std::process::id()
@@ -846,6 +851,12 @@ mod tests {
             assert_eq!(state.source_cache.ram_budget_bytes(), 0);
             assert_eq!(state.preview_cache.stats().resident_frames, 0);
         }
+        configure_ram_budgets(
+            &root,
+            DEFAULT_SOURCE_CACHE_RAM_BUDGET_BYTES,
+            DEFAULT_PREVIEW_CACHE_BUDGET_BYTES,
+        )
+        .unwrap();
         forget_session(88_001);
         let _ = fs::remove_dir_all(root);
     }
