@@ -80,7 +80,7 @@ where
         });
     }
 
-    let store = GlobalSimilarityStore::new(store_root);
+    let store = GlobalSimilarityStore::new(store_root.as_ref().to_path_buf());
     let key = GlobalSimilarityStoreKey::new(source_identity.clone(), stream_identity.clone())?;
     let disposition = match store.load(&key, frame_count)? {
         GlobalSimilarityStoreLoad::Reused { descriptor_count } => {
