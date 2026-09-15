@@ -13,4 +13,4 @@ default = []
 system-ffmpeg = []
 
 [build-dependencies]
-cc = "=1.2.37"
+cc = "=1.4.5"
